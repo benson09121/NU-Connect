@@ -1,13 +1,29 @@
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const { subscribeToChannel, publishToChannel } = require('./sseController');
 
 const organizationsModel = require('../models/organizationsModel');
-const { get } = require('http');
 
 async function getOrganizations(req, res) {
+    const { sessionId } = req.query;
   try {
         const getOrganizations = await organizationsModel.getOrganizations(req.user.user_id);
+        const getUserByEmail = await organizationsModel.getUserByEmail(req.user.email);
+        if (sessionId) {
+             const userRole = getOrganizations[0]?.role_in_org;
+              if (userRole === 'Student') {
+               getOrganizations.forEach(org => {
+                subscribeToChannel(sessionId,  `organization-${org.organization_id}`);
+            });
+            } else if (userRole === 'Adviser'){
+                subscribeToChannel(sessionId, `organization-${org.organization_id}`);
+            } else if (userRole === 'Program Chair'){
+                subscribeToChannel(sessionId, `organization-program-${getUserByEmail[0].organization_id}`);
+            } else if (userRole === 'SDAO') {
+            subscribeToChannel(sessionId, 'organizations-all');
+            }
+        }
          res.json(getOrganizations);
      } catch (error) {
          res.status(500).json({
@@ -205,8 +221,12 @@ async function getOrganizationLogo(req, res) {
 }
 
 async function getOrganizationApplications(req, res) {
+    const { sessionId } = req.query;
     try {
         const applications = await organizationsModel.getOrganizationApplications();
+        if( sessionId ) {
+        subscribeToChannel(sessionId, 'organization-applications');
+        }
         res.json(applications);
     } catch (error) {
         res.status(500).json({
@@ -279,7 +299,7 @@ async function unarchiveOrganization(req, res) {
         }
         // Lookup user_id by email (optimized)
         const user = await organizationsModel.getUserByEmail(req.user.email);
-        if (!user || !user.user_id) {
+        if (!user || !user.user_id) {   
             return res.status(404).json({ message: 'User not found.' });
         }
         await organizationsModel.unarchiveOrganization(organization_id, user.user_id);

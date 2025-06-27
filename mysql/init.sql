@@ -3047,7 +3047,7 @@ BEGIN
     WHERE u.user_id = p_user_id;
     
     -- Handle different roles
-    IF v_user_role = 'Student' THEN
+    IF v_user_role = 'Student' THEN 
         -- For Students: Get their organizations with membership status
         SELECT 
             o.organization_id,
@@ -3058,7 +3058,8 @@ BEGIN
             p.name AS program_name,
             o.created_at,
             MAX(om.joined_at) AS last_joined_at,
-            IF(MAX(om.joined_at) IS NOT NULL, 'Active', 'Not Member') AS membership_status
+            IF(MAX(om.joined_at) IS NOT NULL, 'Active', 'Not Member') AS membership_status,
+            'Student' AS role_in_org
         FROM tbl_organization o
         LEFT JOIN tbl_program p ON o.base_program_id = p.program_id
         LEFT JOIN tbl_organization_members om 
