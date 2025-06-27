@@ -1,6 +1,7 @@
 const requirementModel = require('../models/requirementModel');
 const path = require('path');
 const fs = require('fs');
+const { subscribeToChannel, publishToChannel } = require('./sseController');
 
 async function addRequirement(req, res) {
     // Reference: eventsController.js addCertificate
@@ -196,10 +197,11 @@ async function getActiveApplicationPeriodSimple(req, res) {
 }
 
 async function getActiveApplicationPeriod(req, res) {
+    const { sessionId } = req.query;
     try {
         const activePeriod = await requirementModel.getActiveApplicationPeriod();
-        if (activePeriod.length === 0) {
-            return res.status(404).json({ message: 'No active application period found' });
+        if(sessionId){
+            subscribeToChannel(sessionId, "application-periods");
         }
         res.json(activePeriod);
     } catch (error) {
