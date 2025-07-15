@@ -1,20 +1,6 @@
 const pool = require('../../config/db');
 
 
-
-async function getOrganizations(user_id) {
-    const connection = await pool.getConnection();
-    try {
-        const [rows] = await connection.query('CALL GetOrganizationsWeb(?);',[user_id]);
-        return rows[0];
-    } catch (error) {
-        console.error('Error fetching organizations:', error);
-        throw error;
-    } finally {
-        connection.release();
-    }
-}
-
 async function createOrganizationApplication(organizations, executives, requirements, user_id) {
     const connection = await pool.getConnection();
     try {
@@ -344,12 +330,12 @@ async function archiveExecutiveMember({
     }
 }
 
-async function getOrganizationCommittees(organization_id, cycle_number) {
+async function getOrganizationCommittees(org_name_with_space) {
     const connection = await pool.getConnection();
     try {
         const [rows] = await connection.query(
-            'CALL GetOrganizationCommittees(?, ?);',
-            [organization_id, cycle_number]
+            'CALL GetOrganizationCommittees(?);',
+            [org_name_with_space]
         );
         return rows[0];
     } catch (error) {
@@ -361,7 +347,7 @@ async function getOrganizationCommittees(organization_id, cycle_number) {
 }
 
 async function createCommittee({
-    organization_id,
+    orgName,
     cycle_number,
     committee_name,
     description,
@@ -370,17 +356,15 @@ async function createCommittee({
     const connection = await pool.getConnection();
     try {
         const [rows] = await connection.query(
-            `CALL CreateCommittee(?, ?, ?, ?, ?)`,
+            `CALL CreateCommittee( ?, ?, ?, ?)`,
             [
-                organization_id,
-                cycle_number,
+                orgName,
                 committee_name,
                 description,
                 action_by_email
             ]
         );
-        // The procedure returns the new committee_id as a result set
-        return rows[0][0]; // { committee_id: ... }
+        return rows[0];
     } catch (error) {
         throw error;
     } finally {
@@ -449,11 +433,10 @@ async function archiveCommittee({
     }
 }
 
-async function getAllCommitteeMembers() {
+async function getAllCommitteeMembers(org_name) {
     const connection = await pool.getConnection();
     try {
-        console.log('[getAllCommitteeMembers] SQL CALL: CALL GetAllCommitteeMembers()');
-        const [rows] = await connection.query('CALL GetAllCommitteeMembers()');
+        const [rows] = await connection.query('CALL GetAllCommitteeMembers(?)',[org_name]);
         return rows[0];
     } catch (error) {
         console.error('[getAllCommitteeMembers] SQL/Error:', error.sqlMessage || error.message, error);
@@ -533,12 +516,12 @@ async function archiveCommitteeMember({
     }
 }
 
-async function getPendingOrganizationMembers(organization_id, cycle_number) {
+async function getPendingOrganizationMembers(org_name) {
     const connection = await pool.getConnection();
     try {
         const [rows] = await connection.query(
-            'CALL GetPendingOrganizationMembers(?, ?);',
-            [organization_id, cycle_number]
+            'CALL GetPendingOrganizationMembers(?);',
+            [org_name]
         );
         return rows[0];
     } catch (error) {
@@ -581,26 +564,20 @@ async function rejectMembershipApplication(application_id, reviewer_email, remar
 }
 
 async function addOrganizationMember({
-    organization_id,
-    cycle_number,
+    orgName,
     email,
     status,
-    executive_role_id = null,
     action_by_email,
-    program_name = null
 }) {
     const connection = await pool.getConnection();
     try {
         const [rows] = await connection.query(
-            'CALL AddOrganizationMember(?, ?, ?, ?, ?, ?, ?);',
+            'CALL AddOrganizationMember(?, ?, ?, ?);',
             [
-                organization_id,
-                cycle_number,
+                orgName,
                 email,
                 status,
-                executive_role_id,
                 action_by_email,
-                program_name
             ]
         );
         return rows[0];
@@ -647,9 +624,102 @@ async function archiveOrganizationMember({ member_id, archived_by_email }) {
         connection.release();
     }
 }
+
+async function GetApprovalTimeline(org_name) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query(
+            'CALL GetApprovalTimeline(?);',
+            [org_name]
+        );
+        return rows[0];
+    } catch (error) {
+        console.error('Error fetching approval timeline:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+async function getUpdateApplication(application_id){
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetUpdateApplication(?);', [application_id]);
+        return rows[0];
+    } catch (error) {
+        console.error('Error fetching update application:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function getOrganizationByRole(user_role){
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetOrganizationByRole(?);', [user_role]);
+        return rows[0];
+    } catch (error) {
+        console.error('Error fetching organization by role:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function getOrganizationByProgram(program_id){
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetOrganizationByProgram(?);', [program_id]);
+        return rows[0];
+    } catch (error) {
+        console.error('Error fetching organization by program:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function getOrganizationByName(org_name){
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetOrganizationByName(?);', [org_name]);
+        return rows[0];
+    } catch (error) {
+        console.error('Error fetching organization by name:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function getOrganizationMembers(org_name) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetOrganizationMembers(?);', [org_name]);
+        return rows[0];
+    } catch (error) {
+        console.error('Error fetching organization members:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function getOrganizationOfficers(org_name){
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetOrganizationOfficers(?);', [org_name]);
+        return rows[0];
+    } catch (error) {
+        console.error('Error fetching organization officers:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
       
 module.exports = {
-    getOrganizations,
     createOrganizationApplication,
     getSpecificApplication,
     approveApplication,
@@ -683,5 +753,12 @@ module.exports = {
     addOrganizationMember,
     editOrganizationMember,
     archiveOrganizationMember,
+    GetApprovalTimeline,
+    getUpdateApplication,
+    getOrganizationByRole,
+    getOrganizationByProgram,
+    getOrganizationByName,
+    getOrganizationOfficers,
+    getOrganizationMembers
 
 };
