@@ -8,6 +8,7 @@ router.get('/organizations-by-status', middleware.validateAzureJWT, middleware.h
 router.post('/organizations', middleware.validateAzureJWT, organizationsController.createOrganizationApplication);
 router.get('/organizations', middleware.validateAzureJWT, organizationsController.getOrganizations);
 router.get('/organization-details', middleware.validateAzureJWT, organizationsController.getOrganizationDetails);
+router.get('/organizations_officer', middleware.validateAzureJWT, organizationsController.getOrganizationOfficers);
 router.get('/organization-dashboard', middleware.validateAzureJWT, organizationsController.getOrganizationDashboardStats);
 router.get(
     '/organization-event-applications',
@@ -21,6 +22,7 @@ router.get(
 );
 
 router.get('/getSpecificApplication', middleware.validateAzureJWT, organizationsController.getSpecificApplication);
+router.get('/getSpecificApplication_details', middleware.validateAzureJWT, organizationsController.getSpecificApplicationDetails);
 router.get('/org-applications', middleware.validateAzureJWT, organizationsController.getOrganizationApplications);
 router.post('/approve-application', middleware.validateAzureJWT, organizationsController.approveApplication);
 router.post('/reject-application', middleware.validateAzureJWT, organizationsController.rejectApplication);
@@ -30,6 +32,7 @@ router.get('/check-org-name', middleware.validateAzureJWT, organizationsControll
 router.post('/check-org-emails', middleware.validateAzureJWT, organizationsController.checkOrganizationEmails);
 router.post('/archive-organization', middleware.validateAzureJWT, middleware.hasPermission("ARCHIVE_ORGANIZATION"), organizationsController.archiveOrganization);
 router.post('/unarchive-organization', middleware.validateAzureJWT, middleware.hasPermission("ARCHIVE_ORGANIZATION"), organizationsController.unarchiveOrganization);
+router.get('/getApplication_Approval_Timeline', middleware.validateAzureJWT, organizationsController.GetApprovalTimeline);
 
 router.post(
     '/add-executive-member',
@@ -98,6 +101,13 @@ router.post(
     middleware.validateAzureJWT,
     middleware.hasPermission("DELETE_COMMITTEE"),
     organizationsController.archiveCommitteeMember
+);
+
+router.get(
+    '/organization-members',
+    middleware.validateAzureJWT,
+    middleware.hasPermission("VIEW_COMMITTEE"),
+    organizationsController.getOrganizationMembers
 );
 
 router.get(

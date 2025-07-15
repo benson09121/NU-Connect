@@ -34,8 +34,12 @@ async function addRequirement(req, res) {
             return res.status(500).json({ message: 'Error saving file', error: writeError.message });
         }
 
-        await requirementModel.addRequirement(requirement_name, filename, req.user.user_id);
-        res.status(201).json({ message: 'Requirement uploaded successfully'});
+        const data = await requirementModel.addRequirement(requirement_name, filename, req.user.user_id);
+        publishToChannel('application_requirements', {
+            operation: 'CREATE',
+            data: data
+        })
+        res.status(201).json({ message: 'Requirement uploaded successfully' });
     } catch (err) {
         console.log(err);
         return res.status(500).json({ message: "Internal server error" });
@@ -43,8 +47,12 @@ async function addRequirement(req, res) {
 }
 
 async function getRequirements(req, res) {
+    const { sessionId } = req.query;
     try {
         const requirements = await requirementModel.getRequirements();
+        if (sessionId) {
+            subscribeToChannel(sessionId, "application_requirements");
+        }
         res.json(requirements);
     } catch (error) {
         res.status(500).json({
@@ -54,7 +62,7 @@ async function getRequirements(req, res) {
 
 }
 async function downloadTemplate(req, res) {
-    const template_name  = req.query.template_name;
+    const template_name = req.query.template_name;
     try {
         res.setHeader('X-Accel-Redirect', `/protected-requirements/${template_name}`);
         const match = template_name.match(/requirement-(\d+)-(.+)/);
@@ -80,22 +88,25 @@ async function deleteRequirement(req, res) {
             return res.status(404).json({ message: requirement_id });
         }
 
-        const result = await requirementModel.deleteRequirement(requirement_id);
+        const data = await requirementModel.deleteRequirement(requirement_id);
+        publishToChannel('application_requirements', {
+            operation: 'DELETE',
+            data: data
+        })
 
-
-            const filename = requirement.file_path;
-            if (filename) {
-                const filePath = path.join('/app/requirements', filename);
-                try {
-                    if (fs.existsSync(filePath)) {
-                        fs.unlinkSync(filePath);
-                    }
-                } catch (fileErr) {
-
-                    console.error('Error deleting file:', fileErr);
+        const filename = requirement.file_path;
+        if (filename) {
+            const filePath = path.join('/app/requirements', filename);
+            try {
+                if (fs.existsSync(filePath)) {
+                    fs.unlinkSync(filePath);
                 }
+            } catch (fileErr) {
+
+                console.error('Error deleting file:', fileErr);
             }
-            res.status(204).json({ message: 'Requirement deleted successfully' });
+        }
+        res.status(204).json({ message: 'Requirement deleted successfully' });
     } catch (error) {
         res.status(500).json({
             error: error.message || "An error occurred while deleting the requirement.",
@@ -104,10 +115,10 @@ async function deleteRequirement(req, res) {
 }
 
 async function updateRequirement(req, res) {
-    const { requirement_name, requirement_id, template_name } = req.body;
+    const { requirement_name, id, template_name } = req.body;
     try {
         // Get the current requirement to find the old file if needed
-        const [requirement] = await requirementModel.getSpecificRequirement(requirement_id);
+        const [requirement] = await requirementModel.getSpecificRequirement(id);
         if (!requirement) {
             return res.status(404).json({ message: 'Requirement not found' });
         }
@@ -116,7 +127,11 @@ async function updateRequirement(req, res) {
 
         if (!req.files || !req.files.template) {
             // No new file uploaded, just update the name
-            await requirementModel.updateRequirement(requirement_id, requirement_name, newFileName);
+            const data = await requirementModel.updateRequirement(id, requirement_name, newFileName);
+            publishToChannel('application_requirements', {
+                operation: 'UPDATE',
+                data: data
+            })
             return res.status(200).json({ message: 'Requirement updated successfully' });
         } else {
             // New file uploaded: delete old file, save new file, update DB
@@ -144,7 +159,11 @@ async function updateRequirement(req, res) {
             }
 
             newFileName = filename;
-            await requirementModel.updateRequirement(requirement_id, requirement_name, newFileName);
+            const data = await requirementModel.updateRequirement(id, requirement_name, newFileName);
+            publishToChannel('application_requirements', {
+                operation: 'UPDATE',
+                data: data
+            })
             return res.status(200).json({ message: 'Requirement and file updated successfully' });
         }
     } catch (error) {
@@ -154,16 +173,21 @@ async function updateRequirement(req, res) {
     }
 }
 
- async function addApplicationPeriod(req, res) {
-           const { startDate, endDate, startTime, endTime } = req.body;
+async function addApplicationPeriod(req, res) {
+    const { startDate, endDate, startTime, endTime } = req.body;
     try {
- 
+
         if (!startDate || !endDate) {
             return res.status(400).json({ message: 'Missing required fields' });
         }
 
-        await requirementModel.addApplicationPeriod( startDate, endDate, startTime, endTime, req.user.user_id );
-        res.status(201).json({ message: 'Requirement period added successfully' });
+        const result = await requirementModel.addApplicationPeriod(startDate, endDate, startTime, endTime, req.user.user_id);
+        res.status(201).json({ message: result });
+        publishToChannel('application_periods', {
+            operation: 'CREATE',
+            data: result
+        });
+
     } catch (error) {
         res.status(500).json({
             error: error.message || "An error occurred while adding the requirement period.",
@@ -200,10 +224,10 @@ async function getActiveApplicationPeriod(req, res) {
     const { sessionId } = req.query;
     try {
         const activePeriod = await requirementModel.getActiveApplicationPeriod();
-        if(sessionId){
-            subscribeToChannel(sessionId, "application-periods");
+        if (sessionId) {
+            subscribeToChannel(sessionId, "application_periods");
         }
-        res.json(activePeriod);
+        res.status(200).json(activePeriod);
     } catch (error) {
         res.status(500).json({
             error: error.message || "An error occurred while fetching the active application period.",
@@ -214,7 +238,7 @@ async function getActiveApplicationPeriod(req, res) {
 async function updateApplicationPeriod(req, res) {
     const { startDate, endDate, startTime, endTime, periodId } = req.body;
     try {
-        await requirementModel.updateApplicationPeriod( startDate, endDate, startTime, endTime, periodId);
+        await requirementModel.updateApplicationPeriod(startDate, endDate, startTime, endTime, periodId);
         res.status(200).json({ message: 'Requirement period updated successfully' });
     } catch (error) {
         res.status(500).json({
@@ -230,7 +254,11 @@ async function terminateActiveApplicationPeriod(req, res) {
         if (!user) {
             return res.status(404).json({ message: 'User not found' });
         }
-        await requirementModel.terminateActiveApplicationPeriod(user.user_id);
+        const result = await requirementModel.terminateActiveApplicationPeriod(user.user_id);
+        publishToChannel('application_periods', {
+            operation: 'DELETE',
+            data: result
+        });
         res.status(200).json({ message: 'Active application period terminated successfully.' });
     } catch (error) {
         res.status(500).json({
@@ -269,7 +297,7 @@ async function addEventRequirement(req, res) {
         }
 
         await requirementModel.addEventRequirement(requirement_name, requirement_type, filename, req.user.user_id);
-        res.status(201).json({ message: 'Requirement uploaded successfully'});
+        res.status(201).json({ message: 'Requirement uploaded successfully' });
     } catch (err) {
         console.log(err);
         return res.status(500).json({ message: "Internal server error" });
@@ -277,7 +305,7 @@ async function addEventRequirement(req, res) {
 }
 
 async function getEventRequirementTemplate(req, res) {
-   const template_name  = req.query.template_name;
+    const template_name = req.query.template_name;
     try {
         res.setHeader('X-Accel-Redirect', `/protected-requirements/${template_name}`);
         const match = template_name.match(/requirement-(\d+)-(.+)/);

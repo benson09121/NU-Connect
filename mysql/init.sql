@@ -1710,7 +1710,15 @@ DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetRequirements()
 BEGIN 
 
-	SELECT * FROM tbl_application_requirement;
+	SELECT  
+    requirement_id as id,
+    requirement_name,
+    is_applicable_to,
+    file_path,
+    created_by,
+    created_at,
+    updated_at
+    FROM tbl_application_requirement;
 END $$
 DELIMITER ;
 
@@ -1721,8 +1729,20 @@ CREATE DEFINER='admin'@'%' PROCEDURE AddRequirement(IN
     p_created_by VARCHAR(200)
 )
 BEGIN 
-
+    DECLARE v_last_id INT;
 	INSERT INTO tbl_application_requirement(requirement_name, file_path, created_by) VALUES(p_requirement_name, p_file_path, p_created_by);
+    SET v_last_id = LAST_INSERT_ID();
+
+    SELECT  
+    requirement_id as id,
+    requirement_name,
+    is_applicable_to,
+    file_path,
+    created_by,
+    created_at,
+    updated_at
+    FROM tbl_application_requirement WHERE requirement_id = v_last_id;
+
 END $$
 DELIMITER ;
 
@@ -1742,6 +1762,15 @@ CREATE DEFINER='admin'@'%' PROCEDURE DeleteRequirement(
     IN p_requirement_id INT
 )
 BEGIN
+    SELECT requirement_id as id,
+    requirement_name,
+    is_applicable_to,
+    file_path,
+    created_by,
+    created_at,
+    updated_at 
+    FROM tbl_application_requirement WHERE requirement_id = p_requirement_id;
+
     DELETE FROM tbl_application_requirement WHERE requirement_id = p_requirement_id;
 END $$
 
@@ -1757,33 +1786,56 @@ BEGIN
     UPDATE tbl_application_requirement 
     SET requirement_name = p_requirement_name, file_path = p_file_path
     WHERE requirement_id = p_requirement_id;
+
+    SELECT
+    requirement_id as id,
+    requirement_name,
+    is_applicable_to,
+    file_path,
+    created_by,
+    created_at,
+    updated_at
+    FROM tbl_application_requirement WHERE requirement_id = p_requirement_id;
 END $$
 DELIMITER ;
 
 DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE AddApplicationPeriod(IN
-	p_start_date DATE,
-    p_end_date DATE,
-    p_start_time TIME,
-    p_end_time TIME,
-    p_created_by VARCHAR(200)
+
+CREATE DEFINER=`admin`@`%` PROCEDURE AddApplicationPeriod(
+    IN p_start_date DATE,
+    IN p_end_date DATE,
+    IN p_start_time TIME,
+    IN p_end_time TIME,
+    IN p_created_by VARCHAR(200)
 )
 BEGIN
-	INSERT INTO tbl_application_period
-    (
-    start_date, 
-    end_date, 
-    start_time, 
-    end_time,
-    created_by)
-    VALUES
-    (p_start_date, 
-    p_end_date, 
-    p_start_time, 
-    p_end_time,
-    p_created_by
+    DECLARE v_period_id INT;
+
+    INSERT INTO tbl_application_period (
+        start_date, 
+        end_date, 
+        start_time, 
+        end_time,
+        created_by
+    ) VALUES (
+        p_start_date, 
+        p_end_date, 
+        p_start_time, 
+        p_end_time,
+        p_created_by
     );
+
+    SET v_period_id = LAST_INSERT_ID();
+
+    SELECT
+        period_id as id,
+        start_date,
+        end_date,
+        start_time,
+        end_time
+    FROM tbl_application_period WHERE period_id = v_period_id;
 END $$
+
 DELIMITER ;
 
 DELIMITER $$
@@ -1796,15 +1848,13 @@ BEGIN
   SET currentDate = CURDATE();
   SET currentTime = CURTIME();
 
-  SELECT *
+  SELECT period_id as id,
+         start_date,
+         end_date,
+         start_time,
+         end_time
   FROM tbl_application_period
   WHERE is_active = 1
-    AND currentDate BETWEEN start_date AND end_date
-    AND (
-      (currentDate > start_date AND currentDate < end_date) OR
-      (currentDate = start_date AND currentTime >= start_time) OR
-      (currentDate = end_date AND currentTime <= end_time)
-    )
   ORDER BY created_at DESC
   LIMIT 1;
 END $$
@@ -1827,6 +1877,14 @@ BEGIN
         start_time = p_start_time,
         end_time = p_end_time
     WHERE period_id = p_period_id;
+
+    SELECT  
+        period_id as id,
+        start_date,
+        end_date,
+        start_time,
+        end_time
+    FROM tbl_application_period WHERE period_id = p_period_id;
 
 END $$
 DELIMITER ;
@@ -2464,10 +2522,6 @@ BEGIN
 
     -- Main Query: Single JSON Output
     SELECT JSON_OBJECT(
-        'metadata', JSON_OBJECT(
-            'retrieved_at', NOW(),
-            'requested_by', p_user_id
-        ),
         'organization', (
             SELECT JSON_OBJECT(
                 'id', o.organization_id,
@@ -2541,31 +2595,52 @@ BEGIN
             JOIN tbl_executive_rank erk ON er.rank_id = erk.rank_id
             JOIN tbl_user u ON om.user_id = u.user_id
             WHERE om.organization_id = v_organization_id
-        ),
-        'approval_timeline', (
-            SELECT JSON_ARRAYAGG(
-                JSON_OBJECT(
-                    'approval_id', ap.approval_id,
-                    'step_number', ap.step,
-                    'required_role', r.role_name,
-                    'status', ap.status,
-                    'processed_by', COALESCE(u.email, 'pending'),
-                    'processed_by_name', CONCAT(u.f_name, ' ', u.l_name),
-                    'processed_by_user_id', u.user_id,
-                    'comments', ap.comment,
-                    'last_update', ap.timestamp
-                )
-            )
+        )
+    ) AS result;
+END$$
+DELIMITER ;
+
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetApprovalTimeline(
+    IN p_organization_name VARCHAR(100)
+)
+BEGIN
+DECLARE v_organization_id INT;
+
+    -- Security First: Validate User Access
+    SELECT o.organization_id
+    INTO v_organization_id
+    FROM tbl_organization o
+    JOIN tbl_application a ON o.organization_id = a.organization_id
+    WHERE o.name = p_organization_name
+    LIMIT 1;
+
+    -- Error Handling: No Access or Not Found
+    IF v_organization_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' 
+        SET MESSAGE_TEXT = 'Organization not found or access denied';
+    END IF;
+
+            SELECT 
+                ap.approval_id as id,
+                ap.step,
+                r.role_name,
+                ap.status,
+                u.email,
+                u.f_name,
+                u.l_name,
+                u.user_id,
+                ap.comment,
+                ap.timestamp
             FROM tbl_approval_process ap
             JOIN tbl_role r 
                 ON ap.approval_role_id = r.role_id
             LEFT JOIN tbl_user u 
                 ON ap.approver_id = u.user_id
             WHERE ap.organization_id = v_organization_id
-            ORDER BY ap.step
-        )
-    ) AS result;
-END$$
+            ORDER BY ap.step;
+END $$
 DELIMITER ;
 
 DELIMITER $$
@@ -2604,6 +2679,24 @@ BEGIN
         SET status = 'Approved'
         WHERE organization_id = p_organization_id;
     END IF;
+    
+    SELECT 
+                ap.approval_id as id,
+                ap.step,
+                r.role_name,
+                ap.status,
+                u.email,
+                u.f_name,
+                u.l_name,
+                u.user_id,
+                ap.comment,
+                ap.timestamp
+            FROM tbl_approval_process ap
+            JOIN tbl_role r 
+                ON ap.approval_role_id = r.role_id
+            LEFT JOIN tbl_user u 
+                ON ap.approver_id = u.user_id
+            WHERE ap.approval_id = p_approval_id;
 END$$
 DELIMITER ;
 
@@ -2635,9 +2728,63 @@ BEGIN
     UPDATE tbl_organization
     SET status = 'Rejected'
     WHERE organization_id = p_organization_id;
-
     COMMIT;
+
+    SELECT 
+                ap.approval_id as id,
+                ap.step,
+                r.role_name,
+                ap.status,
+                u.email,
+                u.f_name,
+                u.l_name,
+                u.user_id,
+                ap.comment,
+                ap.timestamp
+            FROM tbl_approval_process ap
+            JOIN tbl_role r 
+                ON ap.approval_role_id = r.role_id
+            LEFT JOIN tbl_user u 
+                ON ap.approver_id = u.user_id
+            WHERE ap.approval_id = p_approval_id;
+
+
 END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetUpdateApplication(
+    IN p_application_id INT
+)
+BEGIN
+    SELECT 
+        org.organization_id,
+        org.name AS organization_name,
+        org.logo AS organization_logo,
+        org.status AS organization_status,
+        org.category,
+        org.base_program_id,
+        p.name AS program_name,
+        org.membership_fee_type,
+        org.membership_fee_amount,
+        org.is_recruiting,
+        org.is_open_to_all_courses,
+        org.created_at AS organization_created,
+        app.application_id as id,
+        app.cycle_number,
+        app.application_type,
+        app.period_id,
+        app.applicant_user_id,
+        app.status AS application_status,
+        app.created_at AS application_created,
+        app.updated_at AS application_updated
+    FROM tbl_organization org
+    INNER JOIN tbl_application app 
+        ON org.organization_id = app.organization_id
+    LEFT JOIN tbl_program p
+        ON org.base_program_id = p.program_id
+    WHERE app.status = 'Approved' AND app.application_id = p_application_id;
+END $$
 DELIMITER ;
 
 -- Get past events
@@ -2824,7 +2971,7 @@ BEGIN
         org.is_recruiting,
         org.is_open_to_all_courses,
         org.created_at AS organization_created,
-        app.application_id,
+        app.application_id as id,
         app.cycle_number,
         app.application_type,
         app.period_id,
@@ -3036,89 +3183,62 @@ END $$
 DELIMITER ;
 
 DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationsWeb(IN p_user_id VARCHAR(200))
+CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationByRole(
+    IN p_role VARCHAR(100)
+)
 BEGIN
-    DECLARE v_user_role VARCHAR(100);
-    
-    -- Get user's role
-    SELECT r.role_name INTO v_user_role
-    FROM tbl_user u
-    JOIN tbl_role r ON u.role_id = r.role_id
-    WHERE u.user_id = p_user_id;
-    
-    -- Handle different roles
-    IF v_user_role = 'Student' THEN 
-        -- For Students: Get their organizations with membership status
-        SELECT 
-            o.organization_id,
+     SELECT 
+            o.organization_id as id,
             o.name AS organization_name,
             o.logo AS organization_logo,
             o.status AS organization_status,
             o.category,
             p.name AS program_name,
-            o.created_at,
-            MAX(om.joined_at) AS last_joined_at,
-            IF(MAX(om.joined_at) IS NOT NULL, 'Active', 'Not Member') AS membership_status,
-            'Student' AS role_in_org
-        FROM tbl_organization o
-        LEFT JOIN tbl_program p ON o.base_program_id = p.program_id
-        LEFT JOIN tbl_organization_members om 
-            ON o.organization_id = om.organization_id 
-            AND om.user_id = p_user_id
-        WHERE o.status = 'Approved'
-        GROUP BY o.organization_id
-        ORDER BY o.created_at DESC;
-        
-    ELSEIF v_user_role = 'Adviser' THEN
-        -- For Advisers: Get organizations they advise
-        SELECT 
-            o.organization_id,
-            o.name AS organization_name,
-            o.logo AS organization_logo,
-            o.status AS organization_status,
-            o.category,
-            p.name AS program_name,
-            o.created_at,
-            'Adviser' AS role_in_org
-        FROM tbl_organization o
-        LEFT JOIN tbl_program p ON o.base_program_id = p.program_id
-        WHERE o.adviser_id = p_user_id
-        ORDER BY o.created_at DESC;
-        
-    ELSEIF v_user_role = 'Program Chair' THEN
-        -- For Program Chairs: Get organizations in their program
-        SELECT 
-            o.organization_id,
-            o.name AS organization_name,
-            o.logo AS organization_logo,
-            o.status AS organization_status,
-            o.category,
-            p.name AS program_name,
-            o.created_at,
-            'Program Chair' AS role_in_org
-        FROM tbl_organization o
-        JOIN tbl_program p ON o.base_program_id = p.program_id
-        JOIN tbl_user u ON u.program_id = p.program_id
-        WHERE u.user_id = p_user_id 
-          AND o.status = 'Approved'
-        ORDER BY o.created_at DESC;
-        
-    ELSE
-        -- For all other roles: Get all approved organizations
-        SELECT 
-            o.organization_id,
-            o.name AS organization_name,
-            o.logo AS organization_logo,
-            o.status AS organization_status,
-            o.category,
-            p.name AS program_name,
-            o.created_at,
-            'Viewer' AS role_in_org
+            o.created_at
         FROM tbl_organization o
         LEFT JOIN tbl_program p ON o.base_program_id = p.program_id
         WHERE o.status = 'Approved'
         ORDER BY o.created_at DESC;
-    END IF;
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationByName(
+    IN p_organization_name VARCHAR(100)
+)
+BEGIN
+    SELECT 
+        o.organization_id AS id,
+        o.name AS organization_name,
+        o.logo AS organization_logo,
+        o.status AS organization_status,
+        o.category,
+        p.name AS program_name,
+        o.created_at
+    FROM tbl_organization o
+    LEFT JOIN tbl_program p ON o.base_program_id = p.program_id
+    WHERE o.name = p_organization_name
+      AND o.status = 'Approved';
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationByProgram(
+    IN p_program_id INT
+)
+BEGIN
+    SELECT 
+        o.organization_id AS id,
+        o.name AS organization_name,
+        o.logo AS organization_logo,
+        o.status AS organization_status,
+        o.category,
+        p.name AS program_name,
+        o.created_at
+    FROM tbl_organization o
+    LEFT JOIN tbl_program p ON o.base_program_id = p.program_id
+    WHERE p.program_id = p_program_id
+      AND o.status = 'Approved';
 END $$
 DELIMITER ;
 
@@ -3208,32 +3328,6 @@ BEGIN
                 'email', adv.email
             )
         ),
-        'members', (
-            SELECT JSON_ARRAYAGG(JSON_OBJECT(
-                'member_id', om.member_id,
-                'first_name', u.f_name,
-                'last_name', u.l_name,
-                'email', u.email,
-                'joined_at', om.joined_at
-            ))
-            FROM tbl_organization_members om
-            JOIN tbl_user u ON om.user_id = u.user_id
-            WHERE om.organization_id = @org_id
-                AND om.cycle_number = @current_cycle
-                -- Only include Active members
-                AND om.status = 'Active'
-                -- Exclude Executive members
-                AND om.member_type != 'Executive'
-                -- Exclude Committee members
-                AND NOT EXISTS (
-                    SELECT 1
-                    FROM tbl_committee_members cm
-                    JOIN tbl_committee c ON cm.committee_id = c.committee_id
-                    WHERE c.organization_id = @org_id
-                        AND c.cycle_number = @current_cycle
-                        AND cm.user_id = om.user_id
-                )
-        ),
         'executive_members', (
             SELECT JSON_ARRAYAGG(JSON_OBJECT(
                 'first_name', u.f_name,
@@ -3283,7 +3377,68 @@ END$$
 DELIMITER ;
 
 DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationMembers(IN p_org_name VARCHAR(100))
+BEGIN
+    SET @org_id = (SELECT organization_id FROM tbl_organization WHERE name = p_org_name);
+    SET @current_cycle = (
+        SELECT MAX(cycle_number)
+        FROM tbl_renewal_cycle
+        WHERE organization_id = @org_id
+    );
+            SELECT 
+                om.member_id as id,
+                u.f_name as first_name,
+                u.l_name as last_name,
+                u.email,
+                om.joined_at
+            FROM tbl_organization_members om
+            JOIN tbl_user u ON om.user_id = u.user_id
+            WHERE om.organization_id = @org_id
+                AND om.cycle_number = @current_cycle
+                -- Only include Active members
+                AND om.status = 'Active'
+                -- Exclude Executive members
+                AND om.member_type != 'Executive'
+                -- Exclude Committee members
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM tbl_committee_members cm
+                    JOIN tbl_committee c ON cm.committee_id = c.committee_id
+                    WHERE c.organization_id = @org_id
+                        AND c.cycle_number = @current_cycle
+                        AND cm.user_id = om.user_id
+                );
+END $$
+DELIMITER ;
 
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationOfficers(IN p_org_name VARCHAR(100))
+BEGIN
+    -- Get organization ID and current cycle
+    SET @org_id = (SELECT organization_id FROM tbl_organization WHERE name = p_org_name);
+    SET @current_cycle = (
+        SELECT MAX(cycle_number)
+        FROM tbl_renewal_cycle
+        WHERE organization_id = @org_id
+    );
+            SELECT 
+            u.user_id id,
+            u.f_name AS first_name,
+            u.l_name AS last_name,
+            u.email,
+            er.role_title,
+            p.name AS program_name
+            FROM tbl_organization_members om
+            JOIN tbl_user u ON om.user_id = u.user_id
+            JOIN tbl_executive_role er ON om.executive_role_id = er.executive_role_id
+            LEFT JOIN tbl_program p ON u.program_id = p.program_id
+            WHERE om.organization_id = @org_id
+                AND om.cycle_number = @current_cycle
+                AND om.member_type = 'Executive';
+END$$
+DELIMITER ;
+
+DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationQuestion(
     IN p_org_id INT
 )
@@ -4224,6 +4379,14 @@ BEGIN
     DECLARE v_affected_rows INT DEFAULT 0;
 
     -- Terminate all currently active periods
+
+    SELECT period_id as id, 
+    start_date,
+    end_date,
+    start_time,
+    end_time
+    FROM tbl_application_period WHERE is_active = 1;
+
     UPDATE tbl_application_period
     SET is_active = 0
     WHERE is_active = 1;
@@ -5264,52 +5427,10 @@ BEGIN
 END$$
 DELIMITER ;
 
-DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationCommittees(
-    IN p_organization_id INT,
-    IN p_cycle_number INT)
-BEGIN
-    -- Validate organization exists
-    IF NOT EXISTS (
-        SELECT 1 FROM tbl_organization 
-        WHERE organization_id = p_organization_id
-    ) THEN
-        SIGNAL SQLSTATE '45000' 
-        SET MESSAGE_TEXT = 'Organization not found';
-    END IF;
-
-    -- Validate cycle exists
-    IF NOT EXISTS (
-        SELECT 1 FROM tbl_renewal_cycle 
-        WHERE organization_id = p_organization_id 
-        AND cycle_number = p_cycle_number
-    ) THEN
-        SIGNAL SQLSTATE '45000' 
-        SET MESSAGE_TEXT = 'Renewal cycle not found';
-    END IF;
-
-    -- Get all committees with member counts
-    SELECT 
-        c.committee_id,
-        c.name AS committee_name,
-        c.description,
-        c.created_at,
-        COUNT(cm.user_id) AS member_count,
-        (SELECT COUNT(*) FROM tbl_committee_members 
-         WHERE committee_id = c.committee_id AND role = 'Committee Head') AS head_count
-    FROM tbl_committee c
-    LEFT JOIN tbl_committee_members cm ON c.committee_id = cm.committee_id
-    WHERE c.organization_id = p_organization_id
-    AND c.cycle_number = p_cycle_number
-    GROUP BY c.committee_id, c.name, c.description, c.created_at
-    ORDER BY c.name;
-END$$
-DELIMITER ;
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE CreateCommittee(
-    IN p_organization_id INT,
-    IN p_cycle_number INT,
+    IN p_org_name VARCHAR(100),
     IN p_committee_name VARCHAR(100),
     IN p_description TEXT,
     IN p_action_by_email VARCHAR(100)
@@ -5317,37 +5438,31 @@ CREATE DEFINER='admin'@'%' PROCEDURE CreateCommittee(
 BEGIN
     DECLARE v_action_by_user_id VARCHAR(200);
     DECLARE v_organization_exists INT;
-    DECLARE v_cycle_exists INT;
     DECLARE v_committee_exists INT;
     DECLARE v_new_committee_id INT;
 
+
+    SET @org_id = (SELECT organization_id FROM tbl_organization WHERE name = p_org_name);
+    SET @current_cycle = (
+        SELECT MAX(cycle_number)
+        FROM tbl_renewal_cycle
+        WHERE organization_id = @org_id
+    );
     -- Validate organization exists and is active
     SELECT COUNT(*) INTO v_organization_exists 
     FROM tbl_organization 
-    WHERE organization_id = p_organization_id 
+    WHERE organization_id = @org_id
     AND status IN ('Approved', 'Renewal');
     
     IF v_organization_exists = 0 THEN
         SIGNAL SQLSTATE '45000' 
         SET MESSAGE_TEXT = 'Organization not found or not active';
     END IF;
-
-    -- Validate renewal cycle exists
-    SELECT COUNT(*) INTO v_cycle_exists 
-    FROM tbl_renewal_cycle 
-    WHERE organization_id = p_organization_id 
-    AND cycle_number = p_cycle_number;
     
-    IF v_cycle_exists = 0 THEN
-        SIGNAL SQLSTATE '45000' 
-        SET MESSAGE_TEXT = 'Renewal cycle not found';
-    END IF;
-
-    -- Check if committee already exists for this org/cycle
     SELECT COUNT(*) INTO v_committee_exists
     FROM tbl_committee
-    WHERE organization_id = p_organization_id
-    AND cycle_number = p_cycle_number
+    WHERE organization_id = @org_id
+    AND cycle_number = @current_cycle
     AND name = p_committee_name;
     
     IF v_committee_exists > 0 THEN
@@ -5355,7 +5470,6 @@ BEGIN
         SET MESSAGE_TEXT = 'Committee with this name already exists';
     END IF;
 
-    -- Get user_id of the action performer
     SELECT user_id INTO v_action_by_user_id 
     FROM tbl_user 
     WHERE email = p_action_by_email 
@@ -5366,19 +5480,16 @@ BEGIN
         SET MESSAGE_TEXT = 'Action performer not found';
     END IF;
 
-    -- Create the committee
     INSERT INTO tbl_committee (
         organization_id,
         cycle_number,
         name,
-        description,
-        created_at
+        description
     ) VALUES (
-        p_organization_id,
-        p_cycle_number,
+        @org_id,
+        @current_cycle,
         p_committee_name,
-        p_description,
-        CURRENT_TIMESTAMP
+        p_description
     );
     
     SET v_new_committee_id = LAST_INSERT_ID();
@@ -5395,8 +5506,8 @@ BEGIN
         CONCAT('Created committee: ', p_committee_name),
         'committee_creation',
         JSON_OBJECT(
-            'organization_id', p_organization_id,
-            'cycle_number', p_cycle_number,
+            'organization_id', @org_id,
+            'cycle_number', @current_cycle,
             'committee_id', v_new_committee_id,
             'committee_name', p_committee_name
         ),
@@ -5404,7 +5515,14 @@ BEGIN
     );
     
     -- Return the new committee ID
-    SELECT v_new_committee_id AS committee_id;
+    SELECT
+        c.committee_id as id,
+        c.name AS committee_name,
+        c.description,
+        c.created_at
+    FROM tbl_committee c
+    WHERE committee_id = v_new_committee_id;
+
 END$$
 DELIMITER ;
 
@@ -5639,11 +5757,45 @@ END$$
 DELIMITER ;
 
 DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE GetAllCommitteeMembers()
+CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationCommittees(
+    IN p_org_name VARCHAR(100))
 BEGIN
-    -- Return all committees with their members
+    
+    SET @org_id = (SELECT organization_id FROM tbl_organization WHERE name = p_org_name);
+    SET @current_cycle = (
+        SELECT MAX(cycle_number)
+        FROM tbl_renewal_cycle
+        WHERE organization_id = @org_id
+    );
+
     SELECT 
-        c.committee_id,
+        c.committee_id as id,
+        c.name AS committee_name,
+        c.description,
+        c.created_at
+    FROM tbl_committee c
+    LEFT JOIN tbl_committee_members cm ON c.committee_id = cm.committee_id
+    WHERE c.organization_id = @org_id
+    AND c.cycle_number = @current_cycle
+    GROUP BY c.committee_id, c.name, c.description, c.created_at
+    ORDER BY c.name;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetAllCommitteeMembers(
+    IN p_org_name VARCHAR(100)
+)
+BEGIN
+    SET @org_id = (SELECT organization_id FROM tbl_organization WHERE name = p_org_name);
+    SET @current_cycle = (
+        SELECT MAX(cycle_number)
+        FROM tbl_renewal_cycle
+        WHERE organization_id = @org_id
+    );
+
+    SELECT 
+        c.committee_id as id,
         c.name AS committee_name,
         c.description,
         c.organization_id,
@@ -5659,15 +5811,15 @@ BEGIN
         p.name AS program_name,
         u.status AS user_status
     FROM tbl_committee c
-    LEFT JOIN tbl_committee_members cm ON c.committee_id = cm.committee_id
-    LEFT JOIN tbl_user u ON cm.user_id = u.user_id
+    JOIN tbl_committee_members cm ON c.committee_id = cm.committee_id
+    JOIN tbl_user u ON cm.user_id = u.user_id
     LEFT JOIN tbl_program p ON u.program_id = p.program_id
+    WHERE c.organization_id = @org_id
+        AND c.cycle_number = @current_cycle
     ORDER BY 
         c.organization_id,
         c.cycle_number,
-        c.name,
-        CASE WHEN cm.role = 'Committee Head' THEN 0 ELSE 1 END,
-        u.l_name, u.f_name;
+        c.name;
 END$$
 DELIMITER ;
 
@@ -6076,17 +6228,22 @@ DELIMITER ;
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetPendingOrganizationMembers(
-    IN p_organization_id INT,
-    IN p_cycle_number INT
+    IN p_org_name VARCHAR(100)
 )
 BEGIN
+
+    SET @org_id = (SELECT organization_id FROM tbl_organization WHERE name = p_org_name);
+    SET @current_cycle = (
+        SELECT MAX(cycle_number)
+        FROM tbl_renewal_cycle
+        WHERE organization_id = @org_id
+    );
     SELECT
         om.member_id,
         om.organization_id,
         om.cycle_number,
         om.user_id,
-        u.f_name,
-        u.l_name,
+        CONCAT(u.f_name, ' ', u.l_name) AS name,
         u.email,
         u.profile_picture,
         om.member_type,
@@ -6116,8 +6273,8 @@ BEGIN
         ON tm.transaction_id = t.transaction_id
         AND t.user_id = om.user_id
         AND t.transaction_type = 'Membership Fee'
-    WHERE om.organization_id = p_organization_id
-      AND om.cycle_number = p_cycle_number
+    WHERE om.organization_id = @org_id
+      AND om.cycle_number = @current_cycle
       AND om.status = 'Pending'
     ORDER BY om.joined_at DESC;
 END$$
@@ -6253,11 +6410,8 @@ DELIMITER ;
 DELIMITER $$
 
 CREATE DEFINER='admin'@'%' PROCEDURE AddOrganizationMember(
-    IN p_organization_id INT,
-    IN p_cycle_number INT,
+    IN p_org_name VARCHAR(100),
     IN p_email VARCHAR(100),
-    IN p_status VARCHAR(20),
-    IN p_executive_role_id INT,
     IN p_action_by_email VARCHAR(100),
     IN p_program_name VARCHAR(50)
 )
@@ -6274,6 +6428,12 @@ BEGIN
     WHERE email = p_action_by_email
     LIMIT 1;
 
+    SET @org_id = (SELECT organization_id FROM tbl_organization WHERE name = p_org_name);
+    SET @current_cycle = (
+        SELECT MAX(cycle_number)
+        FROM tbl_renewal_cycle
+        WHERE organization_id = @org_id
+    );
     IF v_action_by_user_id IS NULL THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'Action performer not found';
@@ -6283,40 +6443,10 @@ BEGIN
     SELECT user_id INTO v_user_id FROM tbl_user WHERE email = p_email LIMIT 1;
     SET v_user_exists = IFNULL(v_user_id IS NOT NULL, 0);
 
-    -- If program_name is provided, look up its id
-    IF p_program_name IS NOT NULL AND p_program_name != '' THEN
-        SELECT program_id INTO v_program_id
-        FROM tbl_program
-        WHERE name = p_program_name
-        LIMIT 1;
-
-        IF v_program_id IS NULL THEN
-            SIGNAL SQLSTATE '45000'
-            SET MESSAGE_TEXT = 'Program name not found';
-        END IF;
-    END IF;
-
-    -- If user does not exist, create a pending user with generated user_id
-    IF v_user_exists = 0 THEN
-        SET v_user_id = CONCAT('usr-', UUID_SHORT());
-        INSERT INTO tbl_user (
-            user_id,
-            email,
-            role_id,
-            program_id,
-            status
-        ) VALUES (
-            v_user_id,
-            p_email,
-            (SELECT role_id FROM tbl_role WHERE LOWER(role_name) = 'student' LIMIT 1),
-            v_program_id,
-            'Pending'
-        );
-    END IF;
 
     -- Check if renewal cycle exists
     IF NOT EXISTS (
-        SELECT 1 FROM tbl_renewal_cycle WHERE organization_id = p_organization_id AND cycle_number = p_cycle_number
+        SELECT 1 FROM tbl_renewal_cycle WHERE organization_id = @org_id AND cycle_number = @current_cycle
     ) THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'Renewal cycle does not exist';
@@ -6325,20 +6455,13 @@ BEGIN
     -- Prevent duplicate membership
     SELECT COUNT(*) INTO v_exists
     FROM tbl_organization_members
-    WHERE organization_id = p_organization_id
-      AND cycle_number = p_cycle_number
+    WHERE organization_id = @org_id 
+      AND cycle_number = @current_cycle
       AND user_id = v_user_id;
 
     IF v_exists > 0 THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'User is already a member of this organization and cycle';
-    END IF;
-
-    -- If program_name is provided, update user's program_id
-    IF v_program_id IS NOT NULL THEN
-        UPDATE tbl_user
-        SET program_id = v_program_id
-        WHERE user_id = v_user_id;
     END IF;
 
     -- Insert member (default member_type is 'Member')
@@ -6350,11 +6473,10 @@ BEGIN
         status,
         executive_role_id
     ) VALUES (
-        p_organization_id,
-        p_cycle_number,
+        @org_id,
+        @current_cycle,
         v_user_id,
         'Member',
-        p_status,
         p_executive_role_id
     );
 
@@ -6565,6 +6687,8 @@ END$$
 DELIMITER ;
 
 
+
+
 -- INDEXES
 
 CREATE INDEX idx_org_members_user ON tbl_organization_members(user_id);
@@ -6685,8 +6809,8 @@ INSERT INTO tbl_user (user_id, f_name, l_name, email, program_id, role_id) VALUE
 ('LBmQ-WzvRhVmb55Ucidrc14aL39ae9Ei-7xfbOrPeEA', ' Samantha Joy', 'Madrunio', 'madruniosm@students.nu-dasma.edu.ph', '1', '2'),
 ('NqBfAZcMXHZF5g9ztwkQ1ykPgtNmZwYRcIPKKK40ROc', ' Alister Dylan Emmanuel', 'Realo', 'realoam@students.nu-dasma.edu.ph', '1', '1'),
 ('ochavillorc@students.nu-dasma.edu.ph', 'Red ', 'Ochavillo', 'ochavillorc@students.nu-dasma.edu.ph', '1', '1'),
-('RMLBbriD61MHubCApBsi97huM1BAa1gPBCz3yNxl30k', ' Kaye', 'Burias', 'buriaskb@students.nu-dasma.edu.ph', '1', '3'),
-('CyTLmjW4Edhvk2WvWFDNuWLYjW0WJETBPbY2HWk-ZqE', ' Loraine', 'Miraballes', 'miraballesl@students.nu-dasma.edu.ph', NULL, '1');
+('CyTLmjW4Edhvk2WvWFDNuWLYjW0WJETBPbY2HWk-ZqE', ' Loraine', 'Miraballes', 'miraballesl@students.nu-dasma.edu.ph', NULL, '1'),
+('CY4e1GmCXysMRn8VYudhqDy7CDJ8xVidGO1v8RnRj1E', ' Shamiah M', 'Mendoza', 'mendozasm@students.nu-dasma.edu.ph', '1', '3');
 
 
 INSERT INTO tbl_application_requirement (requirement_name, is_applicable_to, file_path, created_by) VALUES

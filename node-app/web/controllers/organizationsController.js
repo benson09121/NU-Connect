@@ -2,29 +2,35 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const { subscribeToChannel, publishToChannel } = require('./sseController');
-
 const organizationsModel = require('../models/organizationsModel');
 
 async function getOrganizations(req, res) {
-    const { sessionId } = req.query;
+    const { sessionId, user_role, org_name } = req.query;
+    const program_id = req.query.program_id || null;
+
   try {
-        const getOrganizations = await organizationsModel.getOrganizations(req.user.user_id);
-        const getUserByEmail = await organizationsModel.getUserByEmail(req.user.email);
-        if (sessionId) {
-             const userRole = getOrganizations[0]?.role_in_org;
-              if (userRole === 'Student') {
-               getOrganizations.forEach(org => {
-                subscribeToChannel(sessionId,  `organization-${org.organization_id}`);
-            });
-            } else if (userRole === 'Adviser'){
-                subscribeToChannel(sessionId, `organization-${org.organization_id}`);
-            } else if (userRole === 'Program Chair'){
-                subscribeToChannel(sessionId, `organization-program-${getUserByEmail[0].organization_id}`);
-            } else if (userRole === 'SDAO') {
-            subscribeToChannel(sessionId, 'organizations-all');
+      if(sessionId) {
+            if(user_role === 'SDAO'){
+               const organizations = await organizationsModel.getOrganizationByRole(user_role);
+               subscribeToChannel(sessionId, `organizations_${user_role}`);
+               res.json(organizations);
+               console.log(organizations);
+            } else if (user_role ==='Program Chair'){
+                const organizations = await organizationsModel.getOrganizationByProgram(program_id);
+                subscribeToChannel(sessionId, `organizations_${user_role}_${program_id}`);
+                res.json(organizations);
+            } else if (user_role === 'Adviser'){
+               const organizations = await organizationsModel.getOrganizationByName(org_name);
+                subscribeToChannel(sessionId, `organizations_${user_role}_${org_name}`);
+                res.json(organizations);
+            } else if (user_role === 'Student'){
+                const organizations = await organizationsModel.getOrganizationIdByName(user_role, org_name);
+                subscribeToChannel(sessionId, `organizations_${user_role}_${org_name}`);
+                res.json(organizations);
             }
-        }
-         res.json(getOrganizations);
+        // const getOrganizations = await organizationsModel.getOrganizations(req.user.user_id);
+        //  res.json(getOrganizations);
+      }
      } catch (error) {
          res.status(500).json({
              error: error.message || "An error occurred while fetching the active application period.",
@@ -46,6 +52,39 @@ async function getOrganizationDetails(req, res) {
         });
     }
 }
+
+async function getOrganizationOfficers(req,res){
+    try{
+        const { org_name, sessionId } = req.query;
+        const officers = await organizationsModel.getOrganizationOfficers(org_name);
+        if( sessionId ) {
+            subscribeToChannel(sessionId, `organization_officers_${org_name}`);
+        }
+        res.status(200).json(officers);
+    } catch (error) {
+        res.status(500).json({
+            error: error.message || "An error occurred while fetching the organization officers.",
+        });
+
+    }
+}
+
+async function getOrganizationMembers(req, res) {
+    try{
+        const { org_name, sessionId } = req.query;
+        const members = await organizationsModel.getOrganizationMembers(org_name);
+        if( sessionId ) {
+            subscribeToChannel(sessionId, `organizations_members_${org_name}`);
+        }
+        res.status(200).json(members);
+    }
+    catch (error) {
+        res.status(500).json({
+            error: error.message || "An error occurred while fetching the organization members.",
+        });
+    }
+}
+
 
 async function createOrganizationApplication(req, res) {
     try {
@@ -145,8 +184,7 @@ async function getSpecificApplication(req, res) {
     try {
         const { org_name } = req.query;
 
-        const formattedOrgName = org_name.replace(/-/g, ' ');
-        const application = await organizationsModel.getSpecificApplication(req.user.user_id, formattedOrgName);
+        const application = await organizationsModel.getSpecificApplication(req.user.user_id, org_name);
         if (application.length === 0) {
             return res.status(404).json({ message: 'No application found' });
         }
@@ -158,11 +196,27 @@ async function getSpecificApplication(req, res) {
     }
 }
 
+async function getSpecificApplicationDetails(req, res) {
+    const { sessionId, org_name} = req.query;
+}
+
 async function approveApplication(req, res) {
     try {
-        const { approval_id, comments, organization_id, application_id } = req.body;
+        const { approval_id, comments, organization_id, application_id, appName } = req.body;
         // Do NOT send any response before this line!
         const result = await organizationsModel.approveApplication(approval_id, comments, organization_id, application_id);
+        publishToChannel(`application_aprroval_timeline_${appName}`,{
+            operation: 'UPDATE',
+            data : result
+        })
+        if(result[0].step === 5){
+            const update_data = await organizationsModel.getUpdateApplication(application_id);
+            console.log(update_data);
+            publishToChannel('organization-applications', {
+                operation: 'UPDATE',
+                data: update_data
+            });
+        }
         res.json({ message: 'Application approved successfully' });
     } catch (error) {   
         res.status(500).json({
@@ -173,9 +227,13 @@ async function approveApplication(req, res) {
 
 async function rejectApplication(req, res) {
     try {
-        const { approval_id, comments, organization_id, application_id } = req.body;
+        const { approval_id, comments, organization_id, application_id, appName } = req.body;
         const result = await organizationsModel.rejectApplication(approval_id, comments, organization_id, application_id);
-        res.json({ message: 'Application rejected successfully' });
+        publishToChannel(`application_aprroval_timeline_${appName}`,{
+            operation: 'UPDATE',
+            data : result
+        })
+        res.json(result);
     } catch (error) {
         res.status(500).json({
             error: error.message || "An error occurred while rejecting the application.",
@@ -501,11 +559,11 @@ async function archiveExecutiveMember(req, res) {
 
 async function getOrganizationCommittees(req, res) {
     try {
-        const { organization_id, cycle_number } = req.query;
-        if (!organization_id || !cycle_number) {
-            return res.status(400).json({ error: "organization_id and cycle_number are required." });
+        const { org_name, sessionId } = req.query;
+        const committees = await organizationsModel.getOrganizationCommittees(org_name);
+        if( sessionId ) {
+        subscribeToChannel(sessionId,`organization_committees_${org_name}`);
         }
-        const committees = await organizationsModel.getOrganizationCommittees(organization_id, cycle_number);
         res.json(committees);
     } catch (error) {
         res.status(500).json({
@@ -517,25 +575,28 @@ async function getOrganizationCommittees(req, res) {
 async function createCommittee(req, res) {
     try {
         const {
-            organization_id,
-            cycle_number,
             committee_name,
-            description
+            description,
+            orgName,
         } = req.body;
 
         const action_by_email = req.user.email;
 
         const result = await organizationsModel.createCommittee({
-            organization_id,
-            cycle_number,
+            orgName,
             committee_name,
             description,
-            action_by_email
+            action_by_email,
+            
+        });
+
+        publishToChannel(`organization_committees_${orgName}`, {
+            operation: 'CREATE',
+            data: result
         });
 
         res.status(201).json({
             message: 'Committee created successfully.',
-            committee_id: result.committee_id
         });
     } catch (error) {
         const sqlMessage = error.sqlMessage || error.message || 'An error occurred while creating the committee.';
@@ -608,13 +669,16 @@ async function archiveCommittee(req, res) {
 }
 
 async function getAllCommitteeMembers(req, res) {
-    try {
-        const members = await organizationsModel.getAllCommitteeMembers();
-        res.json(members);
+       try {
+        const { org_name, sessionId } = req.query;
+        const committees = await organizationsModel.getAllCommitteeMembers(org_name);
+        if (sessionId) {
+            subscribeToChannel(sessionId, `organizations_committeesMembers_${org_name}`);
+        }
+        res.status(200).json(committees);
     } catch (error) {
-        console.error('[GetAllCommitteeMembers] SQL/Error:', error.sqlMessage || error.message, error);
-        res.status(400).json({
-            error: error.sqlMessage || error.message || "An error occurred while fetching all committee members."
+        res.status(500).json({
+            error: error.message || "An error occurred while fetching the organization committees.",
         });
     }
 }
@@ -692,11 +756,11 @@ async function archiveCommitteeMember(req, res) {
 
 async function getPendingOrganizationMembers(req, res) {
     try {
-        const { organization_id, cycle_number } = req.query;
-        if (!organization_id || !cycle_number) {
-            return res.status(400).json({ error: "organization_id and cycle_number are required." });
+        const {sessionId, org_name } = req.query;
+        const members = await organizationsModel.getPendingOrganizationMembers(org_name);
+        if( sessionId ) {
+         subscribeToChannel(sessionId, `organizations_members_pending_${org_name}`);
         }
-        const members = await organizationsModel.getPendingOrganizationMembers(organization_id, cycle_number);
         res.json(members);
     } catch (error) {
         res.status(500).json({
@@ -706,12 +770,13 @@ async function getPendingOrganizationMembers(req, res) {
 }
 async function approveMembershipApplication(req, res) {
     try {
-        const { application_id, remarks } = req.body;
+        const { application_id, remarks, org_name } = req.body;
         const reviewer_email = req.user.email;
         if (!application_id) {
             return res.status(400).json({ error: "application_id is required." });
         }
-        await organizationsModel.approveMembershipApplication(application_id, reviewer_email, remarks || null);
+        await organizationsModel.approveMembershipApplication(application_id, reviewer_email, remarks || null, org_name);
+        
         res.json({ message: 'Membership application approved successfully.' });
     } catch (error) {
         res.status(500).json({
@@ -739,25 +804,17 @@ async function rejectMembershipApplication(req, res) {
 async function addOrganizationMember(req, res) {
     try {
         const {
-            organization_id,
-            cycle_number,
+            orgName,
             email,
             status,
-            executive_role_id,
             program_name
         } = req.body;
         const action_by_email = req.user.email;
 
-        if (!organization_id || !cycle_number || !email || !status) {
-            return res.status(400).json({ error: "organization_id, cycle_number, email, and status are required." });
-        }
-
         await organizationsModel.addOrganizationMember({
-            organization_id,
-            cycle_number,
+            orgName,
             email,
             status,
-            executive_role_id,
             action_by_email,
             program_name
         });
@@ -805,6 +862,22 @@ async function archiveOrganizationMember(req, res) {
     }
 }
 
+async function GetApprovalTimeline(req, res){
+    try{
+        const { sessionId, org_name} = req.query;
+        const result = await organizationsModel.GetApprovalTimeline(org_name);
+        if (sessionId) {
+            subscribeToChannel(sessionId, `application_aprroval_timeline_${org_name}`);
+        }
+        res.status(201).json(result);
+    } catch (error) {
+        res.status(500).json({
+            error: error.message || "An error occurred while fetching the approval timeline.",
+        });
+    }
+}
+
+
 
 module.exports = {
     getOrganizations,
@@ -841,4 +914,8 @@ module.exports = {
     addOrganizationMember,
     editOrganizationMember,
     archiveOrganizationMember,
+    getSpecificApplicationDetails,
+    GetApprovalTimeline,
+    getOrganizationOfficers,
+    getOrganizationMembers,
 };
