@@ -188,7 +188,7 @@ async function getEventRequirementSubmissionsByOrganization(organization_id) {
     }
 }
 
-async function getOrganizationIdByName(org_name) {
+async function getOrganizationIdByName(user_role, org_name) {
     const connection = await pool.getConnection();
     try {
         const [rows] = await connection.query(
@@ -566,8 +566,8 @@ async function rejectMembershipApplication(application_id, reviewer_email, remar
 async function addOrganizationMember({
     orgName,
     email,
-    status,
     action_by_email,
+    program_name
 }) {
     const connection = await pool.getConnection();
     try {
@@ -576,8 +576,8 @@ async function addOrganizationMember({
             [
                 orgName,
                 email,
-                status,
                 action_by_email,
+                program_name
             ]
         );
         return rows[0];
@@ -718,6 +718,60 @@ async function getOrganizationOfficers(org_name){
     }
 }
 
+async function getOrganizationUsers(org_name) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query(
+            'CALL GetOrganizationUsers(?);',
+            [org_name]
+        );
+        return rows[0];
+    } catch (error) {
+        console.error('Error fetching organization users:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function getAllUsers() {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetAllUsers();');
+        return rows[0];
+    } catch (error) {
+        console.error('Error fetching all users:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function getProgram() {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetProgram();');
+        return rows[0];
+    } catch (error) {
+        console.error('Error fetching program:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function getApplication(application_id){
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetApplication(?);',[application_id]);
+        return rows[0];
+    } catch (error) {
+        console.error('Error fetching program:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
       
 module.exports = {
     createOrganizationApplication,
@@ -759,6 +813,9 @@ module.exports = {
     getOrganizationByProgram,
     getOrganizationByName,
     getOrganizationOfficers,
-    getOrganizationMembers
-
+    getOrganizationMembers,
+    getOrganizationUsers,
+    getAllUsers,
+    getProgram,
+    getApplication
 };

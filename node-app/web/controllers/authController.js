@@ -1,6 +1,8 @@
 const msal = require('@azure/msal-node');
 const axios = require('axios');
 const userModel = require('../models/userModel');
+const { sendInvitationEmail } = require('../../services/emailService');
+
 require('dotenv').config();
 
 
@@ -24,34 +26,26 @@ async function register(req, res) {
 
     const cca = new msal.ConfidentialClientApplication(msalConfig);
 
-    try {
-        const token = await getAccessToken(cca);
-        console.log(token);
-        await axios.post("https://graph.microsoft.com/v1.0/invitations",
-            {
-                "invitedUserEmailAddress": email,
-                "inviteRedirectUrl": process.env.AZURE_REDIRECT_URL,
-                "sendInvitationMessage": true,
-            },
-            {
-                headers: {
-                    Authorization: `Bearer ${token}`,
-                    "Content-Type": "application/json",
-                },
-            }
-        ).then((response) => {
-            console.log(response);
-        });
+     try {
+    const token = await getAccessToken(cca);
+    const response = await axios.post(
+      "https://graph.microsoft.com/v1.0/invitations",
+      {
+        invitedUserEmailAddress: email,
+        inviteRedirectUrl: process.env.AZURE_REDIRECT_URL,
+        sendInvitationMessage: false // Disable Microsoft email
+      },
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
 
+    const redemptionUrl = response.data.inviteRedeemUrl;
+    console.log(redemptionUrl);
+    await sendInvitationEmail(email, redemptionUrl); // Your custom email function
 
-        res.status(200).json({
-            message: "Invitation sent successfully"
-        });
-    } catch (error) {
-        res.status(500).json({
-            error: error.message || "An error occurred while sending the invitation.",
-        });
-    }
+    res.status(200).json({ message: "Custom invitation sent" });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 }
 
 async function login(req, res) {

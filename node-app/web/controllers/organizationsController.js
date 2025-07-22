@@ -24,7 +24,7 @@ async function getOrganizations(req, res) {
                 subscribeToChannel(sessionId, `organizations_${user_role}_${org_name}`);
                 res.json(organizations);
             } else if (user_role === 'Student'){
-                const organizations = await organizationsModel.getOrganizationIdByName(user_role, org_name);
+                const organizations = await organizationsModel.getOrganizationByName(org_name);
                 subscribeToChannel(sessionId, `organizations_${user_role}_${org_name}`);
                 res.json(organizations);
             }
@@ -165,7 +165,11 @@ async function createOrganizationApplication(req, res) {
                 );
             }
         });
-
+        const result = organizationsModel.getApplication(dbResult[0].application_id);
+        publishToChannel('organization-applications', {
+            operation: 'CREATE',
+            data: result
+        });
         res.status(201).json({
             message: 'Organization application submitted successfully',
             data: {
@@ -806,19 +810,22 @@ async function addOrganizationMember(req, res) {
         const {
             orgName,
             email,
-            status,
             program_name
         } = req.body;
         const action_by_email = req.user.email;
 
-        await organizationsModel.addOrganizationMember({
+        const result = await organizationsModel.addOrganizationMember({
             orgName,
             email,
-            status,
             action_by_email,
             program_name
         });
-
+        publishToChannel(`organizations_members_${orgName}`, {
+            operation: 'CREATE',
+            data: result
+        });
+        console.log('Add Organization Member Result:', result);
+        
         res.status(201).json({ message: 'Organization member added successfully.' });
     } catch (error) {
         res.status(400).json({
@@ -877,6 +884,18 @@ async function GetApprovalTimeline(req, res){
     }
 }
 
+async function getProgram(req, res) {
+    try {
+
+        const program = await organizationsModel.getProgram();
+        res.json(program);
+    } catch (error) {
+        res.status(500).json({
+            error: error.message || "An error occurred while fetching the program.",
+        });
+    }
+}
+
 
 
 module.exports = {
@@ -918,4 +937,5 @@ module.exports = {
     GetApprovalTimeline,
     getOrganizationOfficers,
     getOrganizationMembers,
+    getProgram,
 };
