@@ -28,8 +28,8 @@ CREATE TABLE tbl_approval_role (
     FOREIGN KEY (role_id) REFERENCES tbl_role(role_id) ON DELETE CASCADE
 );
 
-CREATE TABLE tbl_department(
-    department_id INT AUTO_INCREMENT PRIMARY KEY,
+CREATE TABLE tbl_college(
+    college_id INT AUTO_INCREMENT PRIMARY KEY,
     name VARCHAR(100) UNIQUE NOT NULL,
     abbreviation VARCHAR(20) UNIQUE NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -37,10 +37,10 @@ CREATE TABLE tbl_department(
 
 CREATE TABLE tbl_program(
     program_id INT PRIMARY KEY AUTO_INCREMENT,
-    department_id INT NOT NULL,
+    college_id INT NOT NULL,
     name VARCHAR(50) UNIQUE,
     abbreviation VARCHAR(20) UNIQUE,
-    FOREIGN KEY (department_id) REFERENCES tbl_department(department_id) ON DELETE CASCADE
+    FOREIGN KEY (college_id) REFERENCES tbl_college(college_id) ON DELETE CASCADE
 );
 
 CREATE TABLE tbl_user(
@@ -6848,22 +6848,22 @@ CREATE DEFINER='admin'@'%' PROCEDURE GetProgram()
 BEGIN
      SELECT JSON_ARRAYAGG(
         JSON_OBJECT(
-            'department_name', d.name,
+            'college_name', d.name,
             'abbreviation', d.abbreviation,
             'program', (
                 SELECT JSON_ARRAYAGG(
                     JSON_OBJECT(
                         'program_id', p.program_id,
-                        'program_namee', p.name,
+                        'program_name', p.name,
                         'abbreviation', p.abbreviation
                     )
                 )
                 FROM tbl_program p
-                WHERE d.department_id = p.department_id
+                WHERE d.college_id = p.college_id
             )
         )
     ) AS ProgramsList
-    FROM tbl_department d;
+    FROM tbl_college d;
 END $$
 DELIMITER ;
 
@@ -6978,10 +6978,10 @@ VALUES
 (6,4);
 
 
-INSERT INTO tbl_department (name, abbreviation) VALUES 
+INSERT INTO tbl_college (name, abbreviation) VALUES 
 ("College of Information Technology", "CIT");
 
-INSERT INTO tbl_program (department_id, name, abbreviation) VALUES 
+INSERT INTO tbl_program (college_id, name, abbreviation) VALUES 
 (1,"Bachelor of Science in Information Technology", "BSIT"),
 (1,"Bachelor of Science in Computer Science", "BSCS");
 
