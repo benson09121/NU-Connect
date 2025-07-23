@@ -6917,7 +6917,8 @@ BEGIN
         u.role_id,
         r.role_name,
         u.status,
-        u.created_at
+        u.created_at,
+        NULL AS reason
     FROM tbl_user u
     JOIN tbl_role r ON u.role_id = r.role_id
     LEFT JOIN tbl_program p ON u.program_id = p.program_id
@@ -6935,11 +6936,78 @@ BEGIN
         a.role_id,
         r.role_name,
         a.status,
-        a.created_at
+        a.created_at,
+        a.reason,
+        a.application_id
     FROM tbl_user_application a
     JOIN tbl_role r ON a.role_id = r.role_id
     LEFT JOIN tbl_program p ON a.program_id = p.program_id
     WHERE a.status = 'Pending';
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE ApproveUserApplication(
+    IN p_application_id INT
+)
+BEGIN
+    DECLARE v_email VARCHAR(100);
+    DECLARE v_role_id INT;
+    DECLARE v_program_id INT;
+    DECLARE v_reason TEXT;
+    DECLARE v_exists INT DEFAULT 0;
+    DECLARE v_user_id VARCHAR(200);
+
+    -- Get application details
+    SELECT email, role_id, program_id, reason
+    INTO v_email, v_role_id, v_program_id, v_reason
+    FROM tbl_user_application
+    WHERE application_id = p_application_id AND status = 'Pending';
+
+    IF v_email IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Application not found or not pending';
+    END IF;
+
+    -- Mark application as approved
+    UPDATE tbl_user_application
+    SET status = 'Approved'
+    WHERE application_id = p_application_id;
+
+    -- Check if user already exists
+    SELECT COUNT(*) INTO v_exists FROM tbl_user WHERE email = v_email;
+
+    IF v_exists = 0 THEN
+        -- Create user with status 'Active'
+        SET v_user_id = CONCAT('pending-', UUID_SHORT());
+        INSERT INTO tbl_user (
+            user_id,
+            email,
+            role_id,
+            program_id,
+            status
+        ) VALUES (
+            v_user_id,
+            v_email,
+            v_role_id,
+            v_program_id,
+            'Pending'
+        );
+    END IF;
+
+    -- Return the approved application details
+    SELECT * FROM tbl_user_application WHERE application_id = p_application_id;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE RejectUserApplication(
+    IN p_application_id INT
+)
+BEGIN
+    -- Mark application as rejected
+    UPDATE tbl_user_application
+    SET status = 'Rejected'
+    WHERE application_id = p_application_id AND status = 'Pending';
 END$$
 DELIMITER ;
 
@@ -7075,7 +7143,7 @@ INSERT INTO tbl_program (college_id, name, abbreviation) VALUES
 (3,"Bachelor of Science in Computer Science with specialization in Machine Learning", "BSCS-ML");
 
 INSERT INTO tbl_user (user_id, f_name, l_name, email, program_id, role_id) VALUES
-('_ExbgMDtE-90mt0wLlA74VFYH5I1freBLw4NMY9RcBU', ' Geraldine', 'Aris', 'arisgc@students.nu-dasma.edu.ph', NULL, '5'),
+-- ('_ExbgMDtE-90mt0wLlA74VFYH5I1freBLw4NMY9RcBU', ' Geraldine', 'Aris', 'arisgc@students.nu-dasma.edu.ph', NULL, '5'),
 ('6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0', 'Benson', 'Javier', 'javierbb@students.nu-dasma.edu.ph', NULL, '4'),
 ('cyQuRJT6GaT0Y89NFQua6nMhFJF6E-SAIk_rpryVY1k', ' Carl Roehl', 'Falcon', 'falconcs@students.nu-dasma.edu.ph', NULL, '6'),
 ('dumalagim@students.nu-dasma.edu.ph', 'Iver', 'Dumalag', 'dumalagim@students.nu-dasma.edu.ph', '1', '1'),

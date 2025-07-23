@@ -134,6 +134,31 @@ async function getAccounts() {
         }
     }
 
+    async function approveUserApplication(application_id) {
+        const connection = await pool.getConnection();
+        try {
+            const [rows] = await connection.query('CALL ApproveUserApplication(?);', [application_id]);
+            // rows[0][0] contains the application details
+            return rows[0][0];
+        } finally {
+            connection.release();
+        }
+    }
+
+    async function rejectUserApplication(application_id) {
+        const connection = await pool.getConnection();
+        try {
+            // Get application before rejection for real-time update
+            const [beforeRows] = await connection.query('SELECT * FROM tbl_user_application WHERE application_id = ?', [application_id]);
+            await connection.query('CALL RejectUserApplication(?);', [application_id]);
+            // Get application after rejection
+            const [afterRows] = await connection.query('SELECT * FROM tbl_user_application WHERE application_id = ?', [application_id]);
+            return afterRows[0] || beforeRows[0]; // Return latest state
+        } finally {
+            connection.release();
+        }
+    }
+
 module.exports = {
     getAccounts,
     addAccount,
@@ -144,4 +169,6 @@ module.exports = {
     getRoles,
     addUserApplication,
     getAllPendingUsersAndApplications,
+    approveUserApplication,
+    rejectUserApplication, 
 };
