@@ -107,6 +107,33 @@ async function getAccounts() {
         }
     }
 
+    async function getAllPendingUsersAndApplications() {
+        const connection = await pool.getConnection();
+        try {
+            const [results] = await connection.query('CALL GetAllPendingUsersAndApplications();');
+            // results[0] = pending users, results[1] = pending applications
+            return {
+                users: results[0],
+                applications: results[1]
+            };
+        } finally {
+            connection.release();
+        }
+    }
+
+    async function addUserApplication(email, role, program_id, reason) {
+        const connection = await pool.getConnection();
+        try {
+            const [rows] = await connection.query(
+                'CALL AddUserApplication(?, ?, ?, ?);',
+                [email, role, program_id, reason]
+            );
+            return rows[0][0];
+        } finally {
+            connection.release();
+        }
+    }
+
 module.exports = {
     getAccounts,
     addAccount,
@@ -114,5 +141,7 @@ module.exports = {
     deleteAccount,
     unarchiveAccount,
     getPrograms,
-    getRoles
+    getRoles,
+    addUserApplication,
+    getAllPendingUsersAndApplications,
 };

@@ -125,6 +125,34 @@ async function getRoles(req, res) {
     }
 }
 
+async function getAllPendingUsersAndApplications(req, res) {
+    try {
+        const result = await accountModel.getAllPendingUsersAndApplications();
+        res.status(200).json({ success: true, data: result });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message || "An error occurred while fetching pending users and applications.",
+        });
+    }
+}
+
+async function addUserApplication(req, res) {
+    const { email, role, program_id, reason } = req.body;
+    try {
+        if (!email || !role || !program_id || !reason) {
+            return res.status(400).json({ success: false, error: "All fields are required." });
+        }
+        const application = await accountModel.addUserApplication(email, role, program_id, reason);
+        res.status(201).json({ success: true, data: application });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message || "An error occurred while submitting the application.",
+        });
+    }
+}
+
 module.exports = {
     getAccounts,
     addAccount,
@@ -132,5 +160,7 @@ module.exports = {
     deleteAccount,
     unarchiveAccount,
     getPrograms,
-    getRoles
+    getRoles,
+    addUserApplication,
+    getAllPendingUsersAndApplications,
 };
