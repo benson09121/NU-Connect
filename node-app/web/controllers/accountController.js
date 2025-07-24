@@ -1,6 +1,7 @@
 const msal = require('@azure/msal-node');
 const axios = require('axios');
 const accountModel = require('../models/accountModel');
+const emailService = require('../../services/emailService');
 const { subscribeToChannel, publishToChannel } = require('./sseController');
 const { subscribe } = require('../routes/requirements');
 
@@ -125,6 +126,114 @@ async function getRoles(req, res) {
     }
 }
 
+async function getAllPendingUsersAndApplications(req, res) {
+    try {
+        const result = await accountModel.getAllPendingUsersAndApplications();
+        res.status(200).json({ success: true, data: result });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message || "An error occurred while fetching pending users and applications.",
+        });
+    }
+}
+
+async function addUserApplication(req, res) {
+    const { email, role, program_id, reason } = req.body;
+    try {
+        if (!email || !role || !program_id || !reason) {
+            return res.status(400).json({ success: false, error: "All fields are required." });
+        }
+        const application = await accountModel.addUserApplication(email, role, program_id, reason);
+        res.status(201).json({ success: true, data: application });
+        publishToChannel('user-applications', {
+            operation: 'CREATE',
+            data: application
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message || "An error occurred while submitting the application.",
+        });
+    }
+}
+
+async function getAccessToken(cca) {
+    const response = await cca.acquireTokenByClientCredential({
+        scopes: ["https://graph.microsoft.com/.default"],
+    });
+    return response.accessToken;
+}
+
+async function approveUserApplication(req, res) {
+    const { application_id } = req.body;
+    try {
+        if (!application_id) {
+            return res.status(400).json({ success: false, error: "application_id is required." });
+        }
+        // Approve the application and get details
+        const application = await accountModel.approveUserApplication(application_id);
+
+        publishToChannel('user-applications', {
+            operation: 'UPDATE',
+            data: application
+        });
+
+        // Send Azure invitation and email (existing code)
+        if (application && application.email) {
+            const msalConfig = {
+                auth: {
+                    clientId: process.env.AZURE_CLIENT_ID,
+                    authority: `https://login.microsoftonline.com/${process.env.AZURE_TENANT_ID}`,
+                    clientSecret: process.env.AZURE_CLIENT_SECRET,
+                }
+            };
+            const cca = new msal.ConfidentialClientApplication(msalConfig);
+            const token = await getAccessToken(cca);
+            const response = await axios.post(
+                "https://graph.microsoft.com/v1.0/invitations",
+                {
+                    invitedUserEmailAddress: application.email,
+                    inviteRedirectUrl: process.env.AZURE_REDIRECT_URL,
+                    sendInvitationMessage: false
+                },
+                { headers: { Authorization: `Bearer ${token}` } }
+            );
+            const redemptionUrl = response.data.inviteRedeemUrl;
+            await emailService.sendInvitationEmail(application.email, redemptionUrl);
+        }
+
+        res.status(200).json({ success: true, data: application });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message || "An error occurred while approving the application.",
+        });
+    }
+}
+
+async function rejectUserApplication(req, res) {
+    const { application_id } = req.body;
+    try {
+        if (!application_id) {
+            return res.status(400).json({ success: false, error: "application_id is required." });
+        }
+        const application = await accountModel.rejectUserApplication(application_id);
+
+        publishToChannel('user-applications', {
+            operation: 'UPDATE',
+            data: application
+        });
+
+        res.status(200).json({ success: true, data: application });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message || "An error occurred while rejecting the application.",
+        });
+    }
+}
+
 module.exports = {
     getAccounts,
     addAccount,
@@ -132,5 +241,9 @@ module.exports = {
     deleteAccount,
     unarchiveAccount,
     getPrograms,
-    getRoles
+    getRoles,
+    addUserApplication,
+    getAllPendingUsersAndApplications,
+    approveUserApplication,
+    rejectUserApplication,
 };

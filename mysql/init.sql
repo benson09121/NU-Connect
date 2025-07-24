@@ -38,7 +38,7 @@ CREATE TABLE tbl_college(
 CREATE TABLE tbl_program(
     program_id INT PRIMARY KEY AUTO_INCREMENT,
     college_id INT NOT NULL,
-    name VARCHAR(50) UNIQUE,
+    name VARCHAR(200) UNIQUE,
     abbreviation VARCHAR(20) UNIQUE,
     FOREIGN KEY (college_id) REFERENCES tbl_college(college_id) ON DELETE CASCADE
 );
@@ -55,6 +55,18 @@ CREATE TABLE tbl_user(
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     archived_at TIMESTAMP NULL,
+    FOREIGN KEY (role_id) REFERENCES tbl_role(role_id),
+    FOREIGN KEY (program_id) REFERENCES tbl_program(program_id)
+);
+
+CREATE TABLE tbl_user_application (
+    application_id INT AUTO_INCREMENT PRIMARY KEY,
+    email VARCHAR(100) NOT NULL,
+    role_id INT NOT NULL,
+    program_id INT NOT NULL,
+    reason TEXT NOT NULL,
+    status ENUM('Pending', 'Approved', 'Rejected') DEFAULT 'Pending',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (role_id) REFERENCES tbl_role(role_id),
     FOREIGN KEY (program_id) REFERENCES tbl_program(program_id)
 );
@@ -6867,8 +6879,257 @@ BEGIN
 END $$
 DELIMITER ;
 
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE AddUserApplication(
+    IN p_email VARCHAR(100),
+    IN p_role_name VARCHAR(100),
+    IN p_program_id INT,
+    IN p_reason TEXT
+)
+BEGIN
+    DECLARE v_role_id INT;
 
+    -- Lookup role_id from role name
+    SELECT role_id INTO v_role_id FROM tbl_role WHERE role_name = p_role_name LIMIT 1;
+    IF v_role_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Invalid role specified';
+    END IF;
 
+    INSERT INTO tbl_user_application (email, role_id, program_id, reason)
+    VALUES (p_email, v_role_id, p_program_id, p_reason);
+
+    SELECT * FROM tbl_user_application WHERE application_id = LAST_INSERT_ID();
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetAllPendingUsersAndApplications()
+BEGIN
+    -- Pending registered users
+    SELECT 
+        'user' AS source,
+        u.user_id,
+        u.f_name,
+        u.l_name,
+        u.email,
+        u.program_id,
+        p.name AS program_name,
+        u.role_id,
+        r.role_name,
+        u.status,
+        u.created_at,
+        NULL AS reason
+    FROM tbl_user u
+    JOIN tbl_role r ON u.role_id = r.role_id
+    LEFT JOIN tbl_program p ON u.program_id = p.program_id
+    WHERE u.status = 'Pending';
+
+    -- Pending applications
+    SELECT 
+        'application' AS source,
+        NULL AS user_id,
+        NULL AS f_name,
+        NULL AS l_name,
+        a.email,
+        a.program_id,
+        p.name AS program_name,
+        a.role_id,
+        r.role_name,
+        a.status,
+        a.created_at,
+        a.reason,
+        a.application_id
+    FROM tbl_user_application a
+    JOIN tbl_role r ON a.role_id = r.role_id
+    LEFT JOIN tbl_program p ON a.program_id = p.program_id
+    WHERE a.status = 'Pending';
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE ApproveUserApplication(
+    IN p_application_id INT
+)
+BEGIN
+    DECLARE v_email VARCHAR(100);
+    DECLARE v_role_id INT;
+    DECLARE v_program_id INT;
+    DECLARE v_reason TEXT;
+    DECLARE v_exists INT DEFAULT 0;
+    DECLARE v_user_id VARCHAR(200);
+
+    -- Get application details
+    SELECT email, role_id, program_id, reason
+    INTO v_email, v_role_id, v_program_id, v_reason
+    FROM tbl_user_application
+    WHERE application_id = p_application_id AND status = 'Pending';
+
+    IF v_email IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Application not found or not pending';
+    END IF;
+
+    -- Mark application as approved
+    UPDATE tbl_user_application
+    SET status = 'Approved'
+    WHERE application_id = p_application_id;
+
+    -- Check if user already exists
+    SELECT COUNT(*) INTO v_exists FROM tbl_user WHERE email = v_email;
+
+    IF v_exists = 0 THEN
+        -- Create user with status 'Active'
+        SET v_user_id = CONCAT('pending-', UUID_SHORT());
+        INSERT INTO tbl_user (
+            user_id,
+            email,
+            role_id,
+            program_id,
+            status
+        ) VALUES (
+            v_user_id,
+            v_email,
+            v_role_id,
+            v_program_id,
+            'Pending'
+        );
+    END IF;
+
+    -- Return the approved application details
+    SELECT * FROM tbl_user_application WHERE application_id = p_application_id;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE RejectUserApplication(
+    IN p_application_id INT
+)
+BEGIN
+    -- Mark application as rejected
+    UPDATE tbl_user_application
+    SET status = 'Rejected'
+    WHERE application_id = p_application_id AND status = 'Pending';
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetAllColleges()
+BEGIN
+    SELECT 
+        college_id,
+        name,
+        abbreviation,
+        created_at
+    FROM tbl_college
+    ORDER BY name;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE CreateProgram(
+    IN p_college_id INT,
+    IN p_name VARCHAR(200),
+    IN p_abbreviation VARCHAR(20),
+    IN p_email VARCHAR(100)
+)
+BEGIN
+    DECLARE v_user_id VARCHAR(200);
+
+    -- Lookup user_id from email
+    SELECT user_id INTO v_user_id
+    FROM tbl_user
+    WHERE email = p_email
+    LIMIT 1;
+
+    IF v_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'User not found for provided email';
+    END IF;
+
+    INSERT INTO tbl_program (college_id, name, abbreviation)
+    VALUES (p_college_id, p_name, p_abbreviation);
+
+    INSERT INTO tbl_logs (user_id, action, type, meta_data)
+    VALUES (
+        v_user_id,
+        CONCAT('Created program: ', p_name),
+        'program',
+        JSON_OBJECT('program_id', LAST_INSERT_ID(), 'name', p_name)
+    );
+
+    SELECT * FROM tbl_program WHERE program_id = LAST_INSERT_ID();
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE UpdateProgram(
+    IN p_program_id INT,
+    IN p_college_id INT,
+    IN p_name VARCHAR(200),
+    IN p_abbreviation VARCHAR(20),
+    IN p_email VARCHAR(100)
+)
+BEGIN
+    DECLARE v_user_id VARCHAR(200);
+
+    -- Lookup user_id from email
+    SELECT user_id INTO v_user_id
+    FROM tbl_user
+    WHERE email = p_email
+    LIMIT 1;
+
+    IF v_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'User not found for provided email';
+    END IF;
+
+    UPDATE tbl_program
+    SET college_id = p_college_id,
+        name = p_name,
+        abbreviation = p_abbreviation
+    WHERE program_id = p_program_id;
+
+    INSERT INTO tbl_logs (user_id, action, type, meta_data)
+    VALUES (
+        v_user_id,
+        CONCAT('Updated program: ', p_name),
+        'program',
+        JSON_OBJECT('program_id', p_program_id, 'name', p_name)
+    );
+
+    SELECT * FROM tbl_program WHERE program_id = p_program_id;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE DeleteProgram(
+    IN p_program_id INT,
+    IN p_email VARCHAR(100)
+)
+BEGIN
+    DECLARE v_user_id VARCHAR(200);
+
+    -- Lookup user_id from email
+    SELECT user_id INTO v_user_id
+    FROM tbl_user
+    WHERE email = p_email
+    LIMIT 1;
+
+    IF v_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'User not found for provided email';
+    END IF;
+
+    DELETE FROM tbl_program WHERE program_id = p_program_id;
+
+    INSERT INTO tbl_logs (user_id, action, type, meta_data)
+    VALUES (
+        v_user_id,
+        CONCAT('Deleted program: ', p_program_id),
+        'program',
+        JSON_OBJECT('program_id', p_program_id)
+    );
+END$$
+DELIMITER ;
 
 -- INDEXES
 
@@ -6931,7 +7192,8 @@ VALUES("CREATE_EVENT"),
 ("VIEW_LOGS"),
 ("WEB_ACCESS"),
 ("MANAGE_REGISTRATION"),
-("SUBMIT_REQUIREMENTS");
+("SUBMIT_REQUIREMENTS"),
+("MANAGE_PROGRAMS");
 
 INSERT INTO tbl_role_permission (role_id, permission_id) 
 VALUES
@@ -6954,6 +7216,7 @@ VALUES
 (4,23),
 (4,24),
 (4,25),
+(4,26),
 (2,6),
 (2,9),
 (2,16),
@@ -6977,20 +7240,35 @@ VALUES
 (5,4),
 (6,4);
 
-
 INSERT INTO tbl_college (name, abbreviation) VALUES 
-("College of Information Technology", "CIT");
+("School of Arts, Sciences, and Education", "SASE"),
+("School of Business, Management, and Accountancy", "SBMA"),
+("School of Engineering, Computing and Architecture", "SECA");
 
 INSERT INTO tbl_program (college_id, name, abbreviation) VALUES 
-(1,"Bachelor of Science in Information Technology", "BSIT"),
-(1,"Bachelor of Science in Computer Science", "BSCS");
+(1,"Bachelor of Science in Physical Education", "BPEd"),
+(1,"Bachelor of Arts in Communication", "ABComm"),
+(1,"Bachelor of Science in Psychology", "BSPSY"),
+(2,"Bachelor of Science in Hospitality Management", "BSHM"),
+(2,"Bachelor of Science in Business Administration major in Human Resource Management", "BSBA-HRM"),
+(2,"Master of Management", "MM"),
+(2,"Bachelor of Science in Business Administration major in Financial Managemen", "BSBA-FinMgt"),
+(2,"Bachelor of Science in Business Administration major in Marketing Management", "BSBA-MktgMgt"),
+(2,"Bachelor of Science in Tourism Management", "BSTM"),
+(2,"Bachelor of Science in Accountancy", "BSAccountancy"),
+(2,"Bachelor of Science in Management Accounting", "BSMA"),
+(3,"Bachelor of Science in Computer Engineering", "BSCpE"),
+(3,"Bachelor of Science in Information Technology with a specialization in Mobile and Web Applications", "BSIT-MWA"),
+(3,"Bachelor of Science in Civil Engineering", "BSCE"),
+(3,"Bachelor of Science in Architecture", "BSArch"),
+(3,"Bachelor of Science in Computer Science with specialization in Machine Learning", "BSCS-ML");
 
 INSERT INTO tbl_user (user_id, f_name, l_name, email, program_id, role_id) VALUES
-('_ExbgMDtE-90mt0wLlA74VFYH5I1freBLw4NMY9RcBU', ' Geraldine', 'Aris', 'arisgc@students.nu-dasma.edu.ph', NULL, '5'),
+-- ('_ExbgMDtE-90mt0wLlA74VFYH5I1freBLw4NMY9RcBU', ' Geraldine', 'Aris', 'arisgc@students.nu-dasma.edu.ph', NULL, '5'),
 ('6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0', 'Benson', 'Javier', 'javierbb@students.nu-dasma.edu.ph', NULL, '4'),
 ('cyQuRJT6GaT0Y89NFQua6nMhFJF6E-SAIk_rpryVY1k', ' Carl Roehl', 'Falcon', 'falconcs@students.nu-dasma.edu.ph', NULL, '6'),
 ('dumalagim@students.nu-dasma.edu.ph', 'Iver', 'Dumalag', 'dumalagim@students.nu-dasma.edu.ph', '1', '1'),
-('LBmQ-WzvRhVmb55Ucidrc14aL39ae9Ei-7xfbOrPeEA', ' Samantha Joy', 'Madrunio', 'madruniosm@students.nu-dasma.edu.ph', '1', '2'),
+('LBmQ-WzvRhVmb55Ucidrc14aL39ae9Ei-7xfbOrPeEA', ' Samantha Joy', 'Madrunio', 'madruniosm@students.nu-dasma.edu.ph', '2', '2'),
 ('NqBfAZcMXHZF5g9ztwkQ1ykPgtNmZwYRcIPKKK40ROc', ' Alister Dylan Emmanuel', 'Realo', 'realoam@students.nu-dasma.edu.ph', '1', '1'),
 ('ochavillorc@students.nu-dasma.edu.ph', 'Red ', 'Ochavillo', 'ochavillorc@students.nu-dasma.edu.ph', '1', '1'),
 ('CyTLmjW4Edhvk2WvWFDNuWLYjW0WJETBPbY2HWk-ZqE', ' Loraine', 'Miraballes', 'miraballesl@students.nu-dasma.edu.ph', NULL, '1'),
