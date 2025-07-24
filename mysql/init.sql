@@ -61,7 +61,7 @@ CREATE TABLE tbl_user(
 
 CREATE TABLE tbl_user_application (
     application_id INT AUTO_INCREMENT PRIMARY KEY,
-    email VARCHAR(100) NOT NULL,
+    email VARCHAR(100) NOT NULL UNIQUE,
     role_id INT NOT NULL,
     program_id INT NOT NULL,
     reason TEXT NOT NULL,
@@ -6888,11 +6888,18 @@ CREATE DEFINER='admin'@'%' PROCEDURE AddUserApplication(
 )
 BEGIN
     DECLARE v_role_id INT;
+    DECLARE v_exists INT DEFAULT 0;
 
     -- Lookup role_id from role name
     SELECT role_id INTO v_role_id FROM tbl_role WHERE role_name = p_role_name LIMIT 1;
     IF v_role_id IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Invalid role specified';
+    END IF;
+
+    -- Check for duplicate email
+    SELECT COUNT(*) INTO v_exists FROM tbl_user_application WHERE email = p_email;
+    IF v_exists > 0 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'You already have a pending application. Please wait for approval or contact support.';
     END IF;
 
     INSERT INTO tbl_user_application (email, role_id, program_id, reason)
@@ -7264,7 +7271,7 @@ INSERT INTO tbl_program (college_id, name, abbreviation) VALUES
 (3,"Bachelor of Science in Computer Science with specialization in Machine Learning", "BSCS-ML");
 
 INSERT INTO tbl_user (user_id, f_name, l_name, email, program_id, role_id) VALUES
--- ('_ExbgMDtE-90mt0wLlA74VFYH5I1freBLw4NMY9RcBU', ' Geraldine', 'Aris', 'arisgc@students.nu-dasma.edu.ph', NULL, '5'),
+('_ExbgMDtE-90mt0wLlA74VFYH5I1freBLw4NMY9RcBU', ' Geraldine', 'Aris', 'arisgc@students.nu-dasma.edu.ph', NULL, '2'),
 ('6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0', 'Benson', 'Javier', 'javierbb@students.nu-dasma.edu.ph', NULL, '4'),
 ('cyQuRJT6GaT0Y89NFQua6nMhFJF6E-SAIk_rpryVY1k', ' Carl Roehl', 'Falcon', 'falconcs@students.nu-dasma.edu.ph', NULL, '6'),
 ('dumalagim@students.nu-dasma.edu.ph', 'Iver', 'Dumalag', 'dumalagim@students.nu-dasma.edu.ph', '1', '1'),

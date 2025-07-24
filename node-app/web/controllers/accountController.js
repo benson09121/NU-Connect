@@ -151,6 +151,12 @@ async function addUserApplication(req, res) {
             data: application
         });
     } catch (error) {
+        if (error.message && error.message.includes('You already have a pending application. Please wait for approval or contact support.')) {
+            return res.status(409).json({
+                success: false,
+                error: "An application with this email already exists."
+            });
+        }
         res.status(500).json({
             success: false,
             error: error.message || "An error occurred while submitting the application.",

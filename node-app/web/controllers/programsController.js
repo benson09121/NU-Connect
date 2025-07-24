@@ -48,6 +48,15 @@ async function deleteProgram(req, res) {
         const result = await programsModel.deleteProgram(program_id, email);
         res.status(200).json(result);
     } catch (error) {
+        // Check for MySQL foreign key constraint error
+        if (
+            error.code === 'ER_ROW_IS_REFERENCED_2' ||
+            (error.message && error.message.includes('a foreign key constraint fails'))
+        ) {
+            return res.status(400).json({
+                error: "Cannot delete this program because it is still assigned to one or more users. Please reassign or remove those users first."
+            });
+        }
         res.status(500).json({ error: error.message || "An error occurred while deleting the program." });
     }
 }
