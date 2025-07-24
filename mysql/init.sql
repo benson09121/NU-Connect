@@ -7011,6 +7011,125 @@ BEGIN
 END$$
 DELIMITER ;
 
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetAllColleges()
+BEGIN
+    SELECT 
+        college_id,
+        name,
+        abbreviation,
+        created_at
+    FROM tbl_college
+    ORDER BY name;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE CreateProgram(
+    IN p_college_id INT,
+    IN p_name VARCHAR(200),
+    IN p_abbreviation VARCHAR(20),
+    IN p_email VARCHAR(100)
+)
+BEGIN
+    DECLARE v_user_id VARCHAR(200);
+
+    -- Lookup user_id from email
+    SELECT user_id INTO v_user_id
+    FROM tbl_user
+    WHERE email = p_email
+    LIMIT 1;
+
+    IF v_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'User not found for provided email';
+    END IF;
+
+    INSERT INTO tbl_program (college_id, name, abbreviation)
+    VALUES (p_college_id, p_name, p_abbreviation);
+
+    INSERT INTO tbl_logs (user_id, action, type, meta_data)
+    VALUES (
+        v_user_id,
+        CONCAT('Created program: ', p_name),
+        'program',
+        JSON_OBJECT('program_id', LAST_INSERT_ID(), 'name', p_name)
+    );
+
+    SELECT * FROM tbl_program WHERE program_id = LAST_INSERT_ID();
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE UpdateProgram(
+    IN p_program_id INT,
+    IN p_college_id INT,
+    IN p_name VARCHAR(200),
+    IN p_abbreviation VARCHAR(20),
+    IN p_email VARCHAR(100)
+)
+BEGIN
+    DECLARE v_user_id VARCHAR(200);
+
+    -- Lookup user_id from email
+    SELECT user_id INTO v_user_id
+    FROM tbl_user
+    WHERE email = p_email
+    LIMIT 1;
+
+    IF v_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'User not found for provided email';
+    END IF;
+
+    UPDATE tbl_program
+    SET college_id = p_college_id,
+        name = p_name,
+        abbreviation = p_abbreviation
+    WHERE program_id = p_program_id;
+
+    INSERT INTO tbl_logs (user_id, action, type, meta_data)
+    VALUES (
+        v_user_id,
+        CONCAT('Updated program: ', p_name),
+        'program',
+        JSON_OBJECT('program_id', p_program_id, 'name', p_name)
+    );
+
+    SELECT * FROM tbl_program WHERE program_id = p_program_id;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE DeleteProgram(
+    IN p_program_id INT,
+    IN p_email VARCHAR(100)
+)
+BEGIN
+    DECLARE v_user_id VARCHAR(200);
+
+    -- Lookup user_id from email
+    SELECT user_id INTO v_user_id
+    FROM tbl_user
+    WHERE email = p_email
+    LIMIT 1;
+
+    IF v_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'User not found for provided email';
+    END IF;
+
+    DELETE FROM tbl_program WHERE program_id = p_program_id;
+
+    INSERT INTO tbl_logs (user_id, action, type, meta_data)
+    VALUES (
+        v_user_id,
+        CONCAT('Deleted program: ', p_program_id),
+        'program',
+        JSON_OBJECT('program_id', p_program_id)
+    );
+END$$
+DELIMITER ;
 
 -- INDEXES
 
@@ -7073,7 +7192,8 @@ VALUES("CREATE_EVENT"),
 ("VIEW_LOGS"),
 ("WEB_ACCESS"),
 ("MANAGE_REGISTRATION"),
-("SUBMIT_REQUIREMENTS");
+("SUBMIT_REQUIREMENTS"),
+("MANAGE_PROGRAMS");
 
 INSERT INTO tbl_role_permission (role_id, permission_id) 
 VALUES
@@ -7096,6 +7216,7 @@ VALUES
 (4,23),
 (4,24),
 (4,25),
+(4,26),
 (2,6),
 (2,9),
 (2,16),

@@ -146,6 +146,10 @@ async function addUserApplication(req, res) {
         }
         const application = await accountModel.addUserApplication(email, role, program_id, reason);
         res.status(201).json({ success: true, data: application });
+        publishToChannel('user-applications', {
+            operation: 'CREATE',
+            data: application
+        });
     } catch (error) {
         res.status(500).json({
             success: false,
@@ -170,7 +174,6 @@ async function approveUserApplication(req, res) {
         // Approve the application and get details
         const application = await accountModel.approveUserApplication(application_id);
 
-        // Real-time publish
         publishToChannel('user-applications', {
             operation: 'UPDATE',
             data: application
@@ -217,7 +220,6 @@ async function rejectUserApplication(req, res) {
         }
         const application = await accountModel.rejectUserApplication(application_id);
 
-        // Real-time publish
         publishToChannel('user-applications', {
             operation: 'UPDATE',
             data: application
