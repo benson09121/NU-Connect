@@ -1,4 +1,4 @@
-const userCacheModel = require('../models/UserCacheModel.js');
+const userCacheModel = require('../models/userCacheModel');
 const organizationsModel = require('../models/organizationsModel');
 
 async function getEmailSuggestions(req, res) {

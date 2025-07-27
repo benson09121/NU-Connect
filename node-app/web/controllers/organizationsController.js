@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const { subscribeToChannel, publishToChannel } = require('./sseController');
 const organizationsModel = require('../models/organizationsModel');
-const UserCacheModel = require('../models/UserCacheModel');
+const UserCacheModel = require('../models/userCacheModel');
 
 async function getOrganizations(req, res) {
     const { sessionId, user_role, org_name } = req.query;
