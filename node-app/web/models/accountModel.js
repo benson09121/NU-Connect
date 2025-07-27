@@ -107,6 +107,58 @@ async function getAccounts() {
         }
     }
 
+    async function getAllPendingUsersAndApplications() {
+        const connection = await pool.getConnection();
+        try {
+            const [results] = await connection.query('CALL GetAllPendingUsersAndApplications();');
+            // results[0] = pending users, results[1] = pending applications
+            return {
+                users: results[0],
+                applications: results[1]
+            };
+        } finally {
+            connection.release();
+        }
+    }
+
+    async function addUserApplication(email, role, program_id, reason) {
+        const connection = await pool.getConnection();
+        try {
+            const [rows] = await connection.query(
+                'CALL AddUserApplication(?, ?, ?, ?);',
+                [email, role, program_id, reason]
+            );
+            return rows[0][0];
+        } finally {
+            connection.release();
+        }
+    }
+
+    async function approveUserApplication(application_id) {
+        const connection = await pool.getConnection();
+        try {
+            const [rows] = await connection.query('CALL ApproveUserApplication(?);', [application_id]);
+            // rows[0][0] contains the application details
+            return rows[0][0];
+        } finally {
+            connection.release();
+        }
+    }
+
+    async function rejectUserApplication(application_id) {
+        const connection = await pool.getConnection();
+        try {
+            // Get application before rejection for real-time update
+            const [beforeRows] = await connection.query('SELECT * FROM tbl_user_application WHERE application_id = ?', [application_id]);
+            await connection.query('CALL RejectUserApplication(?);', [application_id]);
+            // Get application after rejection
+            const [afterRows] = await connection.query('SELECT * FROM tbl_user_application WHERE application_id = ?', [application_id]);
+            return afterRows[0] || beforeRows[0]; // Return latest state
+        } finally {
+            connection.release();
+        }
+    }
+
 module.exports = {
     getAccounts,
     addAccount,
@@ -114,5 +166,9 @@ module.exports = {
     deleteAccount,
     unarchiveAccount,
     getPrograms,
-    getRoles
+    getRoles,
+    addUserApplication,
+    getAllPendingUsersAndApplications,
+    approveUserApplication,
+    rejectUserApplication, 
 };
