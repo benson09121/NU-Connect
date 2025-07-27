@@ -380,12 +380,7 @@ async function updateCommittee({
 }) {
     const connection = await pool.getConnection();
     try {
-        console.log('[updateCommittee] SQL CALL: CALL UpdateCommittee(?, ?, ?, ?)', [
-            committee_id,
-            new_name,
-            new_description,
-            action_by_email
-        ]);
+
         const [rows] = await connection.query(
             `CALL UpdateCommittee(?, ?, ?, ?)`,
             [
@@ -395,7 +390,7 @@ async function updateCommittee({
                 action_by_email
             ]
         );
-        return rows[0][0]; // { rows_affected: ... }
+        return rows[0]; 
     } catch (error) {
         console.error('[updateCommittee] SQL/Error:', error.sqlMessage || error.message, error);
         throw error;
@@ -411,11 +406,6 @@ async function archiveCommittee({
 }) {
     const connection = await pool.getConnection();
     try {
-        console.log('[archiveCommittee] SQL CALL: CALL ArchiveCommittee(?, ?, ?)', [
-            committee_id,
-            reason,
-            archived_by_email
-        ]);
         const [rows] = await connection.query(
             `CALL ArchiveCommittee(?, ?, ?)`,
             [
@@ -424,7 +414,7 @@ async function archiveCommittee({
                 archived_by_email
             ]
         );
-        return rows[0][0]; // { committees_archived: ... }
+        return rows[0];
     } catch (error) {
         console.error('[archiveCommittee] SQL/Error:', error.sqlMessage || error.message, error);
         throw error;
@@ -454,12 +444,6 @@ async function addCommitteeMember({
 }) {
     const connection = await pool.getConnection();
     try {
-        console.log('[addCommitteeMember] SQL CALL: CALL AddCommitteeMember(?, ?, ?, ?)', [
-            committee_id,
-            user_email,
-            role,
-            action_by_email
-        ]);
         const [rows] = await connection.query(
             `CALL AddCommitteeMember(?, ?, ?, ?)`,
             [
@@ -469,7 +453,7 @@ async function addCommitteeMember({
                 action_by_email
             ]
         );
-        return rows[0][0]; // { committee_member_id: ... }
+        return rows[0];
     } catch (error) {
         console.error('[addCommitteeMember] SQL/Error:', error.sqlMessage || error.message, error);
         throw error;
@@ -489,7 +473,7 @@ async function updateCommitteeMember({
             `CALL UpdateCommitteeMember(?, ?, ?)`,
             [committee_member_id, new_role, action_by_email]
         );
-        return rows[0][0]; // { rows_affected: ... }
+        return rows[0];
     } catch (error) {
         throw error;
     } finally {
@@ -747,6 +731,30 @@ async function getAllUsers() {
     }
 }
 
+async function getSingleUser(member_id){
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetSingleUser(?);', [member_id]);
+        return rows[0];
+    } catch (error) {
+        console.error('Error fetching single user:', error);
+        throw error;
+    }
+}
+
+async function GetSingleOrganizationUser(member_id){
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetSingleOrganizationUser(?);', [member_id]);
+        return rows[0];
+    } catch (error) {
+        console.error('Error fetching single organization user:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
 async function getProgram() {
     const connection = await pool.getConnection();
     try {
@@ -780,6 +788,19 @@ async function getAllExecutiveRanks() {
         return rows[0];
     } catch (error) {
         console.error('Error fetching executive ranks:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+      
+async function getSingleOrganizationMember(member_id, org_name) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetSingleOrganizationMember(?, ?);', [member_id, org_name]);
+        return rows[0];
+    } catch (error) {
+        console.error('Error fetching single organization member:', error);
         throw error;
     } finally {
         connection.release();
@@ -832,4 +853,7 @@ module.exports = {
     getProgram,
     getApplication,
     getAllExecutiveRanks,
+    getSingleUser,
+    GetSingleOrganizationUser,
+    getSingleOrganizationMember
 };
