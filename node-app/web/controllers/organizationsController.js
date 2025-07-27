@@ -896,6 +896,17 @@ async function getProgram(req, res) {
     }
 }
 
+async function getAllExecutiveRanks(req, res) {
+    try {
+        const ranks = await organizationsModel.getAllExecutiveRanks();
+        res.status(200).json(ranks);
+    } catch (error) {
+        res.status(500).json({
+            error: error.message || "An error occurred while fetching executive ranks.",
+        });
+    }
+}
+
 
 
 module.exports = {
@@ -938,4 +949,5 @@ module.exports = {
     getOrganizationOfficers,
     getOrganizationMembers,
     getProgram,
+    getAllExecutiveRanks,
 };

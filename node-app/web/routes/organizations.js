@@ -150,4 +150,10 @@ router.post(
 
 router.get('/get-programs', middleware.validateAzureJWT, organizationsController.getProgram);
 
+router.get(
+    '/executive-ranks',
+    middleware.validateAzureJWT,
+    organizationsController.getAllExecutiveRanks
+);
+
 module.exports = router
