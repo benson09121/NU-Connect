@@ -38,7 +38,7 @@ CREATE TABLE tbl_college(
 CREATE TABLE tbl_program(
     program_id INT PRIMARY KEY AUTO_INCREMENT,
     college_id INT NOT NULL,
-    name VARCHAR(50) UNIQUE,
+    name VARCHAR(100) UNIQUE,
     abbreviation VARCHAR(20) UNIQUE,
     FOREIGN KEY (college_id) REFERENCES tbl_college(college_id) ON DELETE CASCADE
 );
@@ -1408,24 +1408,24 @@ DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetManagedAccounts()
 BEGIN
     DECLARE student_role_id INT;
-    
+
     SELECT role_id INTO student_role_id 
     FROM tbl_role 
     WHERE LOWER(role_name) = 'student';
-    
-                SELECT u.user_id as id,
-                    CONCAT(u.f_name, ' ', u.l_name) as name,
-                    u.email,
-                    p.name as program,
-                    r.role_name as role,
-                    u.status,
-                    u.created_at,
-                    u.updated_at,
-                    u.archived_at
-             FROM tbl_user u
-             JOIN tbl_role r ON u.role_id = r.role_id
-             LEFT JOIN tbl_program p ON u.program_id = p.program_id
-             WHERE u.role_id != student_role_id;
+
+    SELECT u.user_id as id,
+           CONCAT(u.f_name, ' ', u.l_name) as name,
+           u.email,
+           p.name as program,
+           r.role_name as role,
+           u.status,
+           u.created_at,
+           u.updated_at,
+           u.archived_at
+    FROM tbl_user u
+    JOIN tbl_role r ON u.role_id = r.role_id
+    LEFT JOIN tbl_program p ON u.program_id = p.program_id
+    WHERE u.role_id != student_role_id;
 
 END $$
 DELIMITER ;
@@ -1604,7 +1604,6 @@ END $$
 DELIMITER ;
 
 DELIMITER $$
-
 CREATE DEFINER='admin'@'%' PROCEDURE DeleteManagedAccount(
     IN p_email VARCHAR(100)
 )
@@ -1659,12 +1658,9 @@ BEGIN
              LEFT JOIN tbl_program p ON u.program_id = p.program_id
              WHERE u.email = p_email;
 END $$
-
 DELIMITER ;
 
-    -- Unarchive account
 DELIMITER $$
-
 CREATE DEFINER='admin'@'%' PROCEDURE UnarchiveManagedAccount(
     IN p_user_id VARCHAR(200)
 )
@@ -1698,21 +1694,21 @@ BEGIN
             'account'
         );
     END IF;
-        SELECT u.user_id as id,
-                    CONCAT(u.f_name, ' ', u.l_name) as name,
-                    u.email,
-                    p.name as program,
-                    r.role_name as role,
-                    u.status,
-                    u.created_at,
-                    u.updated_at,
-                    u.archived_at
-             FROM tbl_user u
-             JOIN tbl_role r ON u.role_id = r.role_id
-             LEFT JOIN tbl_program p ON u.program_id = p.program_id
-             WHERE u.user_id = user_id;
-END $$
 
+    SELECT u.user_id as id,
+           CONCAT(u.f_name, ' ', u.l_name) as name,
+           u.email,
+           p.name as program,
+           r.role_name as role,
+           u.status,
+           u.created_at,
+           u.updated_at,
+           u.archived_at
+    FROM tbl_user u
+    JOIN tbl_role r ON u.role_id = r.role_id
+    LEFT JOIN tbl_program p ON u.program_id = p.program_id
+    WHERE u.user_id = p_user_id;
+END $$
 DELIMITER ;
 
 DELIMITER $$
@@ -2384,9 +2380,7 @@ END $$
 DELIMITER ;
 
 
-    -- For all events
 DELIMITER $$
-
 CREATE DEFINER='admin'@'%' PROCEDURE GetEvents()
 BEGIN
     SELECT 
@@ -2412,12 +2406,10 @@ BEGIN
     FROM tbl_event e
     JOIN tbl_organization o ON e.organization_id = o.organization_id;
 END $$
-
 DELIMITER ;
 
-    -- For viewing specific details of an event
-DELIMITER $$
 
+DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetEventById(IN p_event_id INT)
 BEGIN
     SELECT 
@@ -2447,9 +2439,7 @@ END $$
 
 DELIMITER ;
 
-    -- Get attendees per event
 DELIMITER $$
-
 CREATE DEFINER='admin'@'%' PROCEDURE GetEventAttendeesWithDetails(
     IN p_event_id INT
 )
@@ -2479,12 +2469,9 @@ BEGIN
        LEFT JOIN tbl_transaction t ON te.transaction_id = t.transaction_id
     WHERE ea.event_id = p_event_id;
 END $$
-
 DELIMITER ;
 
-    -- Get event by status
 DELIMITER $$
-
 CREATE DEFINER='admin'@'%' PROCEDURE GetEventsByStatus(IN p_status VARCHAR(20))
 BEGIN
     IF p_status = 'Approved' THEN
@@ -2544,7 +2531,6 @@ BEGIN
         WHERE e.status = p_status;
     END IF;
 END $$
-
 DELIMITER ;
 
 DELIMITER $$
@@ -2651,7 +2637,6 @@ BEGIN
     ) AS result;
 END$$
 DELIMITER ;
-
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetApprovalTimeline(
@@ -2945,9 +2930,8 @@ END $$
 
 DELIMITER ;
 
-     -- Reject Registration
-DELIMITER $$
 
+DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE RejectPaidEventRegistration(
     IN p_event_id INT,
     IN p_user_id VARCHAR(200),
@@ -3003,7 +2987,6 @@ BEGIN
 
     SELECT 'Attendance rejected and soft-deleted successfully' AS message;
 END $$
-
 DELIMITER ;
 
 DELIMITER $$
@@ -3039,12 +3022,9 @@ BEGIN
     WHERE app.status = 'Pending'
     ORDER BY org.created_at DESC, app.created_at DESC;
 END$$
-
 DELIMITER ;
 
--- Procedure to get event statistics
 DELIMITER $$
-
 CREATE DEFINER='admin'@'%' PROCEDURE GetEventStatistics(IN p_event_id INT)
 BEGIN
     -- Number of attendees (status = 'Attended')
@@ -3079,12 +3059,9 @@ BEGIN
         CONCAT(FLOOR(COALESCE(@avg_feedback_time, 0) / 60), 'm ', 
                MOD(COALESCE(@avg_feedback_time, 0), 60), 's') AS avgFeedbackTime;
 END $$
-
 DELIMITER ;
 
--- Procedure to get event statistics for React component
 DELIMITER $$
-
 CREATE DEFINER='admin'@'%' PROCEDURE GetEventStatsForComponent(IN p_event_id INT)
 BEGIN
     DECLARE v_attendees_count INT;
@@ -3113,12 +3090,9 @@ BEGIN
             END AS avgFeedbackTime
     ) AS stats;
 END $$
-
 DELIMITER ;
 
-    -- Get all evaluation questions
 DELIMITER $$
-
 CREATE DEFINER='admin'@'%' PROCEDURE GetAllEvaluationQuestions()
 BEGIN
     SELECT JSON_ARRAYAGG(
@@ -3143,11 +3117,9 @@ BEGIN
     FROM tbl_evaluation_question_group g
     WHERE g.is_active = TRUE;
 END $$
-
 DELIMITER ;
 
 DELIMITER $$
-
 CREATE DEFINER='admin'@'%' PROCEDURE GetEventEvaluationResponses(
     IN p_event_id INT
 )
@@ -3181,9 +3153,7 @@ END $$
 
 DELIMITER ;
 
-    -- Get logs
 DELIMITER $$
-
 CREATE DEFINER='admin'@'%' PROCEDURE GetLogs(
     IN p_user_id VARCHAR(200),
     IN p_type VARCHAR(100),
@@ -3211,7 +3181,6 @@ BEGIN
         AND (p_end_date IS NULL OR l.timestamp <= p_end_date)
     ORDER BY l.timestamp DESC;
 END $$
-
 DELIMITER ;
 
 DELIMITER $$
@@ -3231,7 +3200,6 @@ BEGIN
         SET MESSAGE_TEXT = 'Organization name already exists. Please choose a different name.';
     END IF;
 END $$
-
 DELIMITER ;
 
 DELIMITER $$
@@ -3275,24 +3243,69 @@ END $$
 DELIMITER ;
 
 DELIMITER $$
-CREATE PROCEDURE GetOrganizationUsers(IN org_name VARCHAR(255))
+CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationUsers(IN p_org_name VARCHAR(255))
 BEGIN
-    SELECT DISTINCT
-        u.user_id,
-        u.email,
-        u.f_name,
-        u.l_name,
-        om.program_name,
-        COALESCE(er.role_title, 'Member') as role
-    FROM tbl_user u
-    JOIN tbl_organization_members om ON u.user_id = om.user_id
-    JOIN tbl_organization o ON om.organization_id = o.organization_id
-    LEFT JOIN tbl_executive_role er ON om.executive_role_id = er.role_id
-    WHERE o.name = org_name 
-    AND om.status = 'Active'
-    ORDER BY u.f_name, u.l_name;
+SELECT DISTINCT
+    u.user_id,
+    u.email,
+    u.f_name,
+    u.l_name,
+    p.name AS program_name,
+    COALESCE(er.role_title, 'Member') as role,
+    -- Is Executive Member
+    (om.member_type = 'Executive') AS is_executive,
+    -- Is Committee Member
+    EXISTS (
+        SELECT 1
+        FROM tbl_committee_members cm
+        JOIN tbl_committee c ON cm.committee_id = c.committee_id
+        WHERE cm.user_id = u.user_id
+          AND c.organization_id = o.organization_id
+          AND c.cycle_number = om.cycle_number
+    ) AS is_committee
+FROM tbl_user u
+JOIN tbl_organization_members om ON u.user_id = om.user_id
+JOIN tbl_organization o ON om.organization_id = o.organization_id
+LEFT JOIN tbl_executive_role er ON om.executive_role_id = er.executive_role_id
+LEFT JOIN tbl_program p ON u.program_id = p.program_id
+WHERE o.name = p_org_name
+  AND om.status = 'Active'
+ORDER BY u.f_name, u.l_name;
 END$$
 DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetSingleOrganizationUser(
+    IN p_member_id INT
+)
+BEGIN
+    SELECT DISTINCT
+    u.user_id,
+    u.email,
+    u.f_name,
+    u.l_name,
+    p.name AS program_name,
+    COALESCE(er.role_title, 'Member') as role,
+    -- Is Executive Member
+    (om.member_type = 'Executive') AS is_executive,
+    -- Is Committee Member
+    EXISTS (
+        SELECT 1
+        FROM tbl_committee_members cm
+        JOIN tbl_committee c ON cm.committee_id = c.committee_id
+        WHERE cm.user_id = u.user_id
+          AND c.organization_id = o.organization_id
+          AND c.cycle_number = om.cycle_number
+    ) AS is_committee
+FROM tbl_user u
+JOIN tbl_organization_members om ON u.user_id = om.user_id
+JOIN tbl_organization o ON om.organization_id = o.organization_id
+LEFT JOIN tbl_executive_role er ON om.executive_role_id = er.executive_role_id
+LEFT JOIN tbl_program p ON u.program_id = p.program_id
+WHERE om.member_id = p_member_id;
+END $$
+DELIMITER ;
+
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetAllUsers()
@@ -3312,6 +3325,30 @@ BEGIN
     LEFT JOIN tbl_executive_role er ON om.executive_role_id = er.executive_role_id
     WHERE u.status = 'Active' AND u.role_id = 1
     ORDER BY u.f_name, u.l_name;
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetSingleUser(
+    IN p_member_id INT
+)
+BEGIN
+     SELECT DISTINCT
+        u.user_id,
+        u.email,
+        u.f_name,
+        u.l_name,
+        p.name as program_name,
+        COALESCE(er.role_title, om.member_type) as role,
+        o.name as org_name
+    FROM tbl_user u
+    LEFT JOIN tbl_organization_members om ON u.user_id = om.user_id
+    LEFT JOIN tbl_program p ON u.program_id = p.program_id
+    LEFT JOIN tbl_organization o ON om.organization_id = o.organization_id
+    LEFT JOIN tbl_executive_role er ON om.executive_role_id = er.executive_role_id
+    WHERE u.status = 'Active' 
+    AND u.role_id = 1
+    AND om.member_id = p_member_id;
 END $$
 DELIMITER ;
 
@@ -3466,7 +3503,6 @@ BEGIN
     JOIN tbl_user adv ON o.adviser_id = adv.user_id
     WHERE o.organization_id = @org_id;
 END$$
-
 DELIMITER ;
 
 DELIMITER $$
@@ -3538,7 +3574,6 @@ CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationQuestion(
 BEGIN
     SELECT * FROM tbl_membership_question WHERE organization_id =p_org_id;
 END$$
-
 DELIMITER ;
 
 
@@ -3621,11 +3656,9 @@ BEGIN
     WHERE eap.event_application_id = p_event_application_id
     ORDER BY eap.step_number;
 END$$
-
 DELIMITER ;
 
 DELIMITER $$
-
 CREATE DEFINER='admin'@'%' PROCEDURE CreateEventApplication(
     IN p_organization_id INT,
     IN p_cycle_number INT,
@@ -3820,11 +3853,9 @@ BEGIN
         p_organization_id AS organization_id,
         p_cycle_number AS cycle_number;
 END$$
-
 DELIMITER ;
 
 DELIMITER $$
-
 CREATE DEFINER='admin'@'%' PROCEDURE `InitiateEventApprovalProcess`(IN p_event_application_id INT)
 BEGIN
     DECLARE v_org_id INT;
@@ -3959,7 +3990,6 @@ BEGIN
         SET MESSAGE_TEXT = 'No valid approvers found for any approval steps';
     END IF;
 END$$
-
 DELIMITER ;
 
 DELIMITER $$
@@ -4185,8 +4215,6 @@ BEGIN
 END$$
 DELIMITER ;
 
-SELECT * FROM db_nuconnect.tbl_event_evaluation_settings;
-
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE UpdateEventEvaluationConfig(
     IN p_event_id INT,
@@ -4244,7 +4272,6 @@ END$$
 DELIMITER ;
 
 DELIMITER $$
-
 CREATE DEFINER='admin'@'%' PROCEDURE UploadOrUpdatePostEventRequirement(
     IN p_event_id INT,
     IN p_event_application_id INT,
@@ -4305,11 +4332,9 @@ BEGIN
         );
     END IF;
 END$$
-
 DELIMITER ;
 
 DELIMITER $$
-
 CREATE DEFINER='admin'@'%' PROCEDURE GetEventRequirementSubmissions(
     IN p_event_id INT,
     IN p_event_application_id INT,
@@ -4345,11 +4370,9 @@ BEGIN
     ORDER BY ers.submitted_at DESC;
 
 END$$
-
 DELIMITER ;
 
 DELIMITER $$
-
 CREATE DEFINER='admin'@'%' PROCEDURE GetActiveApplicationPeriodSimple()
 BEGIN
     SELECT *
@@ -4358,10 +4381,7 @@ BEGIN
     ORDER BY created_at DESC
     LIMIT 1;
 END $$
-
 DELIMITER ;
-
-DELIMITER $$
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationsByStatus(
@@ -4407,7 +4427,6 @@ END $$
 DELIMITER ;
 
 DELIMITER $$
-
 CREATE DEFINER='admin'@'%' PROCEDURE ArchiveOrganization(
     IN p_organization_id INT,
     IN p_user_id VARCHAR(200)
@@ -4431,11 +4450,9 @@ BEGIN
         JSON_OBJECT('organization_id', p_organization_id, 'archived_at', NOW())
     );
 END $$
-
 DELIMITER ;
 
 DELIMITER $$
-
 CREATE DEFINER='admin'@'%' PROCEDURE UnarchiveOrganization(
     IN p_organization_id INT,
     IN p_user_id VARCHAR(200)
@@ -4460,11 +4477,9 @@ BEGIN
         JSON_OBJECT('organization_id', p_organization_id, 'unarchived_at', NOW())
     );
 END $$
-
 DELIMITER ;
 
 DELIMITER $$
-
 CREATE DEFINER='admin'@'%' PROCEDURE TerminateActiveApplicationPeriod(
     IN p_user_id VARCHAR(200)
 )
@@ -4501,11 +4516,9 @@ BEGIN
         );
     END IF;
 END $$
-
 DELIMITER ;
 
 DELIMITER $$
-
 CREATE DEFINER='admin'@'%' PROCEDURE GetAllPeriodsWithApplications()
 BEGIN
     SELECT 
@@ -4540,20 +4553,16 @@ BEGIN
     FROM tbl_application_period ap
     ORDER BY ap.start_date DESC, ap.period_id DESC;
 END $$
-
 DELIMITER ;
 
 DELIMITER $$
-
 CREATE DEFINER='admin'@'%' PROCEDURE GetEventRequirements()
 BEGIN
     SELECT * FROM tbl_event_application_requirement;
 END $$
-
 DELIMITER ;
 
 DELIMITER $$
-
 CREATE DEFINER='admin'@'%' PROCEDURE SaveEventRequirements(
     IN p_user_id VARCHAR(200),
     IN p_requirements JSON
@@ -4656,11 +4665,9 @@ BEGIN
 
     DROP TEMPORARY TABLE IF EXISTS tmp_existing_ids;
 END $$
-
 DELIMITER ;
 
 DELIMITER $$
-
 CREATE DEFINER='admin'@'%' PROCEDURE GetEventEvaluationResponsesByGroup(
     IN p_event_id INT
 )
@@ -4710,7 +4717,6 @@ BEGIN
     ORDER BY 
         qg.group_id;
 END $$
-
 DELIMITER ;
 
 DELIMITER $$
@@ -4720,7 +4726,6 @@ CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationFee(IN
 BEGIN
     SELECT membership_fee_amount AS membership_fee FROM tbl_organization WHERE organization_id = p_organization_id;  
 END $$
-
 DELIMITER ;
 
 DELIMITER $$
@@ -4850,11 +4855,9 @@ BEGIN
     -- Commit transaction
     COMMIT;
 END$$
-
 DELIMITER ;
 
 DELIMITER $$
-
 CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationEventApplications(
     IN p_org_name VARCHAR(100)
 )
@@ -4929,11 +4932,9 @@ BEGIN
     WHERE ers.organization_id = v_organization_id
     ORDER BY ers.event_application_id, ear.is_applicable_to, ear.requirement_name;
 END$$
-
 DELIMITER ;
 
 DELIMITER $$
-
 CREATE DEFINER='admin'@'%' PROCEDURE GetEventRequirementSubmissionsByOrganization(
     IN p_organization_id INT
 )
@@ -4963,11 +4964,9 @@ BEGIN
     WHERE ers.organization_id = p_organization_id
     ORDER BY ers.submitted_at DESC;
 END$$
-
 DELIMITER ;
 
 DELIMITER $$
-
 CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationDashboardStats(
     IN p_organization_id INT
 )
@@ -5027,11 +5026,9 @@ BEGIN
         @pre_event_requirements_submitted AS pre_event_requirements_submitted,
         @total_upcoming_events AS total_upcoming_events;
 END$$
-
 DELIMITER ;
 
 DELIMITER $$
-
 CREATE DEFINER='admin'@'%' PROCEDURE CreateSDAOEvent(
     IN p_organization_id INT,
     IN p_user_id VARCHAR(200),
@@ -5089,7 +5086,6 @@ BEGIN
 
     SELECT * FROM tbl_event WHERE event_id = LAST_INSERT_ID();
 END$$
-
 DELIMITER ;
 
 DELIMITER $$
@@ -5710,7 +5706,18 @@ BEGIN
         CURRENT_TIMESTAMP
     );
     
-    SELECT ROW_COUNT() AS rows_affected;
+    SELECT 
+        c.committee_id as id,
+        c.name AS committee_name,
+        c.description,
+        c.created_at
+    FROM tbl_committee c
+    LEFT JOIN tbl_committee_members cm ON c.committee_id = cm.committee_id
+    WHERE c.organization_id = v_organization_id
+    AND c.cycle_number = v_cycle_number
+    AND c.committee_id = p_committee_id
+    GROUP BY c.committee_id, c.name, c.description, c.created_at
+    ORDER BY c.name;
 END$$
 DELIMITER ;
 
@@ -5755,6 +5762,15 @@ BEGIN
     SELECT COUNT(*) INTO v_member_count
     FROM tbl_committee_members
     WHERE committee_id = p_committee_id;
+
+    SELECT 
+    c.committee_id as id,
+    c.name AS committee_name,
+    c.description,
+    c.created_at
+    FROM tbl_committee c
+    WHERE c.committee_id = p_committee_id;
+
 
     -- Start transaction
     START TRANSACTION;
@@ -5845,7 +5861,6 @@ BEGIN
 
     COMMIT;
     
-    SELECT ROW_COUNT() AS committees_archived;
 END$$
 DELIMITER ;
 
@@ -5872,6 +5887,7 @@ BEGIN
     AND c.cycle_number = @current_cycle
     GROUP BY c.committee_id, c.name, c.description, c.created_at
     ORDER BY c.name;
+
 END$$
 DELIMITER ;
 
@@ -5888,19 +5904,15 @@ BEGIN
     );
 
     SELECT 
-        c.committee_id as id,
+        c.committee_id,
         c.name AS committee_name,
-        c.description,
-        c.organization_id,
-        c.cycle_number,
-        cm.committee_member_id,
+        cm.committee_member_id AS id,
         cm.role,
         cm.created_at AS member_since,
         u.user_id,
         u.f_name,
         u.l_name,
         u.email,
-        u.profile_picture,
         p.name AS program_name,
         u.status AS user_status
     FROM tbl_committee c
@@ -5916,123 +5928,142 @@ BEGIN
 END$$
 DELIMITER ;
 
-DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE AddCommitteeMember(
-    IN p_committee_id INT,
-    IN p_user_email VARCHAR(100),
-    IN p_role ENUM('Committee Head', 'Committee Officer'),
-    IN p_action_by_email VARCHAR(100))
-BEGIN
-    DECLARE v_action_by_user_id VARCHAR(200);
-    DECLARE v_user_id VARCHAR(200);
-    DECLARE v_committee_exists INT;
-    DECLARE v_organization_id INT;
-    DECLARE v_cycle_number INT;
-    DECLARE v_is_member INT;
-    DECLARE v_new_member_id INT;
+    DELIMITER $$
+    CREATE DEFINER='admin'@'%' PROCEDURE AddCommitteeMember(
+        IN p_committee_id INT,
+        IN p_user_email VARCHAR(100),
+        IN p_role ENUM('Committee Head', 'Committee Officer'),
+        IN p_action_by_email VARCHAR(100))
+    BEGIN
+        DECLARE v_action_by_user_id VARCHAR(200);
+        DECLARE v_user_id VARCHAR(200);
+        DECLARE v_committee_exists INT;
+        DECLARE v_organization_id INT;
+        DECLARE v_cycle_number INT;
+        DECLARE v_is_member INT;
+        DECLARE v_new_member_id INT;
 
-    -- Check if committee exists
-    SELECT organization_id, cycle_number 
-        INTO v_organization_id, v_cycle_number
-        FROM tbl_committee
-        WHERE committee_id = p_committee_id;
+        -- Check if committee exists
+        SELECT organization_id, cycle_number 
+            INTO v_organization_id, v_cycle_number
+            FROM tbl_committee
+            WHERE committee_id = p_committee_id;
 
-        IF v_organization_id IS NULL THEN
+            IF v_organization_id IS NULL THEN
+                SIGNAL SQLSTATE '45000' 
+                SET MESSAGE_TEXT = 'Committee not found';
+            END IF;
+
+        -- Get user_id of the action performer
+        SELECT user_id INTO v_action_by_user_id 
+        FROM tbl_user 
+        WHERE email = p_action_by_email 
+        LIMIT 1;
+
+        IF v_action_by_user_id IS NULL THEN
             SIGNAL SQLSTATE '45000' 
-            SET MESSAGE_TEXT = 'Committee not found';
+            SET MESSAGE_TEXT = 'Action performer not found';
         END IF;
 
-    -- Get user_id of the action performer
-    SELECT user_id INTO v_action_by_user_id 
-    FROM tbl_user 
-    WHERE email = p_action_by_email 
-    LIMIT 1;
+            -- Get user_id of the member to add
+        SELECT user_id INTO v_user_id 
+        FROM tbl_user 
+        WHERE email = p_user_email 
+        LIMIT 1;
 
-    IF v_action_by_user_id IS NULL THEN
-        SIGNAL SQLSTATE '45000' 
-        SET MESSAGE_TEXT = 'Action performer not found';
-    END IF;
+        IF v_user_id IS NULL THEN
+            -- Insert new user with pending status
+            SET v_user_id = CONCAT('usr-', UUID_SHORT());
+            INSERT INTO tbl_user (
+                user_id,
+                email,
+                role_id,
+                status,
+                created_at,
+                updated_at
+            ) VALUES (
+                v_user_id,
+                p_user_email,
+                (SELECT role_id FROM tbl_role WHERE LOWER(role_name) = 'student' LIMIT 1),
+                'Pending',
+                CURRENT_TIMESTAMP,
+                CURRENT_TIMESTAMP
+            );
+        END IF;
 
-        -- Get user_id of the member to add
-    SELECT user_id INTO v_user_id 
-    FROM tbl_user 
-    WHERE email = p_user_email 
-    LIMIT 1;
+        -- Check if user is already in this committee
+        SELECT COUNT(*) INTO v_is_member
+        FROM tbl_committee_members
+        WHERE committee_id = p_committee_id
+        AND user_id = v_user_id;
+        
+        IF v_is_member > 0 THEN
+            SIGNAL SQLSTATE '45000' 
+            SET MESSAGE_TEXT = 'User is already a member of this committee';
+        END IF;
 
-    IF v_user_id IS NULL THEN
-        -- Insert new user with pending status
-        SET v_user_id = CONCAT('usr-', UUID_SHORT());
-        INSERT INTO tbl_user (
+        -- Add the committee member
+        INSERT INTO tbl_committee_members (
+            committee_id,
             user_id,
-            email,
-            role_id,
-            status,
-            created_at,
-            updated_at
+            role,
+            created_at
         ) VALUES (
+            p_committee_id,
             v_user_id,
-            p_user_email,
-            (SELECT role_id FROM tbl_role WHERE LOWER(role_name) = 'student' LIMIT 1),
-            'Pending',
-            CURRENT_TIMESTAMP,
+            p_role,
             CURRENT_TIMESTAMP
         );
-    END IF;
+        
+        SET v_new_member_id = LAST_INSERT_ID();
 
-    -- Check if user is already in this committee
-    SELECT COUNT(*) INTO v_is_member
-    FROM tbl_committee_members
-    WHERE committee_id = p_committee_id
-    AND user_id = v_user_id;
-    
-    IF v_is_member > 0 THEN
-        SIGNAL SQLSTATE '45000' 
-        SET MESSAGE_TEXT = 'User is already a member of this committee';
-    END IF;
-
-    -- Add the committee member
-    INSERT INTO tbl_committee_members (
-        committee_id,
-        user_id,
-        role,
-        created_at
-    ) VALUES (
-        p_committee_id,
-        v_user_id,
-        p_role,
-        CURRENT_TIMESTAMP
-    );
-    
-    SET v_new_member_id = LAST_INSERT_ID();
-
-    -- Log the action
-    INSERT INTO tbl_logs (
-        user_id, 
-        action, 
-        type, 
-        meta_data,
-        timestamp
-    ) VALUES (
-        v_action_by_user_id,
-        CONCAT('Added member to committee: ', 
-               (SELECT name FROM tbl_committee WHERE committee_id = p_committee_id)),
-        'committee_member_add',
-        JSON_OBJECT(
-            'committee_id', p_committee_id,
-            'user_id', v_user_id,
-            'role', p_role,
-            'organization_id', v_organization_id,
-            'cycle_number', v_cycle_number
-        ),
-        CURRENT_TIMESTAMP
-    );
-    
-    SELECT v_new_member_id AS committee_member_id;
-END$$
-DELIMITER ;
+        -- Log the action
+        INSERT INTO tbl_logs (
+            user_id, 
+            action, 
+            type, 
+            meta_data,
+            timestamp
+        ) VALUES (
+            v_action_by_user_id,
+            CONCAT('Added member to committee: ', 
+                (SELECT name FROM tbl_committee WHERE committee_id = p_committee_id)),
+            'committee_member_add',
+            JSON_OBJECT(
+                'committee_id', p_committee_id,
+                'user_id', v_user_id,
+                'role', p_role,
+                'organization_id', v_organization_id,
+                'cycle_number', v_cycle_number
+            ),
+            CURRENT_TIMESTAMP
+        );
+        
+        SELECT 
+            c.committee_id,
+            c.name AS committee_name,
+            cm.committee_member_id AS id,
+            cm.role,
+            cm.created_at AS member_since,
+            u.user_id,
+            u.f_name,
+            u.l_name,
+            u.email,
+            p.name AS program_name,
+            u.status AS user_status,
+            om.member_id
+        FROM tbl_committee c
+        JOIN tbl_committee_members cm ON c.committee_id = cm.committee_id
+        JOIN tbl_user u ON cm.user_id = u.user_id
+        JOIN tbl_organization_members om ON u.user_id = om.user_id
+        LEFT JOIN tbl_program p ON u.program_id = p.program_id
+        WHERE c.organization_id = v_organization_id
+            AND c.cycle_number = v_cycle_number
+            AND cm.committee_member_id = v_new_member_id;
+    END$$
+    DELIMITER ;
 
 DELIMITER $$
-
 CREATE DEFINER='admin'@'%' PROCEDURE ScanTicket(
     IN p_email VARCHAR(100),
     IN p_event_title VARCHAR(300),
@@ -6224,7 +6255,23 @@ BEGIN
         CURRENT_TIMESTAMP
     );
 
-    SELECT ROW_COUNT() AS rows_affected;
+    SELECT 
+        c.committee_id,
+        c.name AS committee_name,
+        cm.committee_member_id AS id,
+        cm.role,
+        cm.created_at AS member_since,
+        u.user_id,
+        u.f_name,
+        u.l_name,
+        u.email,
+        p.name AS program_name,
+        u.status AS user_status
+    FROM tbl_committee c
+    JOIN tbl_committee_members cm ON c.committee_id = cm.committee_id
+    JOIN tbl_user u ON cm.user_id = u.user_id
+    LEFT JOIN tbl_program p ON u.program_id = p.program_id
+    WHERE cm.committee_member_id = p_committee_member_id;
 END$$
 DELIMITER ;
 
@@ -6288,7 +6335,25 @@ BEGIN
         v_action_by_user_id
     );
 
-    -- Remove from active members
+    
+    SELECT 
+        c.committee_id,
+        c.name AS committee_name,
+        cm.committee_member_id AS id,
+        cm.role,
+        cm.created_at AS member_since,
+        u.user_id,
+        u.f_name,
+        u.l_name,
+        u.email,
+        p.name AS program_name,
+        u.status AS user_status
+    FROM tbl_committee c
+    JOIN tbl_committee_members cm ON c.committee_id = cm.committee_id
+    JOIN tbl_user u ON cm.user_id = u.user_id
+    LEFT JOIN tbl_program p ON u.program_id = p.program_id
+    WHERE cm.committee_member_id = p_committee_member_id;
+
     DELETE FROM tbl_committee_members
     WHERE committee_member_id = p_committee_member_id;
 
@@ -6314,8 +6379,6 @@ BEGIN
         ),
         CURRENT_TIMESTAMP
     );
-
-    SELECT ROW_COUNT() AS rows_archived;
 END$$
 DELIMITER ;
 
@@ -6436,7 +6499,6 @@ END$$
 DELIMITER ;
 
 DELIMITER $$
-
 CREATE DEFINER='admin'@'%' PROCEDURE RejectMembershipApplication(
     IN p_application_id INT,
     IN p_reviewer_email VARCHAR(200),
@@ -6497,7 +6559,6 @@ BEGIN
         NOW()
     );
 END$$
-
 DELIMITER ;
 
 DELIMITER $$
@@ -6505,7 +6566,7 @@ CREATE DEFINER='admin'@'%' PROCEDURE AddOrganizationMember(
     IN p_org_name VARCHAR(100),
     IN p_email VARCHAR(100),
     IN p_action_by_email VARCHAR(100),
-    IN p_program_name VARCHAR(50)
+    IN p_program_name VARCHAR(100)
 )
 BEGIN
     DECLARE v_exists INT DEFAULT 0;
@@ -6642,16 +6703,14 @@ BEGIN
                 u.f_name as first_name,
                 u.l_name as last_name,
                 u.email,
-                om.joined_at
+                om.joined_at,
+                om.user_id as user
             FROM tbl_organization_members om
             JOIN tbl_user u ON om.user_id = u.user_id
             WHERE om.organization_id = @org_id
                 AND om.cycle_number = @current_cycle
-                -- Only include Active members
                 AND om.status = 'Active'
-                -- Exclude Executive members9
                 AND om.member_type != 'Executive'
-                -- Exclude Committee members
                 AND NOT EXISTS (
                     SELECT 1
                     FROM tbl_committee_members cm
@@ -6666,7 +6725,36 @@ END$$
 DELIMITER ;
 
 DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetSingleOrganizationMember(
+     IN p_member_id INT,
+     IN p_org_name VARCHAR(100) 
+)
+BEGIN
 
+SET @org_id = (SELECT organization_id FROM tbl_organization WHERE name = p_org_name);
+    
+    SET @current_cycle = (
+        SELECT MAX(cycle_number)
+        FROM tbl_renewal_cycle
+        WHERE organization_id = @org_id
+    );
+    SELECT 
+                om.member_id as id,
+                u.f_name as first_name,
+                u.l_name as last_name,
+                u.email,
+                om.joined_at,
+                om.user_id as user
+            FROM tbl_organization_members om
+            JOIN tbl_user u ON om.user_id = u.user_id
+            WHERE om.organization_id = @org_id
+                AND om.cycle_number = @current_cycle
+                AND om.status = 'Active'
+                AND om.member_id = p_member_id;
+END$$
+DELIMITER ;
+
+DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE EditOrganizationMember(
     IN p_current_email VARCHAR(100),
     IN p_new_email VARCHAR(100),
@@ -6708,11 +6796,9 @@ BEGIN
         program_id = v_program_id
     WHERE user_id = v_user_id;
 END$$
-
 DELIMITER ;
 
 DELIMITER $$
-
 CREATE DEFINER='admin'@'%' PROCEDURE ArchiveOrganizationMember(
     IN p_member_id INT,
     IN p_archived_by_email VARCHAR(100)
@@ -6814,7 +6900,6 @@ BEGIN
         CURRENT_TIMESTAMP
     );
 END$$
-
 DELIMITER ;
 
 DELIMITER $$
@@ -6866,7 +6951,6 @@ BEGIN
     FROM tbl_college d;
 END $$
 DELIMITER ;
-
 
 
 
@@ -6979,22 +7063,38 @@ VALUES
 
 
 INSERT INTO tbl_college (name, abbreviation) VALUES 
-("College of Information Technology", "CIT");
+("School of Arts, Sciences, and Education", "SASE"),
+("School of Business, Management, and Accountancy", "SBMA"),
+("School of Engineering, Computing and Architecture", "SECA");
 
 INSERT INTO tbl_program (college_id, name, abbreviation) VALUES 
-(1,"Bachelor of Science in Information Technology", "BSIT"),
-(1,"Bachelor of Science in Computer Science", "BSCS");
+(1,"Bachelor of Science in Physical Education", "BPEd"),
+(1,"Bachelor of Arts in Communication", "ABComm"),
+(1,"Bachelor of Science in Psychology", "BSPSY"),
+(2,"Bachelor of Science in Hospitality Management", "BSHM"),
+(2,"Bachelor of Science in Business Administration major in Human Resource Management", "BSBA-HRM"),
+(2,"Master of Management", "MM"),
+(2,"Bachelor of Science in Business Administration major in Financial Managemen", "BSBA-FinMgt"),
+(2,"Bachelor of Science in Business Administration major in Marketing Management", "BSBA-MktgMgt"),
+(2,"Bachelor of Science in Tourism Management", "BSTM"),
+(2,"Bachelor of Science in Accountancy", "BSAccountancy"),
+(2,"Bachelor of Science in Management Accounting", "BSMA"),
+(3,"Bachelor of Science in Computer Engineering", "BSCpE"),
+(3,"Bachelor of Science in Information Technology with a specialization in Mobile and Web Applications", "BSIT-MWA"),
+(3,"Bachelor of Science in Civil Engineering", "BSCE"),
+(3,"Bachelor of Science in Architecture", "BSArch"),
+(3,"Bachelor of Science in Computer Science with specialization in Machine Learning", "BSCS-ML");
 
 INSERT INTO tbl_user (user_id, f_name, l_name, email, program_id, role_id) VALUES
 ('_ExbgMDtE-90mt0wLlA74VFYH5I1freBLw4NMY9RcBU', ' Geraldine', 'Aris', 'arisgc@students.nu-dasma.edu.ph', NULL, '5'),
 ('6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0', 'Benson', 'Javier', 'javierbb@students.nu-dasma.edu.ph', NULL, '4'),
 ('cyQuRJT6GaT0Y89NFQua6nMhFJF6E-SAIk_rpryVY1k', ' Carl Roehl', 'Falcon', 'falconcs@students.nu-dasma.edu.ph', NULL, '6'),
 ('dumalagim@students.nu-dasma.edu.ph', 'Iver', 'Dumalag', 'dumalagim@students.nu-dasma.edu.ph', '1', '1'),
-('LBmQ-WzvRhVmb55Ucidrc14aL39ae9Ei-7xfbOrPeEA', ' Samantha Joy', 'Madrunio', 'madruniosm@students.nu-dasma.edu.ph', '1', '2'),
-('NqBfAZcMXHZF5g9ztwkQ1ykPgtNmZwYRcIPKKK40ROc', ' Alister Dylan Emmanuel', 'Realo', 'realoam@students.nu-dasma.edu.ph', '1', '1'),
-('ochavillorc@students.nu-dasma.edu.ph', 'Red ', 'Ochavillo', 'ochavillorc@students.nu-dasma.edu.ph', '1', '1'),
+('LBmQ-WzvRhVmb55Ucidrc14aL39ae9Ei-7xfbOrPeEA', ' Samantha Joy', 'Madrunio', 'madruniosm@students.nu-dasma.edu.ph', '13', '2'),
+('NqBfAZcMXHZF5g9ztwkQ1ykPgtNmZwYRcIPKKK40ROc', ' Alister Dylan Emmanuel', 'Realo', 'realoam@students.nu-dasma.edu.ph', '13', '1'),
+('ochavillorc@students.nu-dasma.edu.ph', 'Red ', 'Ochavillo', 'ochavillorc@students.nu-dasma.edu.ph', '13', '1'),
 ('CyTLmjW4Edhvk2WvWFDNuWLYjW0WJETBPbY2HWk-ZqE', ' Loraine', 'Miraballes', 'miraballesl@students.nu-dasma.edu.ph', NULL, '1'),
-('CY4e1GmCXysMRn8VYudhqDy7CDJ8xVidGO1v8RnRj1E', ' Shamiah M', 'Mendoza', 'mendozasm@students.nu-dasma.edu.ph', '1', '3');
+('CY4e1GmCXysMRn8VYudhqDy7CDJ8xVidGO1v8RnRj1E', ' Shamiah M', 'Mendoza', 'mendozasm@students.nu-dasma.edu.ph', '13', '3');
 
 
 INSERT INTO tbl_application_requirement (requirement_name, is_applicable_to, file_path, created_by) VALUES

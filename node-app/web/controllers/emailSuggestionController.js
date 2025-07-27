@@ -1,4 +1,4 @@
-const userCacheModel = require('../models/userCacheModel');
+const userCacheModel = require('../models/UserCacheModel.js');
 const organizationsModel = require('../models/organizationsModel');
 
 async function getEmailSuggestions(req, res) {
@@ -35,34 +35,6 @@ async function getEmailSuggestions(req, res) {
         res.status(500).json({ error: 'Internal server error' });
     }
 }
-
-// async function getEmailSuggestionsByProgram(req, res) {
-//     try {
-//         const { program_name, email_pattern } = req.query;
-//         if (!program_name || !email_pattern) {
-//             return res.status(400).json({ error: 'program_name and email_pattern are required' });
-//         }
-
-//         // Optionally check user access to the program here
-
-//         // Query Redis or DB for users in the program matching the pattern
-//         let suggestions = await userCacheModel.searchUsersByProgramAndEmail(program_name, email_pattern);
-
-//         // If cache miss, populate cache from DB
-//         if (!suggestions || suggestions.length === 0) {
-//             const users = await organizationsModel.getUsersByProgram(program_name);
-//             if (users && users.length > 0) {
-//                 await userCacheModel.cacheUsersByProgram(program_name, users);
-//                 suggestions = await userCacheModel.searchUsersByProgramAndEmail(program_name, email_pattern);
-//             }
-//         }
-
-//         res.json({ suggestions: suggestions || [], cached: true });
-//     } catch (error) {
-//         console.error('Error getting email suggestions by program:', error);
-//         res.status(500).json({ error: 'Internal server error' });
-//     }
-// }
 
 async function getAllUserEmailSuggestions(req, res) {
     try {

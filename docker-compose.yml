@@ -7,8 +7,6 @@ services:
       MYSQL_PASSWORD: admin
     container_name: mysql
     image: mysql:8.4
-    command:
-      - --init-file=/docker-entrypoint-initdb.d/init.sql
     volumes:
       - mysql_volume:/var/lib/mysql
       - ./mysql/init.sql:/docker-entrypoint-initdb.d/init.sql
