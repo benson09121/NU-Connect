@@ -781,6 +781,19 @@ async function getApplication(application_id){
     }
 }
 
+async function getAllExecutiveRanks() {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetAllExecutiveRanks();');
+        return rows[0];
+    } catch (error) {
+        console.error('Error fetching executive ranks:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+      
 async function getSingleOrganizationMember(member_id, org_name) {
     const connection = await pool.getConnection();
     try {
@@ -839,6 +852,7 @@ module.exports = {
     getAllUsers,
     getProgram,
     getApplication,
+    getAllExecutiveRanks,
     getSingleUser,
     GetSingleOrganizationUser,
     getSingleOrganizationMember

@@ -7223,6 +7223,20 @@ BEGIN
 END$$
 DELIMITER ;
 
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetAllExecutiveRanks()
+BEGIN
+    SELECT 
+        rank_id,
+        rank_level,
+        default_title,
+        description,
+        created_at
+    FROM tbl_executive_rank
+    ORDER BY rank_level;
+END$$
+DELIMITER ;
+
 -- INDEXES
 
 CREATE INDEX idx_org_members_user ON tbl_organization_members(user_id);
@@ -7356,7 +7370,7 @@ INSERT INTO tbl_program (college_id, name, abbreviation) VALUES
 (3,"Bachelor of Science in Computer Science with specialization in Machine Learning", "BSCS-ML");
 
 INSERT INTO tbl_user (user_id, f_name, l_name, email, program_id, role_id) VALUES
-('_ExbgMDtE-90mt0wLlA74VFYH5I1freBLw4NMY9RcBU', ' Geraldine', 'Aris', 'arisgc@students.nu-dasma.edu.ph', NULL, '2'),
+('_ExbgMDtE-90mt0wLlA74VFYH5I1freBLw4NMY9RcBU', ' Geraldine', 'Aris', 'arisgc@students.nu-dasma.edu.ph', '1', '2'),
 ('6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0', 'Benson', 'Javier', 'javierbb@students.nu-dasma.edu.ph', NULL, '4'),
 ('cyQuRJT6GaT0Y89NFQua6nMhFJF6E-SAIk_rpryVY1k', ' Carl Roehl', 'Falcon', 'falconcs@students.nu-dasma.edu.ph', NULL, '6'),
 ('dumalagim@students.nu-dasma.edu.ph', 'Iver', 'Dumalag', 'dumalagim@students.nu-dasma.edu.ph', '1', '1'),
@@ -7381,10 +7395,13 @@ INSERT INTO tbl_application_requirement (requirement_name, is_applicable_to, fil
 
 INSERT INTO tbl_executive_rank (rank_level, default_title, description) VALUES
 (1, 'President', 'Highest authority with full permissions'),
-(2, 'Vice President', 'Second-in-command'),
-(3, 'Secretary', 'Administrative lead'),
-(4, 'Treasurer', 'Financial manager'),
-(5, 'Officer', 'General executive member');
+(2, 'Vice President Internal', 'Handles internal organizational matters'),
+(3, 'Vice President External', 'Handles external partnerships and representation'),
+(4, 'Secretary', 'Administrative lead'),
+(5, 'Treasurer', 'Financial manager'),
+(6, 'Auditor', 'Responsible for auditing and financial oversight'),
+(7, 'Public Information Officer', 'Handles publicity and information dissemination'),
+(8, 'Officer', 'General executive member');
 
 -- Insert evaluation question groups
 INSERT INTO tbl_evaluation_question_group (group_title, group_description, is_active)
