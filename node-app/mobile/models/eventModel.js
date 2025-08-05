@@ -3,19 +3,10 @@ const { redisClient } = require('../../config/redis');
 const { Auth } = require("./userIdModel");
 
 async function getAllEvents() {
-    // const cacheKey = `events:user:${Auth.get_userId}`;
-    // const cachedEvents = await redisClient.get(cacheKey);
-
-    // if (cachedEvents) {
-    //     return JSON.parse(cachedEvents);
-    // }
 
     const connection = await pool.getConnection();
     try {
         const [rows] = await connection.query('CALL GetAllEvents(?);', [Auth.get_userId]);
-
-        // Cache the events for the user
-        // await redisClient.set(cacheKey, JSON.stringify(rows), 'EX', 3600); // 
         return rows[0];
     } finally {
         connection.release();

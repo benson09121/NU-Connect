@@ -238,7 +238,12 @@ async function getActiveApplicationPeriod(req, res) {
 async function updateApplicationPeriod(req, res) {
     const { startDate, endDate, startTime, endTime, periodId } = req.body;
     try {
-        await requirementModel.updateApplicationPeriod(startDate, endDate, startTime, endTime, periodId);
+        const result = await requirementModel.updateApplicationPeriod(startDate, endDate, startTime, endTime, periodId);
+        console.log('Updated application period:', result);
+        publishToChannel('application_periods', {
+            operation: 'UPDATE',
+            data: result
+        });
         res.status(200).json({ message: 'Requirement period updated successfully' });
     } catch (error) {
         res.status(500).json({

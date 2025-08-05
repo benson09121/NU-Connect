@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const { subscribeToChannel, publishToChannel } = require('./sseController');
 const organizationsModel = require('../models/organizationsModel');
-const UserCacheModel = require('../models/userCacheModel');
+const userCacheModel = require('../models/userCacheModel');
 
 async function getOrganizations(req, res) {
     const { sessionId, user_role, org_name } = req.query;
@@ -708,7 +708,7 @@ async function addCommitteeMember(req, res) {
         });
         const emailUpdate = await organizationsModel.getSingleOrganizationMember(result[0].member_id, orgName);
         const emailSUggestionOrganizationUpdate = await organizationsModel.GetSingleOrganizationUser(result[0].member_id);
-        await UserCacheModel.cacheSingleOrganizationUser(orgName,emailSUggestionOrganizationUpdate[0]);
+        await userCacheModel.cacheSingleOrganizationUser(orgName,emailSUggestionOrganizationUpdate[0]);
         console.log();
         publishToChannel(`organizations_members_${orgName}`, {
             operation: 'DELETE',
@@ -838,9 +838,9 @@ async function addOrganizationMember(req, res) {
             program_name
         });
         const emailSuggestionUpdate = await organizationsModel.getSingleUser(result[0].id);
-        await UserCacheModel.cacheSingleUser(emailSuggestionUpdate[0]);
+        await userCacheModel.cacheSingleUser(emailSuggestionUpdate[0]);
         const emailSUggestionOrganizationUpdate = await organizationsModel.GetSingleOrganizationUser(result[0].id);
-        await UserCacheModel.cacheSingleOrganizationUser(orgName,emailSUggestionOrganizationUpdate[0]);
+        await userCacheModel.cacheSingleOrganizationUser(orgName,emailSUggestionOrganizationUpdate[0]);
         publishToChannel(`organizations_members_${orgName}`, {
             operation: 'CREATE',
             data: result
@@ -904,6 +904,7 @@ async function GetApprovalTimeline(req, res){
         });
     }
 }
+
 
 async function getProgram(req, res) {
     try {

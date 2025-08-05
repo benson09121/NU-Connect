@@ -70,6 +70,7 @@ async function getSpecificEvent(req, res) {
     try {
         const eventId = parseInt(req.params.eventId, 10);
         const userId = req.params.userId;
+        console.log(userId);
         const event = await eventModel.getSpecificEvent(eventId, userId);
         let attendees = await eventModel.getEventAttendees(eventId);
         if (attendees) {

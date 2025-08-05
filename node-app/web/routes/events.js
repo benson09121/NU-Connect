@@ -6,6 +6,7 @@ const middleware = require('../../middlewares/middleWare');
 router.post('/event-applications', middleware.validateAzureJWT, middleware.hasPermission("CREATE_EVENT"),eventController.createEventApplication);
 router.get('/event-applications/:id/details', middleware.validateAzureJWT, middleware.hasPermission("VIEW_EVENT"), eventController.getEventApplicationDetails);
 router.get('/event-applications/requirement', middleware.validateAzureJWT, middleware.hasPermission("VIEW_EVENT"), eventController.getEventApplicationRequirement);
+router.get('/get-events-applications-approvals', middleware.validateAzureJWT, middleware.hasPermission("VIEW_EVENT"), eventController.getEventApprovalTimeline);
 router.put('/event-applications/:event_application_id/approve/:approval_id', middleware.validateAzureJWT,
 middleware.hasPermission("MANAGE_APPLICATIONS"), eventController.approveEventApplication);
 router.put('/event-applications/:event_application_id/reject/:approval_id', middleware.validateAzureJWT,middleware.hasPermission("MANAGE_APPLICATIONS"), eventController.rejectEventApplication);
@@ -32,9 +33,8 @@ router.post(
   eventController.createEvent
 );
 router.get('/events', middleware.validateAzureJWT, middleware.hasPermission("VIEW_EVENT"), eventController.getEvents);
-router.get('/events/past', middleware.validateAzureJWT, middleware.hasPermission("VIEW_EVENT"), eventController.getPastEvents);
 router.get('/events/evaluation-questions', middleware.validateAzureJWT, middleware.hasPermission("VIEW_EVENT"), eventController.getAllEvaluationQuestions);
-
+router.get('/events/add-event-status', middleware.validateAzureJWT, eventController.getaddEventStatus);
 router.get('/event-requirements', middleware.validateAzureJWT, middleware.hasPermission("CREATE_EVENT"),eventController.getEventRequirements);
 router.post('/event-requirements/save', middleware.validateAzureJWT, middleware.hasPermission("MANAGE_REQUIREMENTS"), eventController.saveEventRequirements);
 
