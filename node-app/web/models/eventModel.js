@@ -84,18 +84,6 @@ async function getEventsByStatus(status) {
     }
 }
 
-async function getPastEvents() {
-    const connection = await pool.getConnection();
-    try {
-        const [rows] = await connection.query('CALL GetPastEvents();');
-        return rows[0] || []; 
-    } catch (error) {
-        throw error;
-    } finally {
-        connection.release();
-    }
-}
-
 async function updateEvent(event_id, event) {
     const connection = await pool.getConnection();
     try {
@@ -206,8 +194,7 @@ async function getEventApplicationDetails(event_application_id) {
     // MySQL returns multiple result sets for each SELECT in the procedure
     return {
       application: results[0][0] || null,
-      requirements: results[1] || [],
-      approvals: results[2] || []
+      requirements: results[1] || []
     };
   } finally {
     connection.release();
@@ -263,11 +250,11 @@ async function getOrganizationMembership(user_id) {
 async function approveEventApplication(approval_id, comment, event_application_id, user_id) {
   const connection = await pool.getConnection();
   try {
-    const [result] = await connection.query(
+    const [rows] = await connection.query(
       'CALL ApproveEventApplication(?, ?, ?, ?);',
       [approval_id, comment, event_application_id, user_id]
     );
-    return result;
+    return rows[0];
   } finally {
     connection.release();
   }
@@ -276,11 +263,11 @@ async function approveEventApplication(approval_id, comment, event_application_i
 async function rejectEventApplication(approval_id, event_application_id, comment, user_id) {
   const connection = await pool.getConnection();
   try {
-    const [result] = await connection.query(
+    const [rows] = await connection.query(
       'CALL RejectEventApplication(?, ?, ?, ?);',
       [approval_id, event_application_id, comment, user_id]
     );
-    return result;
+    return rows[0];
   } finally {
     connection.release();
   }
@@ -396,6 +383,28 @@ async function createEvent(event) {
         connection.release();
     }
 }
+async function getaddEventStatus(orgName){
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query(
+            'CALL GetAddEventStatus(?);',
+            [orgName]
+        );
+        return rows[0][0];
+    } finally {
+        connection.release();
+    }
+}
+
+async function getEventApprovalTimeline(event_id) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetEventApprovalTimeline(?);', [event_id]);
+        return rows[0];
+    } finally {
+        connection.release();
+    }
+}
 
 module.exports = {
     addEvent,
@@ -403,7 +412,6 @@ module.exports = {
     saveEventRequirements,
     getEvents,
     getEventById,
-    getPastEvents,
     getAttendeesByEventId,
     updateEvent,
     deleteEvent,
@@ -425,4 +433,6 @@ module.exports = {
     uploadOrUpdatePostEventRequirement,
     getEventRequirementSubmissions,
     createEvent,
+    getaddEventStatus,
+    getEventApprovalTimeline
 };

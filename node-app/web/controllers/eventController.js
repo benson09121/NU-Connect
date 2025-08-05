@@ -1,6 +1,7 @@
 const eventModel = require('../models/eventModel');
 const fs = require('fs');
 const path = require('path');
+const { subscribeToChannel, publishToChannel } = require('./sseController');
 
 async function addEvent(req, res) {
     try {
@@ -52,14 +53,33 @@ async function saveEventRequirements(req, res) {
 }
 
 async function getEvents(req, res) {
+  const { sessionId } = req.query;
     try {
         const events = await eventModel.getEvents();
+        if (sessionId) {
+            subscribeToChannel(sessionId, "events");
+        }
         res.status(200).json(events);
     } catch (error) {
         res.status(500).json({
             error: error.message || "An error occurred while fetching events.",
         });
     }
+}
+
+async function getaddEventStatus(req, res){
+   const {orgName, sessionId} = req.query;
+   try {
+      const events = await eventModel.getaddEventStatus(orgName);
+      res.status(200).json(events);
+      if (sessionId) {
+          subscribeToChannel(sessionId, `addEvent_${orgName}`);
+      }
+   } catch (error) {
+      res.status(500).json({
+          error: error.message || "An error occurred while fetching add event status.",
+      });
+   }
 }
 
 async function getEventById(req, res) {
@@ -103,19 +123,6 @@ async function getEventsByStatus(req, res) {
     } catch (error) {
         res.status(500).json({
             error: error.message || "An error occurred while fetching events by status.",
-        });
-    }
-}
-
-async function getPastEvents(req, res) {
-    try {
-        const events = await eventModel.getPastEvents();
-        res.status(200).json(events || []);
-    } catch (error) {
-        console.error('Error in getPastEvents:', error);
-        res.status(500).json({
-            error: error.message,
-            details: process.env.NODE_ENV === 'development' ? error.stack : undefined
         });
     }
 }
@@ -425,16 +432,16 @@ async function approveEventApplication(req, res) {
       }
       approver_id = user.user_id;
     }
-    if (!approver_id) {
-      return res.status(400).json({ message: "Approver user_id or user_email is required." });
-    }
-
-    await eventModel.approveEventApplication(
+    const result = await eventModel.approveEventApplication(
       approval_id,
       comment || null,
       event_application_id,
       approver_id
     );
+    publishToChannel(`event_approval_timeline_${event_application_id}`, {
+      operation: 'UPDATE',
+      data: result
+    });
     res.status(200).json({ message: "Event application approved successfully." });
   } catch (error) {
     console.error("approveEventApplication error:", error);
@@ -460,12 +467,16 @@ async function rejectEventApplication(req, res) {
       return res.status(400).json({ message: "Approver user_id or user_email is required." });
     }
 
-    await eventModel.rejectEventApplication(
+    const result = await eventModel.rejectEventApplication(
       approval_id,
       event_application_id,
       comment || null,
       approver_id
     );
+    publishToChannel(`event_approval_timeline_${event_application_id}`, {
+      operation: 'UPDATE',
+      data: result 
+    });
     res.status(200).json({ message: "Event application rejected successfully." });
   } catch (error) {
     console.error("rejectEventApplication error:", error);
@@ -633,6 +644,23 @@ async function createEvent(req, res) {
         });
     }
 }
+async function getEventApprovalTimeline(req, res) {
+    try {
+        const event_id = req.query.event_id;
+        const sessionId = req.query.sessionId;
+
+        if (sessionId) {
+            subscribeToChannel(sessionId, `event_approval_timeline_${event_id}`);
+        }
+
+        const result = await eventModel.getEventApprovalTimeline(event_id);
+        res.status(200).json(result);
+    } catch (error) {
+        res.status(500).json({
+            error: error.message || "An error occurred while fetching the event approval timeline.",
+        });
+    }
+}
 
 module.exports = {
     addEvent,
@@ -640,7 +668,6 @@ module.exports = {
     saveEventRequirements,
     getEvents,
     getEventById,
-    getPastEvents,
     getAttendeesbyEventId,
     updateEvent,
     deleteEvent,
@@ -659,4 +686,6 @@ module.exports = {
     updateEventEvaluationConfig,
     uploadOrUpdatePostEventRequirement,
     createEvent,
+    getaddEventStatus,
+    getEventApprovalTimeline
 };

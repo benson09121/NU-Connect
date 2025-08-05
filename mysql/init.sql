@@ -20,13 +20,6 @@ CREATE TABLE tbl_role(
     hierarchy_order INT UNIQUE NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
-CREATE TABLE tbl_approval_role (
-    approval_role_id INT AUTO_INCREMENT PRIMARY KEY,
-    role_id INT NOT NULL, -- fixed typo
-    hierarchy_order INT UNIQUE NOT NULL,
-    description VARCHAR(255),
-    FOREIGN KEY (role_id) REFERENCES tbl_role(role_id) ON DELETE CASCADE
-);
 
 CREATE TABLE tbl_college(
     college_id INT AUTO_INCREMENT PRIMARY KEY,
@@ -357,6 +350,7 @@ CREATE TABLE tbl_event_requirement_submissions (
     event_application_id INT,
     requirement_id INT NOT NULL,
     cycle_number INT NOT NULL,
+    status enum('Pending', 'Approved', 'Rejected') DEFAULT 'Pending',
     organization_id INT NOT NULL,
     file_path VARCHAR(255) NOT NULL,
     submitted_by VARCHAR(200) NOT NULL,
@@ -1612,7 +1606,6 @@ BEGIN
              LEFT JOIN tbl_program p ON u.program_id = p.program_id
              WHERE u.email = p_email;
 END $$
-
 DELIMITER ;
 
 DELIMITER $$
@@ -1774,7 +1767,6 @@ END $$
 DELIMITER ;
 
 DELIMITER $$
-
 CREATE DEFINER='admin'@'%' PROCEDURE DeleteRequirement(
     IN p_requirement_id INT
 )
@@ -1817,7 +1809,6 @@ END $$
 DELIMITER ;
 
 DELIMITER $$
-
 CREATE DEFINER=`admin`@`%` PROCEDURE AddApplicationPeriod(
     IN p_start_date DATE,
     IN p_end_date DATE,
@@ -1852,11 +1843,9 @@ BEGIN
         end_time
     FROM tbl_application_period WHERE period_id = v_period_id;
 END $$
-
 DELIMITER ;
 
 DELIMITER $$
-
 CREATE DEFINER='admin'@'%' PROCEDURE GetActiveApplicationPeriod()
 BEGIN
   DECLARE currentDate DATE;
@@ -1875,11 +1864,9 @@ BEGIN
   ORDER BY created_at DESC
   LIMIT 1;
 END $$
-
 DELIMITER ;
 
 DELIMITER $$
-
 CREATE DEFINER='admin'@'%' PROCEDURE UpdateApplicationPeriod(
     IN p_start_date DATE,
     IN p_end_date DATE,
@@ -1909,6 +1896,7 @@ DELIMITER ;
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE InitiateApprovalProcess(IN p_application_id INT)
 BEGIN
+    -- Declare all variables first
     DECLARE v_org_id INT;
     DECLARE v_program_id INT;
     DECLARE v_adviser_id VARCHAR(200);
@@ -1916,9 +1904,12 @@ BEGIN
     DECLARE v_role_id INT;
     DECLARE v_hierarchy_order INT;
     DECLARE v_approver_id VARCHAR(200);
-    DECLARE done BOOLEAN DEFAULT FALSE;
-    DECLARE step_counter INT DEFAULT 0;
+    DECLARE v_application_type ENUM('new', 'renewal');
+    DECLARE v_adviser_role_id INT;
+    DECLARE v_done BOOLEAN DEFAULT FALSE;
+    DECLARE v_first_step BOOLEAN DEFAULT TRUE;
 
+    -- Declare cursor and handler next
     DECLARE role_cursor CURSOR FOR
         SELECT role_id, hierarchy_order
         FROM tbl_role
@@ -1926,103 +1917,130 @@ BEGIN
         AND hierarchy_order IS NOT NULL
         ORDER BY hierarchy_order;
 
-    DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = TRUE;
+    DECLARE CONTINUE HANDLER FOR NOT FOUND SET v_done = TRUE;
 
-    -- Get application details
-    SELECT o.organization_id, o.base_program_id, o.adviser_id, a.period_id
-    INTO v_org_id, v_program_id, v_adviser_id, v_period_id
+    -- Now executable statements
+    SELECT 
+        a.organization_id, 
+        o.base_program_id,
+        o.adviser_id,
+        a.period_id,
+        a.application_type
+    INTO 
+        v_org_id, 
+        v_program_id, 
+        v_adviser_id, 
+        v_period_id,
+        v_application_type
     FROM tbl_application a
-    JOIN tbl_organization o ON a.organization_id = o.organization_id
+    LEFT JOIN tbl_organization o ON a.organization_id = o.organization_id
     WHERE a.application_id = p_application_id;
 
-    -- Validate Adviser role
-    IF NOT EXISTS (
-        SELECT 1 FROM tbl_user 
-        WHERE user_id = v_adviser_id 
-        AND role_id = (SELECT role_id FROM tbl_role WHERE role_name = 'Adviser')
-    ) THEN
-        SIGNAL SQLSTATE '45000' 
-        SET MESSAGE_TEXT = 'Organization adviser must have Adviser role';
-    END IF;
+    -- Get adviser's role ID
+    SELECT role_id INTO v_adviser_role_id 
+    FROM tbl_user 
+    WHERE user_id = v_adviser_id;
 
     OPEN role_cursor;
 
-    role_loop: LOOP
+    -- Process each approval role in hierarchy order
+    approval_loop: LOOP
         FETCH role_cursor INTO v_role_id, v_hierarchy_order;
-        IF done THEN
-            LEAVE role_loop;
+        IF v_done THEN
+            LEAVE approval_loop;
         END IF;
 
-        SET step_counter = step_counter + 1;
+        -- Use nested block to handle SELECT without affecting main cursor
+        BEGIN
+            DECLARE CONTINUE HANDLER FOR NOT FOUND SET v_approver_id = NULL;
+            
+            SET v_approver_id = NULL;
+            
+            -- Determine approver based on role type
+            IF v_role_id = v_adviser_role_id THEN
+                SET v_approver_id = v_adviser_id;
+            ELSE
+                -- Use SELECT INTO with error handler
+                SELECT user_id INTO v_approver_id
+                FROM tbl_user 
+                WHERE role_id = v_role_id 
+                AND status = 'Active'
+                LIMIT 1;
+            END IF;
+        END;
 
-        -- Find approver logic
-        IF v_role_id = (SELECT role_id FROM tbl_role WHERE role_name = 'Adviser') THEN
-            SET v_approver_id = v_adviser_id;
-        ELSEIF v_role_id = (SELECT role_id FROM tbl_role WHERE role_name = 'ProgramChair') THEN
-            SELECT u.user_id INTO v_approver_id
-            FROM tbl_user u
-            WHERE u.role_id = v_role_id
-            AND u.program_id = v_program_id
-            LIMIT 1;
-        ELSE
-            SELECT u.user_id INTO v_approver_id
-            FROM tbl_user u
-            WHERE u.role_id = v_role_id
-            LIMIT 1;
-        END IF;
-
-        -- Insert approval step with auto-approve first step
+        -- Only create step if we found an approver
         IF v_approver_id IS NOT NULL THEN
-            INSERT INTO tbl_approval_process (
-                organization_id,
-                period_id,
-                approver_id,
-                approval_role_id,
-                application_type,
-                status,
-                step
-            )
-            SELECT 
-                v_org_id,
-                v_period_id,
-                v_approver_id,
-                v_role_id,
-                a.application_type,
-                CASE 
-                    WHEN step_counter = 1 THEN 'Approved'  -- Auto-approve first step
-                    ELSE 'Pending'
-                END,
-                v_hierarchy_order
-            FROM tbl_application a
-            WHERE a.application_id = p_application_id;
+            IF v_first_step AND (
+                (v_application_type = 'renewal') OR 
+                (v_application_type = 'new' AND v_role_id = v_adviser_role_id)
+            ) THEN
+                INSERT INTO tbl_approval_process (
+                    organization_id,
+                    period_id,
+                    approver_id,
+                    approval_role_id,
+                    application_type,
+                    status,
+                    step
+                )
+                VALUES (
+                    v_org_id,
+                    v_period_id,
+                    v_approver_id,
+                    v_role_id,
+                    v_application_type,
+                    'Approved',
+                    v_hierarchy_order
+                );
+                SET v_first_step = FALSE;
+            ELSE
+                INSERT INTO tbl_approval_process (
+                    organization_id,
+                    period_id,
+                    approver_id,
+                    approval_role_id,
+                    application_type,
+                    status,
+                    step
+                )
+                VALUES (
+                    v_org_id,
+                    v_period_id,
+                    v_approver_id,
+                    v_role_id,
+                    v_application_type,
+                    'Pending',
+                    v_hierarchy_order
+                );
+            END IF;
         END IF;
-    END LOOP role_loop;
+    END LOOP approval_loop;
 
     CLOSE role_cursor;
-
-    -- Validate steps
-    IF NOT EXISTS (
-        SELECT 1 FROM tbl_approval_process 
-        WHERE organization_id = v_org_id
-        AND period_id = v_period_id
-    ) THEN
-        SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'No valid approval steps created';
-    END IF;
 
     -- Link approvals to application
     INSERT INTO tbl_application_approval (application_id, approval_id)
     SELECT p_application_id, approval_id
     FROM tbl_approval_process
     WHERE organization_id = v_org_id
-    AND period_id = v_period_id;
+    AND period_id = v_period_id
+    AND approver_id IS NOT NULL;
 
-    -- Update application status remains as 'Pending'
-    UPDATE tbl_application 
-    SET status = 'Pending'
-    WHERE application_id = p_application_id;
+    -- Update application status
+    IF EXISTS (SELECT 1 FROM tbl_approval_process 
+               WHERE organization_id = v_org_id
+               AND period_id = v_period_id
+               AND approver_id IS NOT NULL) THEN
+        UPDATE tbl_application 
+        SET status = 'Pending'
+        WHERE application_id = p_application_id;
+    ELSE
+        UPDATE tbl_application 
+        SET status = 'Rejected'
+        WHERE application_id = p_application_id;
+    END IF;
 END$$
-
 DELIMITER ;
 
 DELIMITER $$
@@ -2836,46 +2854,7 @@ BEGIN
 END $$
 DELIMITER ;
 
--- Get past events
 DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE GetPastEvents()
-BEGIN
-    SELECT 
-        e.event_id,
-        e.title,
-        e.description,
-        e.start_date,
-        e.end_date,
-        e.start_time,
-        e.end_time,
-        e.capacity,
-        e.certificate,
-        e.fee,
-        e.is_open_to,
-        e.venue_type,
-        e.venue,
-        e.organization_id,
-        o.name AS organization_name,
-        e.status,
-        e.type,
-        e.user_id,
-        e.created_at
-    FROM tbl_event e
-    JOIN tbl_organization o ON e.organization_id = o.organization_id
-    WHERE e.status = 'Approved'
-      AND (
-        (e.end_date IS NOT NULL AND e.end_date < CURDATE()) OR
-        (e.end_date IS NULL AND e.start_date < CURDATE())
-      )
-    ORDER BY e.end_date DESC, e.start_date DESC;
-END $$
-DELIMITER ;
-
-DELIMITER $$
-
--- Procedure to approve attendance and transaction
-DELIMITER $$
-
 CREATE DEFINER='admin'@'%' PROCEDURE ApprovePaidEventRegistration(
     IN p_event_id INT,
     IN p_user_id VARCHAR(200),
@@ -2939,7 +2918,6 @@ BEGIN
 
     SELECT 'Attendance approved successfully' AS message;
 END $$
-
 DELIMITER ;
 
 
@@ -3162,7 +3140,6 @@ BEGIN
     ORDER BY 
         u.l_name, u.f_name, qg.group_id, q.question_id;
 END $$
-
 DELIMITER ;
 
 DELIMITER $$
@@ -3648,26 +3625,31 @@ BEGIN
     JOIN tbl_user u ON ers.submitted_by = u.user_id
     WHERE ers.event_application_id = p_event_application_id
     ORDER BY ear.is_applicable_to, ear.requirement_name;
-    
-    -- Get all approval steps and statuses
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetEventApprovalTimeline(
+    IN p_event_application_id INT
+)
+BEGIN
     SELECT 
-        eap.event_approval_id,
-        eap.approver_id,
-        CONCAT(u.f_name, ' ', u.l_name) AS approver_name,
-        u.email AS approver_email,
+        eap.event_approval_id as id,
+        eap.approver_id as user_id,
+        u.f_name,
+        u.l_name,
+        u.email,
         r.role_name,
-        r.role_id,
-        eap.approval_role_id,
-        eap.status AS approval_status,
+        eap.status,
         eap.comment,
-        eap.step_number,
-        eap.approved_at
+        eap.step_number as step,
+        eap.approved_at AS timestamp
     FROM tbl_event_approval_process eap
     JOIN tbl_user u ON eap.approver_id = u.user_id
     JOIN tbl_role r ON eap.approval_role_id = r.role_id
     WHERE eap.event_application_id = p_event_application_id
     ORDER BY eap.step_number;
-END$$
+END $$
 DELIMITER ;
 
 DELIMITER $$
@@ -3868,19 +3850,31 @@ END$$
 DELIMITER ;
 
 DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE `InitiateEventApprovalProcess`(IN p_event_application_id INT)
+CREATE DEFINER='admin'@'%' PROCEDURE InitiateEventApprovalProcess(IN p_event_application_id INT)
 BEGIN
+    -- Declare all variables first
     DECLARE v_org_id INT;
     DECLARE v_program_id INT;
     DECLARE v_adviser_id VARCHAR(200);
     DECLARE v_role_id INT;
     DECLARE v_hierarchy_order INT;
     DECLARE v_approver_id VARCHAR(200);
-    DECLARE done BOOLEAN DEFAULT FALSE;
-    DECLARE step_counter INT DEFAULT 0;
+    DECLARE v_done BOOLEAN DEFAULT FALSE;
     DECLARE v_approvers_found INT DEFAULT 0;
+    DECLARE v_adviser_role_id INT;
 
-    -- Get organization details first
+    -- Declare cursor and handler next
+    DECLARE role_cursor CURSOR FOR
+        SELECT r.role_id, r.hierarchy_order
+        FROM tbl_role r
+        WHERE r.is_approver = 1
+        AND r.hierarchy_order IS NOT NULL
+        AND r.hierarchy_order >= 1  -- Include all approver roles
+        ORDER BY r.hierarchy_order;
+
+    DECLARE CONTINUE HANDLER FOR NOT FOUND SET v_done = TRUE;
+
+    -- Get organization details
     SELECT 
         o.organization_id, 
         o.base_program_id, 
@@ -3893,111 +3887,91 @@ BEGIN
     JOIN tbl_organization o ON ea.organization_id = o.organization_id
     WHERE ea.event_application_id = p_event_application_id;
 
-    -- Debug: Check if we got organization details
+    -- Validate organization exists
     IF v_org_id IS NULL THEN
         SIGNAL SQLSTATE '45000' 
         SET MESSAGE_TEXT = 'Organization not found for this application';
     END IF;
 
-    -- Debug: Check if adviser exists
+    -- Validate adviser exists
     IF v_adviser_id IS NULL THEN
         SIGNAL SQLSTATE '45000' 
         SET MESSAGE_TEXT = 'Organization has no assigned adviser';
     END IF;
 
-    -- Validate Adviser exists and has correct role
-    IF NOT EXISTS (
-        SELECT 1 FROM tbl_user 
-        WHERE user_id = v_adviser_id 
-        AND role_id = (SELECT role_id FROM tbl_role WHERE role_name = 'Adviser')
-    ) THEN
-        SIGNAL SQLSTATE '45000' 
-        SET MESSAGE_TEXT = 'Organization adviser must have Adviser role';
-    END IF;
+    -- Get adviser's role ID
+    SELECT role_id INTO v_adviser_role_id 
+    FROM tbl_user 
+    WHERE user_id = v_adviser_id;
 
-    -- Get all approver roles (excluding applicant)
-    BEGIN
-        DECLARE role_cursor CURSOR FOR
-            SELECT r.role_id, r.hierarchy_order
-            FROM tbl_role r
-            WHERE r.is_approver = 1
-            AND r.hierarchy_order IS NOT NULL
-            AND r.hierarchy_order >= 1  -- Changed from > 1 to >= 1 to include Adviser
-            ORDER BY r.hierarchy_order;
+    OPEN role_cursor;
 
-        DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = TRUE;
+    -- Process each approval role in hierarchy order
+    role_loop: LOOP
+        FETCH role_cursor INTO v_role_id, v_hierarchy_order;
+        IF v_done THEN
+            LEAVE role_loop;
+        END IF;
 
-        OPEN role_cursor;
-
-        role_loop: LOOP
-            FETCH role_cursor INTO v_role_id, v_hierarchy_order;
-            IF done THEN
-                LEAVE role_loop;
-            END IF;
-
-            -- Find approver based on role
-            IF v_role_id = (SELECT role_id FROM tbl_role WHERE role_name = 'Adviser') THEN
+        -- Use nested block for approver lookup
+        BEGIN
+            DECLARE CONTINUE HANDLER FOR NOT FOUND SET v_approver_id = NULL;
+            
+            SET v_approver_id = NULL;
+            
+            -- Find approver based on role type
+            IF v_role_id = v_adviser_role_id THEN
                 -- Use organization's adviser
                 SET v_approver_id = v_adviser_id;
-                SET v_approvers_found = v_approvers_found + 1;
-            ELSEIF v_role_id = (SELECT role_id FROM tbl_role WHERE role_name = 'Program Chair') THEN
-                -- Find program chair for this organization's program
-                SELECT user_id INTO v_approver_id
-                FROM tbl_user
-                WHERE role_id = v_role_id
-                AND program_id = v_program_id
-                LIMIT 1;
-                
-                IF v_approver_id IS NOT NULL THEN
-                    SET v_approvers_found = v_approvers_found + 1;
-                END IF;
             ELSE
-                -- For other roles (like OSA Director, etc.)
-                SELECT user_id INTO v_approver_id
-                FROM tbl_user
-                WHERE role_id = v_role_id
-                LIMIT 1;
-                
-                IF v_approver_id IS NOT NULL THEN
-                    SET v_approvers_found = v_approvers_found + 1;
+                -- Check if this is a Program Chair role
+                IF EXISTS (
+                    SELECT 1 FROM tbl_role 
+                    WHERE role_id = v_role_id 
+                    AND role_name = 'Program Chair'
+                ) THEN
+                    -- Find program chair for this organization's program
+                    SELECT user_id INTO v_approver_id
+                    FROM tbl_user
+                    WHERE role_id = v_role_id
+                    AND program_id = v_program_id
+                    AND status = 'Active'
+                    LIMIT 1;
+                ELSE
+                    -- For other roles (OSA Director, etc.)
+                    SELECT user_id INTO v_approver_id
+                    FROM tbl_user
+                    WHERE role_id = v_role_id
+                    AND status = 'Active'
+                    LIMIT 1;
                 END IF;
             END IF;
+        END;
 
-            -- Insert approval step if we found an approver
-            IF v_approver_id IS NOT NULL THEN
-                INSERT INTO tbl_event_approval_process (
-                    event_application_id,
-                    approver_id,
-                    approval_role_id,
-                    status,
-                    step_number
-                ) VALUES (
-                    p_event_application_id,
-                    v_approver_id,
-                    v_role_id,
-                    'Pending',  -- All steps require manual approval
-                    v_hierarchy_order
-                );
-            END IF;
+        -- Insert approval step if we found an approver
+        IF v_approver_id IS NOT NULL THEN
+            INSERT INTO tbl_event_approval_process (
+                event_application_id,
+                approver_id,
+                approval_role_id,
+                status,
+                step_number
+            ) VALUES (
+                p_event_application_id,
+                v_approver_id,
+                v_role_id,
+                'Pending',  -- All steps start as pending
+                v_hierarchy_order
+            );
             
-            SET v_approver_id = NULL; -- Reset for next iteration
-        END LOOP role_loop;
+            SET v_approvers_found = v_approvers_found + 1;
+        END IF;
+    END LOOP role_loop;
 
-        CLOSE role_cursor;
-    END;
+    CLOSE role_cursor;
 
     -- Validate we created at least one approval step
     IF v_approvers_found = 0 THEN
-        -- Debug information
-        SELECT 
-            v_org_id AS org_id,
-            v_program_id AS program_id,
-            v_adviser_id AS adviser_id,
-            (SELECT COUNT(*) FROM tbl_role WHERE is_approver = 1 AND hierarchy_order > 1) AS approver_roles_count,
-            (SELECT COUNT(*) FROM tbl_user WHERE role_id IN 
-                (SELECT role_id FROM tbl_role WHERE is_approver = 1 AND hierarchy_order > 1)
-            ) AS approvers_count;
-            
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'No valid approvers found for any approval steps';
     END IF;
@@ -4126,70 +4100,105 @@ BEGIN
             )
         );
     END IF;
+
+    SELECT 
+        eap.event_approval_id as id,
+        eap.approver_id as user_id,
+        u.f_name,
+        u.l_name,
+        u.email,
+        r.role_name,
+        eap.status,
+        eap.comment,
+        eap.step_number as step,
+        eap.approved_at AS timestamp
+    FROM tbl_event_approval_process eap
+    JOIN tbl_user u ON eap.approver_id = u.user_id
+    JOIN tbl_role r ON eap.approval_role_id = r.role_id
+    WHERE eap.event_application_id = p_event_application_id
+    AND u.user_id = p_user_id
+    ORDER BY eap.step_number;
+    
 END$$
 DELIMITER ;
 
-DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE RejectEventApplication(
-    IN p_approval_id INT,
-    IN p_event_application_id INT,
-    IN p_comment TEXT,
-    IN p_user_id VARCHAR(200)  -- Added user_id parameter for logging
-)
-BEGIN
-    DECLARE v_event_id INT;
-    DECLARE v_event_title VARCHAR(300);
-    
-    START TRANSACTION;
-    
-    -- Update the approval status
-    UPDATE tbl_event_approval_process
-    SET 
-        status = 'Rejected',
-        comment = p_comment,
-        approved_at = CURRENT_TIMESTAMP
-    WHERE event_approval_id = p_approval_id;
-    
-    -- Get the proposed event ID and title
-    SELECT e.proposed_event_id, ev.title INTO v_event_id, v_event_title
-    FROM tbl_event_application e
-    LEFT JOIN tbl_event ev ON e.proposed_event_id = ev.event_id
-    WHERE e.event_application_id = p_event_application_id;
-    
-    -- Update event application status
-    UPDATE tbl_event_application
-    SET status = 'Rejected',
-        updated_at = CURRENT_TIMESTAMP
-    WHERE event_application_id = p_event_application_id;
-    
-    -- Update the event status if it exists
-    IF v_event_id IS NOT NULL THEN
-        UPDATE tbl_event
-        SET status = 'Rejected'
-        WHERE event_id = v_event_id;
-    END IF;
-    
-    -- Log the rejection
-    INSERT INTO tbl_logs (
-        user_id,
-        action,
-        type,
-        meta_data
-    ) VALUES (
-        p_user_id,
-        CONCAT('Rejected event application for: ', IFNULL(v_event_title, 'Untitled Event')),
-        'Event Rejection',
-        JSON_OBJECT(
-            'approval_id', p_approval_id,
-            'application_id', p_event_application_id,
-            'event_id', IFNULL(v_event_id, 'NULL'),
-            'comment', p_comment
-        )
-    );
-    
-    COMMIT;
-END$$
-DELIMITER ;
+    DELIMITER $$
+    CREATE DEFINER='admin'@'%' PROCEDURE RejectEventApplication(
+        IN p_approval_id INT,
+        IN p_event_application_id INT,
+        IN p_comment TEXT,
+        IN p_user_id VARCHAR(200)  -- Added user_id parameter for logging
+    )
+    BEGIN
+        DECLARE v_event_id INT;
+        DECLARE v_event_title VARCHAR(300);
+        
+        START TRANSACTION;
+        
+        -- Update the approval status
+        UPDATE tbl_event_approval_process
+        SET 
+            status = 'Rejected',
+            comment = p_comment,
+            approved_at = CURRENT_TIMESTAMP
+        WHERE event_approval_id = p_approval_id;
+        
+        -- Get the proposed event ID and title
+        SELECT e.proposed_event_id, ev.title INTO v_event_id, v_event_title
+        FROM tbl_event_application e
+        LEFT JOIN tbl_event ev ON e.proposed_event_id = ev.event_id
+        WHERE e.event_application_id = p_event_application_id;
+        
+        -- Update event application status
+        UPDATE tbl_event_application
+        SET status = 'Rejected',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE event_application_id = p_event_application_id;
+        
+        -- Update the event status if it exists
+        IF v_event_id IS NOT NULL THEN
+            UPDATE tbl_event
+            SET status = 'Rejected'
+            WHERE event_id = v_event_id;
+        END IF;
+        
+        -- Log the rejection
+        INSERT INTO tbl_logs (
+            user_id,
+            action,
+            type,
+            meta_data
+        ) VALUES (
+            p_user_id,
+            CONCAT('Rejected event application for: ', IFNULL(v_event_title, 'Untitled Event')),
+            'Event Rejection',
+            JSON_OBJECT(
+                'approval_id', p_approval_id,
+                'application_id', p_event_application_id,
+                'event_id', IFNULL(v_event_id, 'NULL'),
+                'comment', p_comment
+            )
+        );
+        COMMIT;
+        SELECT 
+            eap.event_approval_id as id,
+            eap.approver_id as user_id,
+            u.f_name,
+            u.l_name,
+            u.email,
+            r.role_name,
+            eap.status,
+            eap.comment,
+            eap.step_number as step,
+            eap.approved_at AS timestamp
+        FROM tbl_event_approval_process eap
+        JOIN tbl_user u ON eap.approver_id = u.user_id
+        JOIN tbl_role r ON eap.approval_role_id = r.role_id
+        WHERE eap.event_application_id = p_event_application_id
+        AND u.user_id = p_user_id
+        ORDER BY eap.step_number;
+    END$$
+    DELIMITER ;
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetEventEvaluationConfig(IN p_event_id INT)
@@ -7234,6 +7243,41 @@ BEGIN
         created_at
     FROM tbl_executive_rank
     ORDER BY rank_level;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetAddEventStatus(
+    IN p_org_name VARCHAR(200)
+)
+BEGIN
+    DECLARE v_event_id INT;
+
+    SELECT e.event_id
+      INTO v_event_id
+      FROM tbl_event e
+      JOIN tbl_organization o ON e.organization_id = o.organization_id
+     WHERE o.name = p_org_name
+     ORDER BY e.created_at DESC
+     LIMIT 1;
+
+    SELECT
+        e.event_id AS id,
+        (
+            SELECT COUNT(*)
+            FROM tbl_event_application_requirement r
+            WHERE r.is_applicable_to = 'post-event'
+        ) = (
+            SELECT COUNT(DISTINCT ers.requirement_id)
+            FROM tbl_event_requirement_submissions ers
+            JOIN tbl_event_application_requirement r ON ers.requirement_id = r.requirement_id
+            WHERE ers.event_id = e.event_id
+              AND r.is_applicable_to = 'post-event'
+              AND ers.status = 'Approved'
+        ) AS status
+    FROM tbl_event e
+    JOIN tbl_organization o ON e.organization_id = o.organization_id
+    WHERE e.event_id = v_event_id;
 END$$
 DELIMITER ;
 

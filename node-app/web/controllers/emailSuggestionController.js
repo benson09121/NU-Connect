@@ -67,7 +67,7 @@ async function refreshOrganizationCache(req, res) {
         
         const users = await organizationsModel.getOrganizationUsers(org_name);
         await userCacheModel.cacheUsersByOrganization(org_name, users);
-        
+
         res.json({ message: 'Cache refreshed successfully' });
     } catch (error) {
         console.error('Error refreshing cache:', error);
