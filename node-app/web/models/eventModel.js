@@ -281,8 +281,10 @@ async function getEventEvaluationConfig(event_id) {
     return {
       settings: results[0][0] || null,
       enabledGroups: results[1] || [],
-      allGroups: results[2] || []
+      allGroups: results[2] || [],
+      certificateTemplate: results[3][0] || null
     };
+
   } finally {
     connection.release();
   }
@@ -390,7 +392,7 @@ async function getaddEventStatus(orgName){
             'CALL GetAddEventStatus(?);',
             [orgName]
         );
-        return rows[0][0];
+        return rows[0];
     } finally {
         connection.release();
     }
@@ -400,6 +402,34 @@ async function getEventApprovalTimeline(event_id) {
     const connection = await pool.getConnection();
     try {
         const [rows] = await connection.query('CALL GetEventApprovalTimeline(?);', [event_id]);
+        return rows[0];
+    } finally {
+        connection.release();
+    }
+}
+async function getEventEvaluationFeedbackPeriod(event_id){
+  const connection = await pool.getConnection();
+  try {
+      const [rows] = await connection.query('CALL GetEventEvaluationFeedbackPeriod(?);', [event_id]);
+      return rows[0];
+  } finally {
+      connection.release();
+  }
+}
+async function AddCertificateTemplate(event_id, filepath, user_id) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL AddCertificateTemplate(?, ?, ?);', [event_id, filepath, user_id]);
+        return rows[0];
+    } finally {
+        connection.release();
+    }
+}
+
+async function getCertificateTemplate(event_id) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetCertificateTemplate(?);', [event_id]);
         return rows[0];
     } finally {
         connection.release();
@@ -434,5 +464,8 @@ module.exports = {
     getEventRequirementSubmissions,
     createEvent,
     getaddEventStatus,
-    getEventApprovalTimeline
+    getEventApprovalTimeline,
+    getEventEvaluationFeedbackPeriod,
+    AddCertificateTemplate,
+    getCertificateTemplate
 };

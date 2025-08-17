@@ -131,24 +131,6 @@ async function getUpcomingEvents() {
         connection.release();
     }
 }
-async function AddCertificateTemplate(event_id, filepath) {
-    const connection = await pool.getConnection();
-    try {
-        const [rows] = await connection.query('CALL AddCertificateTemplate(?, ?, ?);', [event_id, filepath, Auth.get_userId]);
-        return rows[0];
-    } finally {
-        connection.release();
-    }
-}
-async function getCertificateTemplate(event_id) {
-    const connection = await pool.getConnection();
-    try {
-        const [rows] = await connection.query('CALL GetCertificateTemplate(?);', [event_id]);
-        return rows[0];
-    } finally {
-        connection.release();
-    }
-}
 
 async function addGeneratedCertificate({ event_id, template_id, pdfFilename, verification_code }) {
     const connection = await pool.getConnection();
@@ -212,8 +194,6 @@ module.exports = {
     checkEventRegistration,
     getTickets,
     getUpcomingEvents,
-    AddCertificateTemplate,
-    getCertificateTemplate,
     addGeneratedCertificate,
     getEvaluation,
     submitEvaluation,

@@ -156,62 +156,6 @@ async function getUpcomingEvents(req, res) {
         res.status(500).json({ message: error.message });
     }
 }
-async function addCertificate(req, res) {
-    try {
-        console.log('addCertificate: Request received'); // Log entry point
-        const { event_id } = req.body;
-        console.log('addCertificate: event_id:', event_id); // Log event_id
-
-        if (!req.files || !req.files.file) {
-            console.error('addCertificate: No file uploaded');
-            return res.status(400).json({ message: 'No file uploaded' });
-        }
-
-        const uploadedFile = req.files.file;
-        console.log('addCertificate: Uploaded file details:', uploadedFile); // Log file details
-
-        const fileBuffer = uploadedFile.data;
-        console.log('addCertificate: File buffer size:', fileBuffer.length); // Log file buffer size
-
-        // Validate file type
-        if (!uploadedFile.mimetype.includes('application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            'application/octet-stream')) {
-            console.error('addCertificate: Invalid file type:', uploadedFile.mimetype);
-            return res.status(400).json({ message: 'Only .docx files allowed' });
-        }
-
-        // Virus scan
-        // console.log('addCertificate: Starting virus scan');
-        // const isClean = await virusCheck(fileBuffer);
-        // if (!isClean) {
-        //     console.error('addCertificate: File contains malware');
-        //     return res.status(400).json({ error: 'File contains malware' });
-        // }
-        // console.log('addCertificate: Virus scan completed');
-
-        const filename = `event-${event_id}-template.docx`;
-        const templatePath = path.join('/app/certificates/templates', filename);
-        console.log('addCertificate: Saving file to path:', templatePath);
-
-        try {
-            fs.writeFileSync(templatePath, uploadedFile.data);
-            console.log('addCertificate: File saved successfully');
-        } catch (writeError) {
-            console.error('addCertificate: Error saving file:', writeError);
-            return res.status(500).json({ message: 'Error saving file', error: writeError.message });
-        }
-
-        // Database insert
-        console.log('addCertificate: Inserting template path into database');
-        await eventModel.AddCertificateTemplate(event_id, filename);
-        console.log('addCertificate: Database insert successful');
-
-        res.status(201).json({ path: templatePath });
-    } catch (error) {
-        console.error('addCertificate: Unexpected error:', error); // Log unexpected errors
-        res.status(500).json({ message: 'An unexpected error occurred', error: error.message });
-    }
-}
 
 async function addGeneratedCertificate(req) {
     try {
@@ -358,7 +302,6 @@ module.exports = {
     getTickets,
     sseEventAttendees,
     getUpcomingEvents,
-    addCertificate,
     addGeneratedCertificate,
     getEvaluation,
     submitEvaluation,
