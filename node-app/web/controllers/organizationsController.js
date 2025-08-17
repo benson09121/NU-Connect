@@ -135,7 +135,7 @@ async function createOrganizationApplication(req, res) {
             req.user.user_id
         );
 
-        const orgDir = path.join('/app/organizations', dbResult[0].directory_name);
+        const orgDir = path.join('/app/organizations', dbResult[0].directory_name, String(dbResult[0].cycle_number));
         if(!fs.existsSync(orgDir)) {
             fs.mkdirSync(orgDir, { recursive: true });
         }
@@ -249,12 +249,13 @@ async function rejectApplication(req, res) {
 
 async function getOrganizationRequirement(req, res) {
     const requirement_name  = req.query.requirement_name;
+    const cycle_number = req.query.cycle_number;
     let org_name = req.query.org_name;
-    org_name = encodeURIComponent(org_name);  
+    org_name = encodeURIComponent(org_name);
+    
     try {
-        
         res.header('Access-Control-Allow-Origin', 'http://localhost:5173');
-        res.setHeader('X-Accel-Redirect', `/protected-organization-requirements/${org_name}/requirements/${requirement_name}`);
+        res.setHeader('X-Accel-Redirect', `/protected-organization-requirements/${org_name}/${cycle_number}/requirements/${requirement_name}`);
         const match = requirement_name.match(/requirement-(\d+)-(.+)/);
         const downloadName = match[0];
         res.setHeader('Content-Disposition', `attachment; filename="${downloadName}"`);
@@ -270,12 +271,13 @@ async function getOrganizationLogo(req, res) {
     let org_name = req.query.org_name;
     let logo_name = req.query.logo_name;
     const org_name_encoded = encodeURIComponent(org_name);
+    const cycle_number = req.query.cycle_number;
     try {
         res.header('Access-Control-Allow-Origin', 'http://localhost:5173');
         // Set Content-Disposition so browser handles as image (inline) 
         res.setHeader('Content-Disposition', `inline; filename="${logo_name}"`);
         // X-Accel-Redirect for Nginx internal serving
-        res.setHeader('X-Accel-Redirect', `/protected-organization-requirements/${org_name_encoded}/logo/${logo_name}`);
+        res.setHeader('X-Accel-Redirect', `/protected-organization-requirements/${org_name_encoded}/${cycle_number}/logo/${logo_name}`);
         res.end();
     } catch (error) {
         res.status(500).json({

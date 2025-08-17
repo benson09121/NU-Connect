@@ -283,6 +283,7 @@ CREATE TABLE tbl_archived_committees (
 CREATE TABLE tbl_event (
     event_id INT AUTO_INCREMENT PRIMARY KEY,
     organization_id INT NOT NULL,
+    cycle_number INT NOT NULL,
     user_id VARCHAR(200) NOT NULL,
     title VARCHAR(300) NOT NULL,
     description TEXT NOT NULL,
@@ -299,6 +300,7 @@ CREATE TABLE tbl_event (
     capacity INT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     certificate VARCHAR(1000) DEFAULT NULL,
+       FOREIGN KEY (organization_id, cycle_number) REFERENCES tbl_renewal_cycle(organization_id, cycle_number) ON DELETE CASCADE,
     FOREIGN KEY (organization_id) REFERENCES tbl_organization(organization_id) ON DELETE CASCADE,
     FOREIGN KEY (user_id) REFERENCES tbl_user(user_id) ON UPDATE CASCADE
 );
@@ -2058,7 +2060,6 @@ BEGIN
     DECLARE v_president_id      VARCHAR(200) DEFAULT NULL;
     DECLARE v_org_name          VARCHAR(100);
     DECLARE v_logo_filename     VARCHAR(255);
-    DECLARE v_sanitized_name    VARCHAR(100);
     DECLARE i                   INT DEFAULT 0;
     DECLARE v_requirement_count INT;
     DECLARE v_rank_number       INT;
@@ -2074,7 +2075,7 @@ BEGIN
     DECLARE v_req_id            INT;
     DECLARE v_file_path         VARCHAR(255);
     DECLARE v_exec_count        INT DEFAULT JSON_LENGTH(p_executives);
-
+    DECLARE v_cycle_number      INT;
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
         ROLLBACK;
@@ -2136,7 +2137,6 @@ BEGIN
     );
     SET v_organization_id = LAST_INSERT_ID();
     SET v_logo_filename = JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.organization_logo'));
-    SET v_sanitized_name = LOWER(REPLACE(v_org_name, ' ', '-'));
 
     -- Add departments/courses
     SET i = 0;
@@ -2235,6 +2235,12 @@ BEGIN
         1,
         v_president_id
     );
+
+    SELECT cycle_number INTO v_cycle_number
+    FROM tbl_renewal_cycle
+    WHERE organization_id = v_organization_id
+    ORDER BY cycle_number DESC
+    LIMIT 1;
 
     -- SECOND PASS: Create executive roles and members
     SET i = 0;
@@ -2367,9 +2373,10 @@ BEGIN
     SELECT
         v_organization_id AS organization_id,
         v_application_id AS application_id,
-        v_sanitized_name AS directory_name,
-        CONCAT(v_sanitized_name, '/logo/', v_logo_filename) AS logo_path,
-        CONCAT(v_sanitized_name, '/requirements/') AS requirements_dir;
+        v_org_name as directory_name,
+        CONCAT(v_org_name, '/logo/', v_logo_filename) AS logo_path,
+        CONCAT(v_org_name, '/requirements/') AS requirements_dir,
+        v_cycle_number AS cycle_number;
 END$$
 DELIMITER ;
 
@@ -2414,7 +2421,7 @@ DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetEvents()
 BEGIN
     SELECT 
-        e.event_id,
+        e.event_id as id,
         e.title,
         e.description,
         e.start_date,
@@ -2443,7 +2450,7 @@ DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetEventById(IN p_event_id INT)
 BEGIN
     SELECT 
-        e.event_id,
+        e.event_id as id,
         e.title,
         e.description,
         e.start_date,
@@ -2466,7 +2473,6 @@ BEGIN
     JOIN tbl_organization o ON e.organization_id = o.organization_id
     WHERE e.event_id = p_event_id;
 END $$
-
 DELIMITER ;
 
 DELIMITER $$
@@ -2506,7 +2512,7 @@ CREATE DEFINER='admin'@'%' PROCEDURE GetEventsByStatus(IN p_status VARCHAR(20))
 BEGIN
     IF p_status = 'Approved' THEN
         -- Only show upcoming or ongoing approved events
-        SELECT 
+        SELECT
             e.event_id,
             e.title,
             e.description,
@@ -3196,17 +3202,21 @@ CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationByRole(
     IN p_role VARCHAR(100)
 )
 BEGIN
+
      SELECT 
             o.organization_id as id,
             o.name AS organization_name,
             o.logo AS organization_logo,
             o.status AS organization_status,
+            MAX(c.cycle_number) AS cycle_number,
             o.category,
             p.name AS program_name,
             o.created_at
         FROM tbl_organization o
         LEFT JOIN tbl_program p ON o.base_program_id = p.program_id
+        LEFT JOIN tbl_renewal_cycle c ON o.organization_id = c.organization_id
         WHERE o.status = 'Approved'
+        GROUP BY o.organization_id
         ORDER BY o.created_at DESC;
 END $$
 DELIMITER ;
@@ -3221,13 +3231,16 @@ BEGIN
         o.name AS organization_name,
         o.logo AS organization_logo,
         o.status AS organization_status,
+        MAX(c.cycle_number) AS cycle_number,
         o.category,
         p.name AS program_name,
         o.created_at
     FROM tbl_organization o
     LEFT JOIN tbl_program p ON o.base_program_id = p.program_id
+    LEFT JOIN tbl_renewal_cycle c ON o.organization_id = c.organization_id
     WHERE o.name = p_organization_name
-      AND o.status = 'Approved';
+      AND o.status = 'Approved'
+      GROUP BY o.organization_id;
 END $$
 DELIMITER ;
 
@@ -3241,9 +3254,9 @@ SELECT DISTINCT
     u.l_name,
     p.name AS program_name,
     COALESCE(er.role_title, 'Member') as role,
-    -- Is Executive Member
+
     (om.member_type = 'Executive') AS is_executive,
-    -- Is Committee Member
+
     EXISTS (
         SELECT 1
         FROM tbl_committee_members cm
@@ -3425,7 +3438,7 @@ DELIMITER ;
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationDetails(IN p_org_name VARCHAR(100))
 BEGIN
-    -- Get organization ID and current cycle
+
     SET @org_id = (SELECT organization_id FROM tbl_organization WHERE name = p_org_name);
     SET @current_cycle = (
         SELECT MAX(cycle_number)
@@ -3433,13 +3446,13 @@ BEGIN
         WHERE organization_id = @org_id
     );
 
-    -- Return organization data as JSON
     SELECT JSON_OBJECT(
         'organization_detail', JSON_OBJECT(
             'id', o.organization_id,
             'org_name', o.name,
             'category', o.category,
             'logo', o.logo,
+            'cycle_number', @current_cycle,
             'description', o.description,
             'adviser', JSON_OBJECT(
                 'first_name', adv.f_name,
@@ -3651,7 +3664,6 @@ BEGIN
     ORDER BY eap.step_number;
 END $$
 DELIMITER ;
-
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE CreateEventApplication(
     IN p_organization_id INT,
@@ -3670,7 +3682,9 @@ BEGIN
     DECLARE v_error_msg VARCHAR(255);
     DECLARE v_president_id VARCHAR(200);
     DECLARE v_first_step INT;
-    
+    DECLARE v_organization_name VARCHAR(100);
+    DECLARE v_cycle_number INT;
+
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
         ROLLBACK;
@@ -3679,56 +3693,24 @@ BEGIN
 
     START TRANSACTION;
 
-    -- Validate organization exists and user is authorized
-    -- IF NOT EXISTS (
---         SELECT 1 FROM tbl_organization 
---         WHERE organization_id = p_organization_id
---     ) THEN
---         SIGNAL SQLSTATE '45000' 
---         SET MESSAGE_TEXT = 'Organization not found';
---     END IF;
+    -- Always populate organization name (fixes NULL v_organization_name)
+    SELECT name INTO v_organization_name
+    FROM tbl_organization
+    WHERE organization_id = p_organization_id;
 
-    -- Validate user exists and belongs to organization
-    -- IF NOT EXISTS (
---         SELECT 1 FROM tbl_user 
---         WHERE user_id = p_applicant_user_id
---     ) THEN
---         SIGNAL SQLSTATE '45000' 
---         SET MESSAGE_TEXT = 'User not found';
---     END IF;
-
-    -- Check/create renewal cycle if needed
-    IF NOT EXISTS (
-        SELECT 1 FROM tbl_renewal_cycle 
-        WHERE organization_id = p_organization_id 
-        AND cycle_number = p_cycle_number
-    ) THEN
+    
         -- Get current president for the organization
-        SELECT president_id INTO v_president_id
+        SELECT cycle_number INTO v_cycle_number
         FROM tbl_renewal_cycle
         WHERE organization_id = p_organization_id
         ORDER BY cycle_number DESC
         LIMIT 1;
         
-        IF v_president_id IS NULL THEN
-            SET v_president_id = p_applicant_user_id; -- Fallback to applicant if no president found
-        END IF;
-
-        INSERT INTO tbl_renewal_cycle (
-            organization_id,
-            cycle_number,
-            president_id
-        ) VALUES (
-            p_organization_id,
-            p_cycle_number,
-            v_president_id
-        );
-    END IF;
-
     -- Create event record
     INSERT INTO tbl_event (
         organization_id,
         user_id,
+        cycle_number,
         title,
         description,
         venue_type,
@@ -3745,6 +3727,7 @@ BEGIN
     ) VALUES (
         p_organization_id,
         p_applicant_user_id,
+        v_cycle_number,
         JSON_UNQUOTE(JSON_EXTRACT(p_event, '$.title')),
         JSON_UNQUOTE(JSON_EXTRACT(p_event, '$.description')),
         JSON_UNQUOTE(JSON_EXTRACT(p_event, '$.venue_type')),
@@ -3845,7 +3828,9 @@ BEGIN
         v_event_application_id AS event_application_id,
         JSON_UNQUOTE(JSON_EXTRACT(p_event, '$.title')) AS event_title,
         p_organization_id AS organization_id,
-        p_cycle_number AS cycle_number;
+        v_organization_name AS organization_name,
+        v_cycle_number AS cycle_number;
+        
 END$$
 DELIMITER ;
 
@@ -4118,7 +4103,6 @@ BEGIN
     WHERE eap.event_application_id = p_event_application_id
     AND u.user_id = p_user_id
     ORDER BY eap.step_number;
-    
 END$$
 DELIMITER ;
 
@@ -4201,10 +4185,25 @@ DELIMITER ;
     DELIMITER ;
 
 DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetEventEvaluationFeedbackPeriod(IN p_event_id INT)
+BEGIN
+    SELECT 
+    event_id as id,
+    start_date,
+    start_time,
+    end_date,
+    end_time,
+    is_active
+    FROM tbl_event_evaluation_settings
+    WHERE event_id = p_event_id;
+END $$
+DELIMITER ;
+
+DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetEventEvaluationConfig(IN p_event_id INT)
 BEGIN
     -- Get evaluation settings
-    SELECT 
+    SELECT
         es.event_id,
         e.title,
         es.start_date AS evaluation_start_date,
@@ -4233,6 +4232,11 @@ BEGIN
         group_description
     FROM tbl_evaluation_question_group
     WHERE is_active = TRUE;
+
+    SELECT template_path
+    FROM tbl_certificate_template
+    WHERE event_id = p_event_id
+    LIMIT 1;
 END$$
 DELIMITER ;
 
@@ -5069,9 +5073,21 @@ CREATE DEFINER='admin'@'%' PROCEDURE CreateSDAOEvent(
     IN p_certificate VARCHAR(1000)
 )
 BEGIN
+
+DECLARE v_cycle_number INT;
+
+
+SELECT cycle_number INTO v_cycle_number
+FROM tbl_renewal_cycle
+WHERE organization_id = p_organization_id
+ORDER BY cycle_number DESC
+LIMIT 1;
+
+
     INSERT INTO tbl_event (
         organization_id,
         user_id,
+        cycle_number,
         title,
         description,
         venue_type,
@@ -5089,6 +5105,7 @@ BEGIN
     ) VALUES (
         p_organization_id,
         p_user_id,
+        v_cycle_number,
         p_title,
         p_description,
         p_venue_type,
@@ -7247,37 +7264,54 @@ END$$
 DELIMITER ;
 
 DELIMITER $$
+DROP PROCEDURE IF EXISTS GetAddEventStatus$$
 CREATE DEFINER='admin'@'%' PROCEDURE GetAddEventStatus(
     IN p_org_name VARCHAR(200)
 )
 BEGIN
+    DECLARE v_org_id INT;
     DECLARE v_event_id INT;
+
+
+    SELECT organization_id INTO v_org_id
+    FROM tbl_organization
+    WHERE name = p_org_name
+    LIMIT 1;
+
 
     SELECT e.event_id
       INTO v_event_id
       FROM tbl_event e
-      JOIN tbl_organization o ON e.organization_id = o.organization_id
-     WHERE o.name = p_org_name
+     WHERE e.organization_id = v_org_id
      ORDER BY e.created_at DESC
      LIMIT 1;
 
-    SELECT
-        e.event_id AS id,
-        (
-            SELECT COUNT(*)
-            FROM tbl_event_application_requirement r
-            WHERE r.is_applicable_to = 'post-event'
-        ) = (
-            SELECT COUNT(DISTINCT ers.requirement_id)
-            FROM tbl_event_requirement_submissions ers
-            JOIN tbl_event_application_requirement r ON ers.requirement_id = r.requirement_id
-            WHERE ers.event_id = e.event_id
-              AND r.is_applicable_to = 'post-event'
-              AND ers.status = 'Approved'
-        ) AS status
-    FROM tbl_event e
-    JOIN tbl_organization o ON e.organization_id = o.organization_id
-    WHERE e.event_id = v_event_id;
+
+    IF v_event_id IS NULL THEN
+        SELECT
+            NULL AS id,
+            (SELECT MAX(cycle_number) FROM tbl_renewal_cycle WHERE organization_id = v_org_id) AS cycle_number,
+            1 AS status;
+    ELSE
+
+        SELECT
+            e.event_id AS id,
+            e.cycle_number,
+            (
+                SELECT COUNT(*)
+                FROM tbl_event_application_requirement r
+                WHERE r.is_applicable_to = 'post-event'
+            ) = (
+                SELECT COUNT(DISTINCT ers.requirement_id)
+                FROM tbl_event_requirement_submissions ers
+                JOIN tbl_event_application_requirement r ON ers.requirement_id = r.requirement_id
+                WHERE ers.event_id = e.event_id
+                  AND r.is_applicable_to = 'post-event'
+                  AND ers.status = 'Approved'
+            ) AS status
+        FROM tbl_event e
+        WHERE e.event_id = v_event_id;
+    END IF;
 END$$
 DELIMITER ;
 
@@ -7498,4 +7532,7 @@ INSERT INTO tbl_rank_permission(rank_id, permission_id) VALUES
 (1,4),
 (1,1),
 (1,25),
-(1,17); 
+(1,17),
+(1,19),
+(1,20),
+(1,21);

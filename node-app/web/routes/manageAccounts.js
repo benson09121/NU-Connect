@@ -16,9 +16,5 @@ router.put('/manage/accounts/unarchive/:user_id', middleware.validateAzureJWT, m
 
 router.post('/manage/user-application/approve', middleware.validateAzureJWT, middleware.hasPermission("MANAGE_ACCOUNT"), accountController.approveUserApplication);
 router.post('/manage/user-application/reject', middleware.validateAzureJWT, middleware.hasPermission("MANAGE_ACCOUNT"), accountController.rejectUserApplication);
-
-console.log("accountController.approveUserApplication:", accountController.approveUserApplication);
-console.log("accountController.rejectUserApplication:", accountController.rejectUserApplication);
-
 module.exports = router;
 

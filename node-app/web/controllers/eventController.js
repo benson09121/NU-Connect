@@ -1,7 +1,10 @@
 const eventModel = require('../models/eventModel');
 const fs = require('fs');
 const path = require('path');
+const TemplateHandler = require('easy-template-x').TemplateHandler;
+const convertDocxToPdf = require('../../config/convertToPdf');
 const { subscribeToChannel, publishToChannel } = require('./sseController');
+const { get } = require('http');
 
 async function addEvent(req, res) {
     try {
@@ -84,10 +87,13 @@ async function getaddEventStatus(req, res){
 
 async function getEventById(req, res) {
     try {
-        const event_id = req.params.id;
+        const { sessionId, event_id } = req.query;
         const event = await eventModel.getEventById(event_id);
         if (!event) {
             return res.status(404).json({ message: 'Event not found' });
+        }
+        if (sessionId) {
+            subscribeToChannel(sessionId, `event_${event_id}`);
         }
         res.status(200).json(event);
     } catch (error) {
@@ -316,15 +322,6 @@ async function createEventApplication(req, res) {
       }
     }
 
-    // If still no organization_id, set to 1 as default
-    if (!organization_id) {
-      organization_id = 1;
-    }
-    // If still no cycle_number, set to 1 as default
-    if (!cycle_number) {
-      cycle_number = 1;
-    }
-
     // Handle file uploads for requirements
     const requirementFiles = {};
     requirements.forEach(reqItem => {
@@ -361,10 +358,11 @@ async function createEventApplication(req, res) {
     );
 
     // Save files to disk
-    const orgDir = path.join('/app/organizations', String(organization_id), 'events', String(dbResult[0].event_id));
+    const orgDir = path.join('/app/organizations', String(dbResult[0].organization_name), String(dbResult[0].cycle_number), 'events', String(dbResult[0].event_id));
     if (!fs.existsSync(orgDir)) {
       fs.mkdirSync(orgDir, { recursive: true });
     }
+
     const requirementsDir = path.join(orgDir, 'requirements');
     if (!fs.existsSync(requirementsDir)) {
       fs.mkdirSync(requirementsDir, { recursive: true });
@@ -381,6 +379,12 @@ async function createEventApplication(req, res) {
       }
     });
 
+
+    const result = await eventModel.getEventById(dbResult[0].event_id);
+    publishToChannel(`events`, {
+      operation: "CREATE",
+      data: result
+    })
     res.status(201).json({
       message: 'Event application submitted successfully',
       data: dbResult[0]
@@ -393,19 +397,19 @@ async function createEventApplication(req, res) {
 
 async function getEventApplicationRequirement(req, res) {
     const requirement_name = req.query.requirement_name;
-    let org_id = req.query.organization_id;
+    let org_name = req.query.organization_name;
     let event_id = req.query.event_id;
-
-    // Encode organization_id and event_id for path safety (if needed)
-    org_id = encodeURIComponent(org_id);
+    let cycle_number = req.query.cycle_number;
+    org_name = encodeURIComponent(org_name);
     event_id = encodeURIComponent(event_id);
+    cycle_number = encodeURIComponent(cycle_number);
 
     try {
         res.header('Access-Control-Allow-Origin', 'http://localhost:5173');
-        // Example path: /protected-event-requirements/{org_id}/events/{event_id}/requirements/{requirement_name}
+        // Example path: /protected-event-requirements/{org_name}/events/{event_id}/requirements/{requirement_name}
         res.setHeader(
             'X-Accel-Redirect',
-            `/protected-event-requirements/${org_id}/events/${event_id}/requirements/${requirement_name}`
+            `/protected-organization-requirements/${org_name}/${cycle_number}/events/${event_id}/requirements/${requirement_name}`
         );
         const match = requirement_name.match(/requirement-(\d+)-(.+)/);
         const downloadName = match ? match[0] : requirement_name;
@@ -438,11 +442,12 @@ async function approveEventApplication(req, res) {
       event_application_id,
       approver_id
     );
+    console.log(event_application_id);
     publishToChannel(`event_approval_timeline_${event_application_id}`, {
       operation: 'UPDATE',
       data: result
     });
-    res.status(200).json({ message: "Event application approved successfully." });
+    res.status(200).json({ message: "Event application approved successfully.", data: result });
   } catch (error) {
     console.error("approveEventApplication error:", error);
     res.status(500).json({ error: error.message });
@@ -662,6 +667,138 @@ async function getEventApprovalTimeline(req, res) {
     }
 }
 
+async function getEventEvaluationFeedbackPeriod(req, res) {
+    try {
+        const event_id = req.query.event_id;
+        const sessionId = req.query.sessionId;
+
+        if (sessionId) {
+            subscribeToChannel(sessionId, `event_evaluation_feedback_period_${event_id}`);
+        }
+        const result = await eventModel.getEventEvaluationFeedbackPeriod(event_id);
+        res.status(200).json(result);
+    } catch (error) {
+        res.status(500).json({
+            error: error.message || "An error occurred while fetching the event evaluation feedback period.",
+        });
+    }
+}
+
+async function addCertificate(req, res) {
+    try {
+        console.log('addCertificate: Request received'); // Log entry point
+        const { event_id } = req.body;
+        console.log('addCertificate: event_id:', event_id); // Log event_id
+  
+        if (!req.files || !req.files.file) {
+            console.error('addCertificate: No file uploaded');
+            return res.status(400).json({ message: 'No file uploaded' });
+        }
+
+        const uploadedFile = req.files.file;
+        console.log('addCertificate: Uploaded file details:', uploadedFile); // Log file details
+
+        const fileBuffer = uploadedFile.data;
+        console.log('addCertificate: File buffer size:', fileBuffer.length); // Log file buffer size
+
+        // Validate file type
+        if (!uploadedFile.mimetype.includes('application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'application/octet-stream')) {
+            console.error('addCertificate: Invalid file type:', uploadedFile.mimetype);
+            return res.status(400).json({ message: 'Only .docx files allowed' });
+        }
+
+        // Virus scan
+        // console.log('addCertificate: Starting virus scan');
+        // const isClean = await virusCheck(fileBuffer);
+        // if (!isClean) {
+        //     console.error('addCertificate: File contains malware');
+        //     return res.status(400).json({ error: 'File contains malware' });
+        // }
+        // console.log('addCertificate: Virus scan completed');
+
+        const filename = `event-${event_id}-template.docx`;
+        const templatePath = path.join('/app/certificates/templates', filename);
+        console.log('addCertificate: Saving file to path:', templatePath);
+
+        try {
+            fs.writeFileSync(templatePath, uploadedFile.data);
+            console.log('addCertificate: File saved successfully');
+        } catch (writeError) {
+            console.error('addCertificate: Error saving file:', writeError);
+            return res.status(500).json({ message: 'Error saving file', error: writeError.message });
+        }
+
+        // Database insert
+        console.log('addCertificate: Inserting template path into database');
+        await eventModel.AddCertificateTemplate(event_id, filename, req.user?.user_id);
+        console.log('addCertificate: Database insert successful');
+
+        res.status(201).json({ path: templatePath });
+    } catch (error) {
+        console.error('addCertificate: Unexpected error:', error); // Log unexpected errors
+        res.status(500).json({ message: 'An unexpected error occurred', error: error.message });
+    }
+}
+
+async function getSampleCertificate(req, res) {
+    try {
+        const { event_id } = req.query;
+
+        console.log('addGeneratedCertificate: Fetching certificate template for event_id:', event_id);
+        const template = await eventModel.getCertificateTemplate(event_id);
+        if (!template || !template[0]) throw new Error('No template found for this event');
+        
+        const templatePath = `/app/certificates/templates/${template[0].template_path}`;
+        console.log('addGeneratedCertificate: Template path:', templatePath);
+        console.log('addGeneratedCertificate: Reading template file:', templatePath);
+        
+        const templateContent = await fs.promises.readFile(templatePath);
+        if (!templateContent || templateContent.length === 0) {
+            throw new Error('Template file is empty or corrupted');
+        }
+
+        const data = {
+            name: `${req.user.f_name} ${req.user.l_name}`, // Use req.user instead of Auth
+        };
+
+        // Generate filenames
+        const safeFirstName = req.user.f_name.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+        const safeLastName = req.user.l_name.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+        const baseFilename = `Certificate_${safeFirstName}_${safeLastName}`;
+        
+        // Temporary paths
+        const docxPath = path.join("/tmp", `${baseFilename}_${Date.now()}.docx`);
+        const pdfPath = path.join("/tmp", `${baseFilename}_${Date.now()}.pdf`);
+
+        const handler = new TemplateHandler(templateContent);
+        const doc = await handler.process(templateContent, data);
+
+        // Write temporary DOCX file
+        await fs.promises.writeFile(docxPath, doc);
+
+        // Convert to PDF
+        await convertDocxToPdf(docxPath, pdfPath);
+
+        // Read the generated PDF
+        const pdfBuffer = await fs.promises.readFile(pdfPath);
+
+        // Clean up temporary files
+        await fs.promises.unlink(docxPath);
+        await fs.promises.unlink(pdfPath);
+
+        // Return PDF to user
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename="${baseFilename}.pdf"`);
+        res.send(pdfBuffer);
+
+        console.log('addGeneratedCertificate: Certificate generation and delivery complete');
+    } catch (error) {
+        console.error('addGeneratedCertificate: Error:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+}
+
 module.exports = {
     addEvent,
     getEventRequirements,
@@ -687,5 +824,8 @@ module.exports = {
     uploadOrUpdatePostEventRequirement,
     createEvent,
     getaddEventStatus,
-    getEventApprovalTimeline
+    getEventApprovalTimeline,
+    getEventEvaluationFeedbackPeriod,
+    addCertificate,
+    getSampleCertificate,
 };
