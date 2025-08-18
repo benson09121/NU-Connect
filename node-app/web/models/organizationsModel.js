@@ -219,7 +219,6 @@ async function getOrganizationDashboardStats(organization_id) {
 
 async function createExecutiveMember({
     organization_id,
-    cycle_number,
     email,
     program_name,
     role_title,
@@ -229,20 +228,19 @@ async function createExecutiveMember({
     const connection = await pool.getConnection();
     try {
         // Log the SQL call and parameters
-        console.log('SQL CALL: CALL CreateExecutiveMember(?, ?, ?, ?, ?, ?, ?);', [
+        console.log('SQL CALL: CALL CreateExecutiveMember(?, ?, ?, ?, ?, ?);', [
             organization_id,
-            cycle_number,
+
             email,
             program_name,
             role_title,
             rank_level,
             action_by_email
         ]);
-        await connection.query(
-            `CALL CreateExecutiveMember(?, ?, ?, ?, ?, ?, ?)`,
+        [row] = await connection.query(
+            `CALL CreateExecutiveMember(?, ?, ?, ?, ?, ?)`,
             [
                 organization_id,
-                cycle_number,
                 email,
                 program_name,
                 role_title,
@@ -251,7 +249,7 @@ async function createExecutiveMember({
             ]
         );
         // If no error, success
-        return { message: 'Executive member added successfully.' };
+        return row[0];
     } catch (error) {
         throw error;
     } finally {
@@ -261,7 +259,6 @@ async function createExecutiveMember({
 
 async function updateExecutiveMember({
     organization_id,
-    cycle_number,
     email,
     program_name,
     role_title,
@@ -270,20 +267,18 @@ async function updateExecutiveMember({
 }) {
     const connection = await pool.getConnection();
     try {
-        console.log('SQL CALL: CALL UpdateExecutiveMember(?, ?, ?, ?, ?, ?, ?);', [
+        console.log('SQL CALL: CALL UpdateExecutiveMember(?, ?, ?, ?, ?, ?);', [
             organization_id,
-            cycle_number,
             email,
             program_name,
             role_title,
             rank_level,
             action_by_email
         ]);
-        await connection.query(
-            `CALL UpdateExecutiveMember(?, ?, ?, ?, ?, ?, ?)`,
+        [row] = await connection.query(
+            `CALL UpdateExecutiveMember(?, ?, ?, ?, ?, ?)`,
             [
                 organization_id,
-                cycle_number,
                 email,
                 program_name,
                 role_title,
@@ -291,7 +286,7 @@ async function updateExecutiveMember({
                 action_by_email
             ]
         );
-        return { message: 'Executive member updated successfully.' };
+        return row[0];
     } catch (error) {
         throw error;
     } finally {
@@ -307,22 +302,20 @@ async function archiveExecutiveMember({
 }) {
     const connection = await pool.getConnection();
     try {
-        console.log('SQL CALL: CALL ArchiveExecutiveMember(?, ?, ?, ?);', [
+        console.log('SQL CALL: CALL ArchiveExecutiveMember(?, ?, ?);', [
             organization_id,
-            cycle_number,
             email,
             action_by_email
         ]);
-        await connection.query(
-            `CALL ArchiveExecutiveMember(?, ?, ?, ?)`,
+        [row] = await connection.query(
+            `CALL ArchiveExecutiveMember(?, ?, ?)`,
             [
                 organization_id,
-                cycle_number,
                 email,
                 action_by_email
             ]
         );
-        return { message: 'Executive member archived successfully.' };
+        return row[0];
     } catch (error) {
         throw error;
     } finally {
