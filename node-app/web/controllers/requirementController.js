@@ -4,63 +4,80 @@ const fs = require('fs');
 const { subscribeToChannel, publishToChannel } = require('./sseController');
 
 async function addRequirement(req, res) {
-    // Reference: eventsController.js addCertificate
     try {
-        const { requirement_name } = req.body;
+        let { requirement_name, is_applicable_to } = req.body;
+        if (!requirement_name || requirement_name.trim().length < 2) {
+            return res.status(400).json({ message: 'Requirement name is required' });
+        }
+        if (!['new','renew','both', undefined, null, ''].includes(is_applicable_to)) {
+            return res.status(400).json({ message: 'Invalid type selection' });
+        }
+        if (!is_applicable_to) is_applicable_to = 'new';
 
-        if (!req.files || !req.files.template) {
-            return res.status(400).json({ message: 'No file uploaded' });
+        let filename = null;
+        if (req.files && req.files.template) {
+            const uploadedFile = req.files.template;
+            const requirementsDir = '/app/requirements';
+            if (!fs.existsSync(requirementsDir)) fs.mkdirSync(requirementsDir, { recursive: true });
+            filename = `requirement-${Date.now()}-${uploadedFile.name}`;
+            fs.writeFileSync(path.join(requirementsDir, filename), uploadedFile.data);
         }
 
-        const uploadedFile = req.files.template;
+        let data = await requirementModel.addRequirement(
+            requirement_name.trim(),
+            is_applicable_to,
+            filename,
+            req.user.user_id
+        );
+        data = Array.isArray(data) ? data[0] : data;
 
-        // Optionally validate file type here if needed
-        // Example: Only allow PDFs
-        // if (uploadedFile.mimetype !== 'application/pdf') {
-        //     return res.status(400).json({ message: 'Only PDF files allowed' });
-        // }
+        // Broadcast full list for consistency
+        const fullList = await requirementModel.getRequirements();
+        publishToChannel('application_requirements', { operation: 'SYNC', data: fullList });
 
-        // Save file to disk
-        const requirementsDir = '/app/requirements';
-        if (!fs.existsSync(requirementsDir)) {
-            fs.mkdirSync(requirementsDir, { recursive: true });
-        }
-        const filename = `requirement-${Date.now()}-${uploadedFile.name}`;
-        const savePath = path.join(requirementsDir, filename);
-
-        try {
-            fs.writeFileSync(savePath, uploadedFile.data);
-        } catch (writeError) {
-            return res.status(500).json({ message: 'Error saving file', error: writeError.message });
-        }
-
-        const data = await requirementModel.addRequirement(requirement_name, filename, req.user.user_id);
-        publishToChannel('application_requirements', {
-            operation: 'CREATE',
-            data: data
-        })
-        res.status(201).json({ message: 'Requirement uploaded successfully' });
+        res.status(201).json({ message: 'Requirement saved', requirement: data });
     } catch (err) {
-        console.log(err);
-        return res.status(500).json({ message: "Internal server error" });
+        console.error(err);
+        res.status(500).json({ message: err.sqlMessage || err.message || 'Internal server error' });
     }
 }
 
 async function getRequirements(req, res) {
-    const { sessionId } = req.query;
+    const { sessionId, type, realtime } = req.query; // realtime optional flag (any truthy value)
     try {
-        const requirements = await requirementModel.getRequirements();
+        let filterType = null;
+        if (type !== undefined && type !== null && type !== '') {
+            const t = type.toString().toLowerCase().trim();
+            if (!['new','renew'].includes(t)) {
+                return res.status(400).json({ message: 'Invalid type filter (use new or renew)' });
+            }
+            filterType = t;
+        }
+
+        const requirements = await requirementModel.getRequirements(filterType);
+
+        // Maintain old behavior: just return JSON if no sessionId.
+        // If sessionId provided (and optional realtime flag), subscribe and push a snapshot
         if (sessionId) {
             subscribeToChannel(sessionId, "application_requirements");
+
+            // Send an immediate snapshot so connected SSE clients get current data without waiting for a CRUD.
+            // Keep the existing event shape used by CRUD (operation: 'SYNC', data: [...])
+            publishToChannel('application_requirements', {
+                operation: 'SYNC',
+                data: requirements
+            });
         }
+
         res.json(requirements);
     } catch (error) {
+        console.error('[getRequirements] error:', error);
         res.status(500).json({
             error: error.message || "An error occurred while fetching the requirements.",
         });
     }
-
 }
+
 async function downloadTemplate(req, res) {
     const template_name = req.query.template_name;
     try {
@@ -115,62 +132,63 @@ async function deleteRequirement(req, res) {
 }
 
 async function updateRequirement(req, res) {
-    const { requirement_name, id, template_name } = req.body;
-    try {
-        // Get the current requirement to find the old file if needed
-        const [requirement] = await requirementModel.getSpecificRequirement(id);
-        if (!requirement) {
-            return res.status(404).json({ message: 'Requirement not found' });
-        }
+  let { requirement_name, id, is_applicable_to } = req.body;
+  try {
+    if (!id) return res.status(400).json({ message: 'Missing id' });
 
-        let newFileName = requirement.file_path;
-
-        if (!req.files || !req.files.template) {
-            // No new file uploaded, just update the name
-            const data = await requirementModel.updateRequirement(id, requirement_name, newFileName);
-            publishToChannel('application_requirements', {
-                operation: 'UPDATE',
-                data: data
-            })
-            return res.status(200).json({ message: 'Requirement updated successfully' });
-        } else {
-            // New file uploaded: delete old file, save new file, update DB
-            const uploadedFile = req.files.template;
-
-            // Delete old file
-            if (requirement.file_path) {
-                const oldFilePath = path.join('/app/requirements', requirement.file_path);
-                try {
-                    if (fs.existsSync(oldFilePath)) {
-                        fs.unlinkSync(oldFilePath);
-                    }
-                } catch (fileErr) {
-                    console.error('Error deleting old file:', fileErr);
-                }
-            }
-
-            // Save new file
-            const filename = `requirement-${Date.now()}-${uploadedFile.name}`;
-            const savePath = path.join('/app/requirements', filename);
-            try {
-                fs.writeFileSync(savePath, uploadedFile.data);
-            } catch (writeError) {
-                return res.status(500).json({ message: 'Error saving file', error: writeError.message });
-            }
-
-            newFileName = filename;
-            const data = await requirementModel.updateRequirement(id, requirement_name, newFileName);
-            publishToChannel('application_requirements', {
-                operation: 'UPDATE',
-                data: data
-            })
-            return res.status(200).json({ message: 'Requirement and file updated successfully' });
-        }
-    } catch (error) {
-        res.status(500).json({
-            error: error.message || "An error occurred while updating the requirement.",
-        });
+    requirement_name = (requirement_name || '').trim();
+    if (requirement_name.length < 2) {
+      return res.status(400).json({ message: 'Requirement name is required' });
     }
+
+    // Normalize & validate type BEFORE calling model
+    is_applicable_to = (is_applicable_to || '').toString().trim().toLowerCase();
+    if (!['new', 'renew', 'both'].includes(is_applicable_to)) {
+      return res.status(400).json({ message: 'Invalid type selection' });
+    }
+
+    console.log('[CTRL updateRequirement] body:', {
+      id,
+      requirement_name,
+      is_applicable_to,
+      hasFile: !!(req.files && req.files.template),
+    });
+
+    const existingArr = await requirementModel.getSpecificRequirement(id);
+    const existing = existingArr[0];
+    if (!existing) return res.status(404).json({ message: 'Requirement not found' });
+
+    let newFileName = null;
+
+    if (req.files && req.files.template) {
+      if (existing.file_path) {
+        const oldFile = path.join('/app/requirements', existing.file_path);
+        if (fs.existsSync(oldFile)) {
+          try { fs.unlinkSync(oldFile); } catch (e) { console.error('File delete error', e); }
+        }
+      }
+      const uploadedFile = req.files.template;
+      newFileName = `requirement-${Date.now()}-${uploadedFile.name}`;
+      fs.writeFileSync(path.join('/app/requirements', newFileName), uploadedFile.data);
+    }
+
+    // Pass NULL for file to preserve (proc COALESCE handles)
+    let data = await requirementModel.updateRequirement(
+      id,
+      requirement_name,
+      is_applicable_to,
+      newFileName
+    );
+    data = Array.isArray(data) ? data[0] : data;
+
+    const fullList = await requirementModel.getRequirements();
+    publishToChannel('application_requirements', { operation: 'SYNC', data: fullList });
+
+    res.status(200).json({ message: 'Requirement updated', requirement: data });
+  } catch (error) {
+    console.error('[CTRL updateRequirement] error:', error);
+    res.status(500).json({ message: error.sqlMessage || error.message || 'Internal server error' });
+  }
 }
 
 async function addApplicationPeriod(req, res) {
