@@ -2724,9 +2724,8 @@ CREATE DEFINER='admin'@'%' PROCEDURE ApproveApplication(
     IN p_application_id INT
 )
 BEGIN
-    DECLARE v_step INT;  -- Moved declaration to top of BEGIN block
+    DECLARE v_step INT;
 
-    -- Update approval status
     UPDATE tbl_approval_process
     SET 
         comment = p_comment,
@@ -2734,43 +2733,40 @@ BEGIN
         `timestamp` = CURRENT_TIMESTAMP
     WHERE approval_id = p_approval_id;
 
-    -- Get current step value
     SELECT `step` INTO v_step
     FROM tbl_approval_process
     WHERE approval_id = p_approval_id;
 
-    -- Check if final approval step
     IF v_step = 5 THEN
-        -- Update application status
         UPDATE tbl_application
         SET status = 'approved',
             updated_at = CURRENT_TIMESTAMP
         WHERE application_id = p_application_id;
 
-        -- Update organization status
         UPDATE tbl_organization
         SET status = 'Approved'
         WHERE organization_id = p_organization_id;
     END IF;
-    
+
+    -- NEW: notify stakeholders
+    CALL NotifyApplicationApprovalChange(p_approval_id, p_application_id);
+
     SELECT 
-                ap.approval_id as id,
-                ap.step,
-                r.role_name,
-                ap.status,
-                u.email,
-                u.f_name,
-                u.l_name,
-                u.user_id,
-                ap.comment,
-                ap.timestamp
-            FROM tbl_approval_process ap
-            JOIN tbl_role r 
-                ON ap.approval_role_id = r.role_id
-            LEFT JOIN tbl_user u 
-                ON ap.approver_id = u.user_id
-            WHERE ap.approval_id = p_approval_id;
-END$$
+        ap.approval_id as id,
+        ap.step,
+        r.role_name,
+        ap.status,
+        u.email,
+        u.f_name,
+        u.l_name,
+        u.user_id,
+        ap.comment,
+        ap.timestamp
+    FROM tbl_approval_process ap
+    JOIN tbl_role r ON ap.approval_role_id = r.role_id
+    LEFT JOIN tbl_user u ON ap.approver_id = u.user_id
+    WHERE ap.approval_id = p_approval_id;
+END $$
 DELIMITER ;
 
 DELIMITER $$
@@ -2781,48 +2777,44 @@ CREATE DEFINER='admin'@'%' PROCEDURE RejectApplication(
     IN p_comment TEXT
 )
 BEGIN
-
     START TRANSACTION;
 
-    -- Update approval process
     UPDATE tbl_approval_process
     SET status = 'Rejected',
         comment = p_comment,
         timestamp = CURRENT_TIMESTAMP
     WHERE approval_id = p_approval_id;
 
-    -- Update application status
     UPDATE tbl_application
     SET status = 'rejected',
         updated_at = CURRENT_TIMESTAMP
     WHERE application_id = p_application_id;
 
-    -- Update organization status
     UPDATE tbl_organization
     SET status = 'Rejected'
     WHERE organization_id = p_organization_id;
+
     COMMIT;
 
+    -- NEW: notify stakeholders
+    CALL NotifyApplicationApprovalChange(p_approval_id, p_application_id);
+
     SELECT 
-                ap.approval_id as id,
-                ap.step,
-                r.role_name,
-                ap.status,
-                u.email,
-                u.f_name,
-                u.l_name,
-                u.user_id,
-                ap.comment,
-                ap.timestamp
-            FROM tbl_approval_process ap
-            JOIN tbl_role r 
-                ON ap.approval_role_id = r.role_id
-            LEFT JOIN tbl_user u 
-                ON ap.approver_id = u.user_id
-            WHERE ap.approval_id = p_approval_id;
-
-
-END$$
+        ap.approval_id as id,
+        ap.step,
+        r.role_name,
+        ap.status,
+        u.email,
+        u.f_name,
+        u.l_name,
+        u.user_id,
+        ap.comment,
+        ap.timestamp
+    FROM tbl_approval_process ap
+    JOIN tbl_role r ON ap.approval_role_id = r.role_id
+    LEFT JOIN tbl_user u ON ap.approver_id = u.user_id
+    WHERE ap.approval_id = p_approval_id;
+END $$
 DELIMITER ;
 
 DELIMITER $$
@@ -7313,6 +7305,189 @@ BEGIN
         WHERE e.event_id = v_event_id;
     END IF;
 END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetNotificationsByEmail(
+    IN p_email VARCHAR(200),
+    IN p_is_read BOOLEAN,     -- pass NULL to ignore filter, 0 for unread, 1 for read
+    IN p_limit INT,
+    IN p_offset INT
+)
+BEGIN
+    DECLARE v_user_id VARCHAR(200);
+
+    IF p_email IS NULL OR p_email = '' THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Email required';
+    END IF;
+
+    SELECT user_id INTO v_user_id
+    FROM tbl_user
+    WHERE email = p_email
+    LIMIT 1;
+
+    IF v_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'User not found for provided email';
+    END IF;
+
+    IF p_limit IS NULL OR p_limit <= 0 THEN SET p_limit = 50; END IF;
+    IF p_offset IS NULL OR p_offset < 0 THEN SET p_offset = 0; END IF;
+
+    SELECT 
+        n.notification_id,
+        n.sender_id,
+        n.entity_type,
+        n.entity_id,
+        n.title,
+        n.message,
+        n.url,
+        n.created_at,
+        nr.is_read
+    FROM tbl_notification n
+    JOIN tbl_notification_recipient nr ON nr.notification_id = n.notification_id
+    WHERE nr.recipient_type = 'user'
+      AND nr.recipient_id = v_user_id
+      AND (p_is_read IS NULL OR nr.is_read = p_is_read)
+    ORDER BY n.created_at DESC
+    LIMIT p_limit OFFSET p_offset;
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE MarkNotificationRead(
+    IN p_notification_id INT,
+    IN p_user_id VARCHAR(200)
+)
+BEGIN
+    UPDATE tbl_notification_recipient
+    SET is_read = TRUE
+    WHERE notification_id = p_notification_id
+      AND recipient_type = 'user'
+      AND recipient_id = p_user_id;
+    SELECT ROW_COUNT() AS rows_updated;
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE NotifyApplicationApprovalChange(
+    IN p_approval_id INT,
+    IN p_application_id INT
+)
+BEGIN
+    DECLARE v_application_status VARCHAR(20);
+    DECLARE v_organization_id INT;
+    DECLARE v_applicant_user_id VARCHAR(200);
+    DECLARE v_approver_id VARCHAR(200);
+    DECLARE v_org_name VARCHAR(100);
+    DECLARE v_step INT;
+    DECLARE v_step_status ENUM('Pending','Approved','Rejected');
+    DECLARE v_title VARCHAR(255);
+    DECLARE v_message TEXT;
+    DECLARE v_url VARCHAR(255);
+    DECLARE v_notification_id INT;
+    DECLARE v_application_type ENUM('new','renewal');
+    DECLARE v_total_steps INT DEFAULT 0;
+    DECLARE v_completed_steps INT DEFAULT 0;
+    DECLARE v_remaining_steps INT DEFAULT 0;
+
+    /* Context */
+    SELECT a.status,
+           a.organization_id,
+           a.applicant_user_id,
+           o.name,
+           a.application_type
+      INTO v_application_status,
+           v_organization_id,
+           v_applicant_user_id,
+           v_org_name,
+           v_application_type
+    FROM tbl_application a
+    JOIN tbl_organization o ON a.organization_id = o.organization_id
+    WHERE a.application_id = p_application_id;
+
+    SELECT approver_id, step, status
+      INTO v_approver_id, v_step, v_step_status
+    FROM tbl_approval_process
+    WHERE approval_id = p_approval_id;
+
+    /* Step metrics (via mapping table) */
+    SELECT COUNT(*) INTO v_total_steps
+    FROM tbl_application_approval
+    WHERE application_id = p_application_id;
+
+    SELECT COUNT(*) INTO v_completed_steps
+    FROM tbl_application_approval aa
+    JOIN tbl_approval_process ap ON aa.approval_id = ap.approval_id
+    WHERE aa.application_id = p_application_id
+      AND ap.status = 'Approved';
+
+    SET v_remaining_steps = v_total_steps - v_completed_steps;
+
+    /* Frontend URL (org-name slug) */
+    SET v_url = CONCAT('/organizations/app-details/', v_org_name);
+
+    /* Build notification text */
+    IF LOWER(v_application_status) = 'approved' THEN
+        SET v_title = CONCAT('Application Fully Approved: ', v_org_name);
+        SET v_message = CONCAT(
+            'The ', v_application_type,
+            ' application for ', v_org_name,
+            ' has completed all approval steps (', v_total_steps, ').'
+        );
+    ELSEIF v_step_status = 'Approved' THEN
+        SET v_title = CONCAT('Step ', v_step, ' Approved: ', v_org_name);
+        SET v_message = CONCAT(
+            'Step ', v_step, ' of ', v_total_steps,
+            ' approved. ', v_remaining_steps,
+            ' step(s) remaining.'
+        );
+    ELSEIF v_step_status = 'Rejected' OR LOWER(v_application_status) = 'rejected' THEN
+        SET v_title = CONCAT('Application Rejected: ', v_org_name);
+        SET v_message = CONCAT(
+            'The application was rejected at step ', v_step,
+            ' (', v_application_type, ').'
+        );
+    ELSE
+        SET v_title = CONCAT('Application Update: ', v_org_name);
+        SET v_message = CONCAT(
+            'Status: ', v_application_status,
+            '. Current step ', v_step, ' of ', v_total_steps, '.'
+        );
+    END IF;
+
+    /* Insert notification */
+    INSERT INTO tbl_notification (
+        sender_id,
+        entity_type,
+        entity_id,
+        title,
+        message,
+        url
+    ) VALUES (
+        v_approver_id,
+        'approval',
+        p_application_id,
+        v_title,
+        v_message,
+        v_url
+    );
+    SET v_notification_id = LAST_INSERT_ID();
+
+    /* Recipients: applicant, adviser, all approvers */
+    INSERT INTO tbl_notification_recipient (notification_id, recipient_type, recipient_id)
+    SELECT v_notification_id, 'user', rid
+    FROM (
+        SELECT v_applicant_user_id AS rid
+        UNION
+        SELECT adviser_id FROM tbl_organization WHERE organization_id = v_organization_id
+        UNION
+        SELECT approver_id
+          FROM tbl_approval_process ap
+          JOIN tbl_application_approval aa ON ap.approval_id = aa.approval_id
+         WHERE aa.application_id = p_application_id
+    ) r
+    WHERE rid IS NOT NULL;
+END $$
 DELIMITER ;
 
 -- INDEXES

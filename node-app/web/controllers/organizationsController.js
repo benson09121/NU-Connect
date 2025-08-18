@@ -209,22 +209,28 @@ async function getSpecificApplicationDetails(req, res) {
 async function approveApplication(req, res) {
     try {
         const { approval_id, comments, organization_id, application_id, appName } = req.body;
-        // Do NOT send any response before this line!
-        const result = await organizationsModel.approveApplication(approval_id, comments, organization_id, application_id);
-        publishToChannel(`application_aprroval_timeline_${appName}`,{
+        const approvalRow = await organizationsModel.approveApplication(
+            approval_id,
+            comments,
+            organization_id,
+            application_id
+        );
+        publishToChannel(`application_approval_timeline_${appName}`, {
             operation: 'UPDATE',
-            data : result
-        })
-        if(result[0].step === 5){
+            data: approvalRow
+        });
+        if (approvalRow[0]?.step === 5) {
             const update_data = await organizationsModel.getUpdateApplication(application_id);
-            console.log(update_data);
             publishToChannel('organization-applications', {
                 operation: 'UPDATE',
                 data: update_data
             });
         }
-        res.json({ message: 'Application approved successfully' });
-    } catch (error) {   
+        res.json({
+            message: 'Application approved successfully',
+            approval: approvalRow
+        });
+    } catch (error) {
         res.status(500).json({
             error: error.message || "An error occurred while approving the application.",
         });
@@ -234,12 +240,20 @@ async function approveApplication(req, res) {
 async function rejectApplication(req, res) {
     try {
         const { approval_id, comments, organization_id, application_id, appName } = req.body;
-        const result = await organizationsModel.rejectApplication(approval_id, comments, organization_id, application_id);
-        publishToChannel(`application_aprroval_timeline_${appName}`,{
+        const approvalRow = await organizationsModel.rejectApplication(
+            approval_id,
+            comments,
+            organization_id,
+            application_id
+        );
+        publishToChannel(`application_approval_timeline_${appName}`, {
             operation: 'UPDATE',
-            data : result
-        })
-        res.json(result);
+            data: approvalRow
+        });
+        res.json({
+            message: 'Application rejected successfully',
+            approval: approvalRow
+        });
     } catch (error) {
         res.status(500).json({
             error: error.message || "An error occurred while rejecting the application.",
@@ -897,7 +911,7 @@ async function GetApprovalTimeline(req, res){
         const { sessionId, org_name} = req.query;
         const result = await organizationsModel.GetApprovalTimeline(org_name);
         if (sessionId) {
-            subscribeToChannel(sessionId, `application_aprroval_timeline_${org_name}`);
+            subscribeToChannel(sessionId, `application_approval_timeline_${org_name}`);
         }
         res.status(201).json(result);
     } catch (error) {
