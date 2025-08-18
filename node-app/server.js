@@ -47,7 +47,9 @@ const logsRouter = require('./web/routes/logs');
 const programsRoutesWeb = require('./web/routes/programs');
 const sse = require('./web/routes/sse');
 const emailSuggestionsRoutes = require('./web/routes/emailSuggestions');
+const notificationsRoutes = require('./web/routes/notifications');
 const publicRoutes = require('./web/routes/public');
+
 
 // Routes on Mobile
 app.use('/', indexRoutes);
@@ -67,6 +69,7 @@ app.use('/api/web', logsRouter);
 app.use('/api/web', programsRoutesWeb);
 app.use('/api/web', sse);
 app.use('/api/web', emailSuggestionsRoutes);
+app.use('/api/web', notificationsRoutes);
 app.use('/api/web/public', publicRoutes);
 
 // Add this line with other route uses
