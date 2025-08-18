@@ -13,12 +13,30 @@ async function getAllEvents() {
     }
 }
 
-async function createEvent(user_id, title, description, venue, date, start_time, end_time, organization_id, status, type, is_open_to_all) {
+async function createEvent(user_id, title, description, venue_type, venue, start_date, end_date, start_time, end_time, organization_id, cycle_number, event_type, status, type, is_open_to, fee, capacity) {
     const connection = await pool.getConnection();
     try {
         const [result] = await connection.query(
-            'CALL CreateEvent(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);',
-            [user_id, title, description, venue, date, start_time, end_time, organization_id, status ?? 'Pending', type ?? 'Free', is_open_to_all ?? 1]// 1 - 0
+            'CALL CreateEvent(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);',
+            [
+                user_id, 
+                title, 
+                description, 
+                venue_type || 'Face to face',
+                venue, 
+                start_date, 
+                end_date,
+                start_time, 
+                end_time, 
+                organization_id, 
+                cycle_number,
+                event_type || 'Organization',
+                status || 'Pending', 
+                type || 'Free', 
+                is_open_to || 'Members only',
+                fee,
+                capacity
+            ]
         );
         // Invalidate the cache
         await redisClient.del(`events:user:${user_id}`);

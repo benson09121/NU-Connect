@@ -282,8 +282,9 @@ CREATE TABLE tbl_archived_committees (
 
 CREATE TABLE tbl_event (
     event_id INT AUTO_INCREMENT PRIMARY KEY,
-    organization_id INT NOT NULL,
-    cycle_number INT NOT NULL,
+    organization_id INT NULL,
+    cycle_number INT NULL,
+    event_type ENUM('Organization', 'SDAO', 'System') DEFAULT 'Organization',
     user_id VARCHAR(200) NOT NULL,
     title VARCHAR(300) NOT NULL,
     description TEXT NOT NULL,
@@ -300,10 +301,92 @@ CREATE TABLE tbl_event (
     capacity INT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     certificate VARCHAR(1000) DEFAULT NULL,
-       FOREIGN KEY (organization_id, cycle_number) REFERENCES tbl_renewal_cycle(organization_id, cycle_number) ON DELETE CASCADE,
-    FOREIGN KEY (organization_id) REFERENCES tbl_organization(organization_id) ON DELETE CASCADE,
-    FOREIGN KEY (user_id) REFERENCES tbl_user(user_id) ON UPDATE CASCADE
+    FOREIGN KEY (organization_id) REFERENCES tbl_organization(organization_id) ON DELETE SET NULL,
+    FOREIGN KEY (user_id) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
+    INDEX idx_event_type (event_type),
+    INDEX idx_org_cycle (organization_id, cycle_number),
+    INDEX idx_dates (start_date, end_date),
+    INDEX idx_status (status)
 );
+
+-- Trigger to validate event data before insert
+DELIMITER $$
+CREATE TRIGGER trg_event_validate_before_insert
+    BEFORE INSERT ON tbl_event
+    FOR EACH ROW
+BEGIN
+    -- For Organization events, both organization_id and cycle_number must be NOT NULL
+    IF NEW.event_type = 'Organization' THEN
+        IF NEW.organization_id IS NULL OR NEW.cycle_number IS NULL THEN
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Organization events must have both organization_id and cycle_number';
+        END IF;
+        
+        -- Validate that the organization_id and cycle_number combination exists in tbl_renewal_cycle
+        IF NOT EXISTS (
+            SELECT 1 FROM tbl_renewal_cycle 
+            WHERE organization_id = NEW.organization_id 
+            AND cycle_number = NEW.cycle_number
+        ) THEN
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Invalid organization_id and cycle_number combination';
+        END IF;
+    END IF;
+    
+    -- For SDAO and System events, organization_id and cycle_number should be NULL
+    IF NEW.event_type IN ('SDAO', 'System') THEN
+        SET NEW.organization_id = NULL;
+        SET NEW.cycle_number = NULL;
+    END IF;
+    
+    -- Validate date range
+    IF NEW.start_date > NEW.end_date THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Start date cannot be after end date';
+    END IF;
+    
+    -- Validate time range for same-day events
+    IF NEW.start_date = NEW.end_date AND NEW.start_time >= NEW.end_time THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Start time must be before end time for same-day events';
+    END IF;
+END$$
+
+-- Trigger to validate event data before update
+CREATE TRIGGER trg_event_validate_before_update
+    BEFORE UPDATE ON tbl_event
+    FOR EACH ROW
+BEGIN
+    -- For Organization events, both organization_id and cycle_number must be NOT NULL
+    IF NEW.event_type = 'Organization' THEN
+        IF NEW.organization_id IS NULL OR NEW.cycle_number IS NULL THEN
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Organization events must have both organization_id and cycle_number';
+        END IF;
+        
+        -- Validate that the organization_id and cycle_number combination exists in tbl_renewal_cycle
+        IF NOT EXISTS (
+            SELECT 1 FROM tbl_renewal_cycle 
+            WHERE organization_id = NEW.organization_id 
+            AND cycle_number = NEW.cycle_number
+        ) THEN
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Invalid organization_id and cycle_number combination';
+        END IF;
+    END IF;
+    
+    -- For SDAO and System events, organization_id and cycle_number should be NULL
+    IF NEW.event_type IN ('SDAO', 'System') THEN
+        SET NEW.organization_id = NULL;
+        SET NEW.cycle_number = NULL;
+    END IF;
+    
+    -- Validate date range
+    IF NEW.start_date > NEW.end_date THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Start date cannot be after end date';
+    END IF;
+    
+    -- Validate time range for same-day events
+    IF NEW.start_date = NEW.end_date AND NEW.start_time >= NEW.end_time THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Start time must be before end time for same-day events';
+    END IF;
+END$$
+
+DELIMITER ;
 
 CREATE TABLE tbl_event_application (
     event_application_id INT AUTO_INCREMENT PRIMARY KEY,
@@ -754,15 +837,20 @@ CREATE DEFINER='admin'@'%' PROCEDURE CreateEvent(IN
     p_user_id VARCHAR(200),
     p_title VARCHAR(300),
     p_description TEXT,
+    p_venue_type ENUM('Face to face', 'Online'),
     p_venue VARCHAR(200),
     p_start_date DATE,
     p_end_date DATE,
     p_start_time TIME,
     p_end_time TIME,
     p_organization_id INT,
+    p_cycle_number INT,
+    p_event_type ENUM('Organization', 'SDAO', 'System'),
     p_status ENUM('Pending', 'Approved', 'Rejected', 'Archived'),
     p_type ENUM('Paid', 'Free'),
-    p_is_open_to_all BOOLEAN
+    p_is_open_to ENUM('Members only', 'Open to all', 'NU Students only'),
+    p_fee INT,
+    p_capacity INT
 )
 BEGIN
     DECLARE v_base_program_id INT;
@@ -776,21 +864,36 @@ BEGIN
 
     START TRANSACTION;
 
-    SELECT base_program_id INTO v_base_program_id 
-    FROM tbl_organization 
-    WHERE organization_id = p_organization_id;
+    -- Only check organization constraints for Organization events
+    IF p_event_type = 'Organization' THEN
+        SELECT base_program_id INTO v_base_program_id 
+        FROM tbl_organization 
+        WHERE organization_id = p_organization_id;
 
-
-    IF p_is_open_to_all = FALSE AND v_base_program_id IS NULL THEN
-        SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'Cannot create restricted event for open organization';
+        IF p_is_open_to = 'Members only' AND v_base_program_id IS NULL THEN
+            SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Cannot create restricted event for open organization';
+        END IF;
+        
+        -- Validate that organization_id and cycle_number combination exists
+        IF NOT EXISTS (
+            SELECT 1 FROM tbl_renewal_cycle 
+            WHERE organization_id = p_organization_id 
+            AND cycle_number = p_cycle_number
+        ) THEN
+            SIGNAL SQLSTATE '45000' 
+            SET MESSAGE_TEXT = 'Invalid organization_id and cycle_number combination';
+        END IF;
     END IF;
  
     INSERT INTO tbl_event (
         organization_id,
+        cycle_number,
+        event_type,
         user_id,
         title,
         description,
+        venue_type,
         venue,
         start_date,
         end_date,
@@ -798,12 +901,17 @@ BEGIN
         end_time,
         status,
         type,
-        is_open_to_all
+        is_open_to,
+        fee,
+        capacity
     ) VALUES (
-        p_organization_id,
+        CASE WHEN p_event_type = 'Organization' THEN p_organization_id ELSE NULL END,
+        CASE WHEN p_event_type = 'Organization' THEN p_cycle_number ELSE NULL END,
+        p_event_type,
         p_user_id,
         p_title,
         p_description,
+        p_venue_type,
         p_venue,
         p_start_date,
         p_end_date,
@@ -811,12 +919,15 @@ BEGIN
         p_end_time,
         p_status,
         p_type,
-        p_is_open_to_all
+        p_is_open_to,
+        p_fee,
+        p_capacity
     );
     
     SET v_event_id = LAST_INSERT_ID();
 
-    IF p_is_open_to_all = FALSE THEN
+    -- Only create course associations for organization events with restricted access
+    IF p_event_type = 'Organization' AND p_is_open_to = 'Members only' THEN
         INSERT INTO tbl_event_course (event_id, program_id)
         SELECT v_event_id, program_id
         FROM (
@@ -1099,9 +1210,16 @@ CREATE DEFINER='admin'@'%' PROCEDURE AddCertificateTemplate(IN
     p_uploaded_by VARCHAR(200)
 )
 BEGIN
-    INSERT INTO tbl_certificate_template (event_id, template_path, uploaded_by)
-    VALUES (p_event_id, p_template_path, p_uploaded_by);
-
+    IF EXISTS (SELECT 1 FROM tbl_certificate_template WHERE event_id = p_event_id) THEN
+        UPDATE tbl_certificate_template 
+        SET template_path = p_template_path,
+            uploaded_by = p_uploaded_by,
+            created_at = CURRENT_TIMESTAMP
+        WHERE event_id = p_event_id;
+    ELSE
+        INSERT INTO tbl_certificate_template (event_id, template_path, uploaded_by)
+        VALUES (p_event_id, p_template_path, p_uploaded_by);
+    END IF;
 END $$
 DELIMITER ;
 
@@ -2441,7 +2559,7 @@ BEGIN
         e.user_id,
         e.created_at
     FROM tbl_event e
-    JOIN tbl_organization o ON e.organization_id = o.organization_id;
+    LEFT JOIN tbl_organization o ON e.organization_id = o.organization_id;
 END $$
 DELIMITER ;
 
@@ -2459,6 +2577,7 @@ BEGIN
         e.end_time,
         e.capacity,
         e.certificate,
+        e.event_type,
         e.fee,
         e.is_open_to,
         e.venue_type,
@@ -2470,7 +2589,7 @@ BEGIN
         e.user_id,
         e.created_at
     FROM tbl_event e
-    JOIN tbl_organization o ON e.organization_id = o.organization_id
+    LEFT JOIN tbl_organization o ON e.organization_id = o.organization_id
     WHERE e.event_id = p_event_id;
 END $$
 DELIMITER ;
@@ -2609,14 +2728,30 @@ BEGIN
                     'recruiting', o.is_recruiting,
                     'open_courses', o.is_open_to_all_courses
                 ),
-                'program', JSON_OBJECT(
-                    'id', p.program_id,
-                    'name', p.name,
-                    'description', p.abbreviation
+                'programs', COALESCE(
+                    (SELECT JSON_ARRAYAGG(
+                        JSON_OBJECT(
+                            'id', prog.program_id,
+                            'name', prog.name,
+                            'abbreviation', prog.abbreviation
+                        )
+                    )
+                    FROM (
+                        SELECT p.program_id, p.name, p.abbreviation
+                        FROM tbl_program p
+                        WHERE p.program_id = o.base_program_id
+                        
+                        UNION
+                        
+                        SELECT prog.program_id, prog.name, prog.abbreviation
+                        FROM tbl_organization_course oc
+                        JOIN tbl_program prog ON oc.program_id = prog.program_id
+                        WHERE oc.organization_id = o.organization_id
+                    ) AS prog),
+                    JSON_ARRAY()
                 )
             )
             FROM tbl_organization o
-            LEFT JOIN tbl_program p ON o.base_program_id = p.program_id
             WHERE o.organization_id = v_organization_id
         ),
         'application', (
@@ -3711,6 +3846,7 @@ BEGIN
         organization_id,
         user_id,
         cycle_number,
+        event_type,
         title,
         description,
         venue_type,
@@ -3728,6 +3864,7 @@ BEGIN
         p_organization_id,
         p_applicant_user_id,
         v_cycle_number,
+        'Organization',
         JSON_UNQUOTE(JSON_EXTRACT(p_event, '$.title')),
         JSON_UNQUOTE(JSON_EXTRACT(p_event, '$.description')),
         JSON_UNQUOTE(JSON_EXTRACT(p_event, '$.venue_type')),
@@ -4705,7 +4842,7 @@ BEGIN
                 'questions', (
                     SELECT JSON_ARRAYAGG(
                         JSON_OBJECT(
-                            'question_id', q.question_id,
+                            'id', q.question_id,
                             'question_text', q.question_text,
                             'question_type', q.question_type,
                             'responses', (
@@ -5052,86 +5189,11 @@ BEGIN
         @total_upcoming_events AS total_upcoming_events;
 END$$
 DELIMITER ;
-
-DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE CreateSDAOEvent(
-    IN p_organization_id INT,
-    IN p_user_id VARCHAR(200),
-    IN p_title VARCHAR(300),
-    IN p_description TEXT,
-    IN p_venue_type ENUM('Face to face', 'Online'),
-    IN p_venue VARCHAR(200),
-    IN p_start_date DATE,
-    IN p_end_date DATE,
-    IN p_start_time TIME,
-    IN p_end_time TIME,
-    IN p_status ENUM('Pending', 'Approved', 'Rejected', 'Archived'),
-    IN p_type ENUM('Paid', 'Free'),
-    IN p_is_open_to ENUM('Members only', 'Open to all', 'NU Students only'),
-    IN p_fee INT,
-    IN p_capacity INT,
-    IN p_certificate VARCHAR(1000)
-)
-BEGIN
-
-DECLARE v_cycle_number INT;
-
-
-SELECT cycle_number INTO v_cycle_number
-FROM tbl_renewal_cycle
-WHERE organization_id = p_organization_id
-ORDER BY cycle_number DESC
-LIMIT 1;
-
-
-    INSERT INTO tbl_event (
-        organization_id,
-        user_id,
-        cycle_number,
-        title,
-        description,
-        venue_type,
-        venue,
-        start_date,
-        end_date,
-        start_time,
-        end_time,
-        status,
-        type,
-        is_open_to,
-        fee,
-        capacity,
-        certificate
-    ) VALUES (
-        p_organization_id,
-        p_user_id,
-        v_cycle_number,
-        p_title,
-        p_description,
-        p_venue_type,
-        p_venue,
-        p_start_date,
-        p_end_date,
-        p_start_time,
-        p_end_time,
-        p_status,
-        p_type,
-        p_is_open_to,
-        p_fee,
-        p_capacity,
-        p_certificate
-    );
-
-    SELECT * FROM tbl_event WHERE event_id = LAST_INSERT_ID();
-END$$
-DELIMITER ;
-
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE CreateExecutiveMember(
     IN p_organization_id INT,
-    IN p_cycle_number INT,
     IN p_email VARCHAR(100),
-    IN p_program_name VARCHAR(50),
+    IN p_program_name VARCHAR(200),
     IN p_role_title VARCHAR(100),
     IN p_rank_level INT,
     IN p_action_by_email VARCHAR(100)
@@ -5143,9 +5205,20 @@ BEGIN
     DECLARE v_executive_role_id INT;
     DECLARE v_rank_id INT;
     DECLARE v_organization_exists INT;
-    DECLARE v_cycle_exists INT;
     DECLARE v_current_membership INT;
     DECLARE v_program_id INT;
+    DECLARE v_member_id INT;
+    DECLARE v_current_cycle INT;
+
+    -- Get current cycle number for the organization
+    SELECT MAX(cycle_number) INTO v_current_cycle
+    FROM tbl_renewal_cycle
+    WHERE organization_id = p_organization_id;
+
+    IF v_current_cycle IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'No renewal cycle found for organization';
+    END IF;
 
     -- Look up program_id from program name
     SELECT program_id INTO v_program_id
@@ -5167,17 +5240,6 @@ BEGIN
     IF v_organization_exists = 0 THEN
         SIGNAL SQLSTATE '45000' 
         SET MESSAGE_TEXT = 'Organization not found or not active';
-    END IF;
-
-    -- Validate renewal cycle exists
-    SELECT COUNT(*) INTO v_cycle_exists 
-    FROM tbl_renewal_cycle 
-    WHERE organization_id = p_organization_id 
-    AND cycle_number = p_cycle_number;
-    
-    IF v_cycle_exists = 0 THEN
-        SIGNAL SQLSTATE '45000' 
-        SET MESSAGE_TEXT = 'Renewal cycle not found';
     END IF;
 
     -- Get user_id of the action performer
@@ -5203,42 +5265,42 @@ BEGIN
     WHERE email = p_email 
     LIMIT 1;
 
-    -- Check if user is already a member in this cycle
-    IF v_user_id IS NOT NULL THEN
-        SELECT COUNT(*) INTO v_current_membership
-        FROM tbl_organization_members
-        WHERE organization_id = p_organization_id
-        AND cycle_number = p_cycle_number
-        AND user_id = v_user_id;
-
-        IF v_current_membership > 0 THEN
-            SIGNAL SQLSTATE '45000' 
-            SET MESSAGE_TEXT = 'User is already a member in this cycle';
-        END IF;
-    END IF;
-
     IF v_user_id IS NULL THEN
-        -- Create new user with pending status
-        SET v_user_id = CONCAT('usr-', UUID_SHORT());
-        
-        INSERT INTO tbl_user (
-            user_id,
-            email,
-            role_id,
-            program_id,
-            status,
-            created_at,
-            updated_at
-        ) VALUES (
-            v_user_id,
-            p_email,
-            v_role_id,
-            v_program_id,
-            'Pending',
-            CURRENT_TIMESTAMP,
-            CURRENT_TIMESTAMP
-        );
+        SIGNAL SQLSTATE '45000' 
+        SET MESSAGE_TEXT = 'User not found. User must be registered first before becoming an executive.';
     END IF;
+
+    -- Check if user is already a member in this organization and cycle
+    SELECT member_id INTO v_member_id
+    FROM tbl_organization_members
+    WHERE organization_id = p_organization_id
+    AND cycle_number = v_current_cycle
+    AND user_id = v_user_id
+    AND status = 'Active';
+
+    IF v_member_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' 
+        SET MESSAGE_TEXT = 'User must be an active member of the organization before becoming an executive';
+    END IF;
+
+    -- Check if user is already an executive in this cycle
+    SELECT COUNT(*) INTO v_current_membership
+    FROM tbl_organization_members
+    WHERE organization_id = p_organization_id
+    AND cycle_number = v_current_cycle
+    AND user_id = v_user_id
+    AND member_type = 'Executive';
+
+    IF v_current_membership > 0 THEN
+        SIGNAL SQLSTATE '45000' 
+        SET MESSAGE_TEXT = 'User is already an executive member in this cycle';
+    END IF;
+
+    -- Update user's program if different
+    UPDATE tbl_user 
+    SET program_id = v_program_id
+    WHERE user_id = v_user_id 
+    AND (program_id IS NULL OR program_id != v_program_id);
 
     -- Get rank_id from the specified rank level
     SELECT rank_id INTO v_rank_id 
@@ -5251,11 +5313,11 @@ BEGIN
         SET MESSAGE_TEXT = 'Invalid rank level';
     END IF;
 
-    -- Create executive role if not exists
+    -- Create executive role if not exists (using current cycle)
     SELECT executive_role_id INTO v_executive_role_id
     FROM tbl_executive_role
     WHERE organization_id = p_organization_id
-      AND cycle_number = p_cycle_number
+      AND cycle_number = v_current_cycle
       AND role_title = p_role_title
       AND rank_id = v_rank_id
     LIMIT 1;
@@ -5269,7 +5331,7 @@ BEGIN
             created_at
         ) VALUES (
             p_organization_id,
-            p_cycle_number,
+            v_current_cycle,
             p_role_title,
             v_rank_id,
             CURRENT_TIMESTAMP
@@ -5278,22 +5340,12 @@ BEGIN
         SET v_executive_role_id = LAST_INSERT_ID();
     END IF;
 
-    -- Insert into organization members as Executive
-    INSERT INTO tbl_organization_members (
-        organization_id, 
-        cycle_number, 
-        user_id, 
-        member_type, 
-        executive_role_id,
-        joined_at
-    ) VALUES (
-        p_organization_id, 
-        p_cycle_number, 
-        v_user_id, 
-        'Executive', 
-        v_executive_role_id,
-        CURRENT_TIMESTAMP
-    );
+    -- Update existing member to Executive status
+    UPDATE tbl_organization_members 
+    SET 
+        member_type = 'Executive',
+        executive_role_id = v_executive_role_id
+    WHERE member_id = v_member_id;
 
     -- Log the action
     INSERT INTO tbl_logs (
@@ -5304,28 +5356,45 @@ BEGIN
         timestamp
     ) VALUES (
         v_action_by_user_id,
-        CONCAT('Added executive member: ', v_user_id, ' (', p_email, ') as ', p_role_title),
-        'executive_member',
+        CONCAT('Promoted member to executive: ', v_user_id, ' (', p_email, ') as ', p_role_title),
+        'executive_member_promotion',
         JSON_OBJECT(
             'organization_id', p_organization_id, 
-            'cycle_number', p_cycle_number,
+            'cycle_number', v_current_cycle,
             'user_id', v_user_id, 
             'executive_role_id', v_executive_role_id,
             'role_title', p_role_title,
             'rank_level', p_rank_level,
-            'program_id', v_program_id
+            'program_id', v_program_id,
+            'member_id', v_member_id
         ),
         CURRENT_TIMESTAMP
     );
+
+    -- Return the created executive member data (using current cycle)
+    SELECT 
+        u.user_id AS id,
+        u.f_name AS first_name,
+        u.l_name AS last_name,
+        u.email,
+        er.role_title,
+        p.name AS program_name
+    FROM tbl_organization_members om
+    JOIN tbl_user u ON om.user_id = u.user_id
+    JOIN tbl_executive_role er ON om.executive_role_id = er.executive_role_id
+    LEFT JOIN tbl_program p ON u.program_id = p.program_id
+    WHERE om.organization_id = p_organization_id
+        AND om.cycle_number = v_current_cycle
+        AND om.member_type = 'Executive'
+        AND om.user_id = v_user_id;
 END$$
 DELIMITER ;
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE UpdateExecutiveMember(
     IN p_organization_id INT,
-    IN p_cycle_number INT,
     IN p_email VARCHAR(100),
-    IN p_program_name VARCHAR(50),
+    IN p_program_name VARCHAR(200),
     IN p_role_title VARCHAR(100),
     IN p_rank_level INT,
     IN p_action_by_email VARCHAR(100)
@@ -5337,6 +5406,17 @@ BEGIN
     DECLARE v_executive_role_id INT;
     DECLARE v_program_id INT;
     DECLARE v_action_by_user_id VARCHAR(200);
+    DECLARE v_current_cycle INT;
+
+    -- Get current cycle number for the organization
+    SELECT MAX(cycle_number) INTO v_current_cycle
+    FROM tbl_renewal_cycle
+    WHERE organization_id = p_organization_id;
+
+    IF v_current_cycle IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'No renewal cycle found for organization';
+    END IF;
 
     -- Look up program_id from program name
     SELECT program_id INTO v_program_id
@@ -5393,11 +5473,11 @@ BEGIN
     SET program_id = v_program_id, role_id = v_role_id
     WHERE user_id = v_user_id;
 
-    -- Update executive role or create if not exists
+    -- Update executive role or create if not exists (using current cycle)
     SELECT executive_role_id INTO v_executive_role_id
     FROM tbl_executive_role
     WHERE organization_id = p_organization_id
-      AND cycle_number = p_cycle_number
+      AND cycle_number = v_current_cycle
       AND role_title = p_role_title
       AND rank_id = v_rank_id
     LIMIT 1;
@@ -5411,7 +5491,7 @@ BEGIN
             created_at
         ) VALUES (
             p_organization_id,
-            p_cycle_number,
+            v_current_cycle,
             p_role_title,
             v_rank_id,
             CURRENT_TIMESTAMP
@@ -5419,11 +5499,11 @@ BEGIN
         SET v_executive_role_id = LAST_INSERT_ID();
     END IF;
 
-    -- Update organization member's executive role
+    -- Update organization member's executive role (using current cycle)
     UPDATE tbl_organization_members
     SET executive_role_id = v_executive_role_id
     WHERE organization_id = p_organization_id
-      AND cycle_number = p_cycle_number
+      AND cycle_number = v_current_cycle
       AND user_id = v_user_id
       AND member_type = 'Executive';
 
@@ -5440,7 +5520,7 @@ BEGIN
         'executive_member_update',
         JSON_OBJECT(
             'organization_id', p_organization_id,
-            'cycle_number', p_cycle_number,
+            'cycle_number', v_current_cycle,
             'user_id', v_user_id,
             'executive_role_id', v_executive_role_id,
             'role_title', p_role_title,
@@ -5449,13 +5529,29 @@ BEGIN
         ),
         CURRENT_TIMESTAMP
     );
+
+    -- Return the updated executive member data (using current cycle)
+    SELECT 
+        u.user_id AS id,
+        u.f_name AS first_name,
+        u.l_name AS last_name,
+        u.email,
+        er.role_title,
+        p.name AS program_name
+    FROM tbl_organization_members om
+    JOIN tbl_user u ON om.user_id = u.user_id
+    JOIN tbl_executive_role er ON om.executive_role_id = er.executive_role_id
+    LEFT JOIN tbl_program p ON u.program_id = p.program_id
+    WHERE om.organization_id = p_organization_id
+        AND om.cycle_number = v_current_cycle
+        AND om.member_type = 'Executive'
+        AND om.user_id = v_user_id;
 END$$
 DELIMITER ;
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE ArchiveExecutiveMember(
     IN p_organization_id INT,
-    IN p_cycle_number INT,
     IN p_email VARCHAR(100),
     IN p_action_by_email VARCHAR(100)
 )
@@ -5464,6 +5560,17 @@ BEGIN
     DECLARE v_member_id INT;
     DECLARE v_executive_role_id INT;
     DECLARE v_archived_by VARCHAR(200);
+    DECLARE v_current_cycle INT;
+
+    -- Get current cycle number for the organization
+    SELECT MAX(cycle_number) INTO v_current_cycle
+    FROM tbl_renewal_cycle
+    WHERE organization_id = p_organization_id;
+
+    IF v_current_cycle IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'No renewal cycle found for organization';
+    END IF;
 
     -- Get user_id of executive member
     SELECT user_id INTO v_user_id
@@ -5476,11 +5583,11 @@ BEGIN
         SET MESSAGE_TEXT = 'Executive member not found';
     END IF;
 
-    -- Get member_id and executive_role_id
+    -- Get member_id and executive_role_id (using current cycle)
     SELECT member_id, executive_role_id INTO v_member_id, v_executive_role_id
     FROM tbl_organization_members
     WHERE organization_id = p_organization_id
-      AND cycle_number = p_cycle_number
+      AND cycle_number = v_current_cycle
       AND user_id = v_user_id
       AND member_type = 'Executive'
     LIMIT 1;
@@ -5501,6 +5608,23 @@ BEGIN
         SET MESSAGE_TEXT = 'Action performer not found';
     END IF;
 
+    -- Return the executive member data before archiving
+    SELECT 
+        u.user_id AS id,
+        u.f_name AS first_name,
+        u.l_name AS last_name,
+        u.email,
+        er.role_title,
+        p.name AS program_name
+    FROM tbl_organization_members om
+    JOIN tbl_user u ON om.user_id = u.user_id
+    JOIN tbl_executive_role er ON om.executive_role_id = er.executive_role_id
+    LEFT JOIN tbl_program p ON u.program_id = p.program_id
+    WHERE om.organization_id = p_organization_id
+        AND om.cycle_number = v_current_cycle
+        AND om.member_type = 'Executive'
+        AND om.user_id = v_user_id;
+
     -- Archive the executive member
     INSERT INTO tbl_archived_organization_members (
         member_id,
@@ -5513,7 +5637,7 @@ BEGIN
     ) VALUES (
         v_member_id,
         p_organization_id,
-        p_cycle_number,
+        v_current_cycle,
         v_user_id,
         'Executive',
         v_executive_role_id,
@@ -5537,7 +5661,7 @@ BEGIN
         'executive_member_archive',
         JSON_OBJECT(
             'organization_id', p_organization_id,
-            'cycle_number', p_cycle_number,
+            'cycle_number', v_current_cycle,
             'user_id', v_user_id,
             'member_id', v_member_id,
             'executive_role_id', v_executive_role_id
@@ -7327,6 +7451,43 @@ CREATE INDEX idx_committee_members_user ON tbl_committee_members(user_id);
 CREATE INDEX idx_active_end_datetime 
 ON tbl_application_period(is_active, end_date, end_time);
 
+-- Additional procedure for post-event requirement checking
+DELIMITER $$
+DROP PROCEDURE IF EXISTS CheckAllPostEventRequirementsSubmitted$$
+CREATE DEFINER='admin'@'%' PROCEDURE CheckAllPostEventRequirementsSubmitted(
+    IN p_event_id INT
+)
+BEGIN
+    DECLARE v_total_post_event_requirements INT DEFAULT 0;
+    DECLARE v_submitted_post_event_requirements INT DEFAULT 0;
+    
+    -- Count total post-event requirements
+    SELECT COUNT(*)
+    INTO v_total_post_event_requirements
+    FROM tbl_event_application_requirement
+    WHERE is_applicable_to = 'post-event';
+    
+    -- Count submitted and approved post-event requirements for the event
+    SELECT COUNT(DISTINCT ers.requirement_id)
+    INTO v_submitted_post_event_requirements
+    FROM tbl_event_requirement_submissions ers
+    INNER JOIN tbl_event_application_requirement ear ON ers.requirement_id = ear.requirement_id
+    WHERE ers.event_id = p_event_id
+      AND ear.is_applicable_to = 'post-event'
+      AND ers.status = 'Approved';
+    
+    -- Return the comparison result
+    SELECT 
+        p_event_id as event_id,
+        v_total_post_event_requirements as total_requirements,
+        v_submitted_post_event_requirements as submitted_requirements,
+        CASE 
+            WHEN v_total_post_event_requirements = v_submitted_post_event_requirements THEN 1
+            ELSE 0
+        END as all_requirements_submitted;
+END$$
+DELIMITER ;
+
 -- EVENTS
 
 DELIMITER $$
@@ -7377,11 +7538,12 @@ VALUES("CREATE_EVENT"),
 ("WEB_ACCESS"),
 ("MANAGE_REGISTRATION"),
 ("SUBMIT_REQUIREMENTS"),
-("MANAGE_PROGRAMS");
+("MANAGE_PROGRAMS"),
+("CREATE_SDAO_EVENT");
 
 INSERT INTO tbl_role_permission (role_id, permission_id) 
 VALUES
-(4,1),
+(4,27),
 (4,2),
 (4,3),
 (4,4),
@@ -7522,6 +7684,7 @@ VALUES
 
 
 INSERT INTO tbl_rank_permission(rank_id, permission_id) VALUES
+(1,1),
 (1,9),
 (1,16),
 (1,11),

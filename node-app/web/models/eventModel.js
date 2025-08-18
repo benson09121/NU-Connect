@@ -4,14 +4,17 @@ async function addEvent(event) {
     const connection = await pool.getConnection();
     try {
         const sql = `INSERT INTO tbl_event (
-            event_id, title, description, date, start_time, end_time, capacity,
-            certificate, fee, is_open_to_all, organization_id, status, type, user_id,
-            venue, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+            event_id, title, description, venue_type, venue, start_date, end_date, start_time, end_time, 
+            capacity, certificate, fee, is_open_to, organization_id, cycle_number, event_type, 
+            status, type, user_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
         const params = [
-            event.event_id, event.title, event.description, event.date, event.start_time, event.end_time,
-            event.capacity, event.certificate, event.fee, event.is_open_to_all, event.organization_id,
-            event.status, event.type, event.user_id, event.venue, event.created_at
+            event.event_id, event.title, event.description, event.venue_type || 'Face to face', 
+            event.venue, event.start_date || event.date, event.end_date || event.date, 
+            event.start_time, event.end_time, event.capacity, event.certificate, event.fee, 
+            event.is_open_to || 'Members only', event.organization_id, event.cycle_number,
+            event.event_type || 'Organization', event.status, event.type, event.user_id, 
+            event.created_at
         ];
         const [result] = await connection.query(sql, params);
         return result;
@@ -88,14 +91,18 @@ async function updateEvent(event_id, event) {
     const connection = await pool.getConnection();
     try {
         const sql = `UPDATE tbl_event SET
-            title = ?, description = ?, date = ?, start_time = ?, end_time = ?, capacity = ?,
-            certificate = ?, fee = ?, is_open_to_all = ?, organization_id = ?, status = ?, type = ?,
-            user_id = ?, venue = ?, created_at = ?
+            title = ?, description = ?, venue_type = ?, venue = ?, start_date = ?, end_date = ?, 
+            start_time = ?, end_time = ?, capacity = ?, certificate = ?, fee = ?, is_open_to = ?, 
+            organization_id = ?, cycle_number = ?, event_type = ?, status = ?, type = ?, 
+            user_id = ?, created_at = ?
             WHERE event_id = ?`;
         const params = [
-            event.title, event.description, event.date, event.start_time, event.end_time,
-            event.capacity, event.certificate, event.fee, event.is_open_to_all, event.organization_id,
-            event.status, event.type, event.user_id, event.venue, event.created_at, event_id
+            event.title, event.description, event.venue_type || 'Face to face', event.venue, 
+            event.start_date || event.date, event.end_date || event.date, event.start_time, 
+            event.end_time, event.capacity, event.certificate, event.fee, 
+            event.is_open_to || 'Members only', event.organization_id, event.cycle_number,
+            event.event_type || 'Organization', event.status, event.type, event.user_id, 
+            event.created_at, event_id
         ];
         const [result] = await connection.query(sql, params);
         return result;
@@ -360,9 +367,8 @@ async function createEvent(event) {
     const connection = await pool.getConnection();
     try {
         const [rows] = await connection.query(
-            'CALL CreateSDAOEvent(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);',
+            'CALL CreateSDAOEvent(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);',
             [
-                event.organization_id,
                 event.user_id,
                 event.title,
                 event.description,

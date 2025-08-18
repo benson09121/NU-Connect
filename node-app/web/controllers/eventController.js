@@ -5,6 +5,9 @@ const TemplateHandler = require('easy-template-x').TemplateHandler;
 const convertDocxToPdf = require('../../config/convertToPdf');
 const { subscribeToChannel, publishToChannel } = require('./sseController');
 const { get } = require('http');
+const Docxtemplater = require('docxtemplater');
+const PizZip = require('pizzip');
+
 
 async function addEvent(req, res) {
     try {
@@ -105,10 +108,11 @@ async function getEventById(req, res) {
 
 async function getAttendeesbyEventId(req, res) {
     try {
-        const event_id = req.params.id;
+        const { event_id, sessionId } = req.query;
+
         const attendees = await eventModel.getAttendeesByEventId(event_id);
-        if (attendees.length === 0) {
-            return res.status(404).json({ message: 'No attendees found for this event' });
+        if (sessionId) {
+            subscribeToChannel(sessionId, `attendees_${event_id}`);
         }
         res.status(200).json(attendees);
     } catch (error) {
@@ -261,10 +265,10 @@ async function getAllEvaluationQuestions(req, res) {
 
 async function getEventEvaluationResponsesByGroup(req, res) {
   try {
-    const event_id = req.params.id;
+    const { event_id, sessionId } = req.query;
     const responses = await eventModel.getEventEvaluationResponsesByGroup(event_id);
-    if (!responses || responses.length === 0) {
-      return res.status(404).json({ message: 'No grouped evaluation responses found for this event' });
+    if (sessionId) {
+        subscribeToChannel(sessionId, `evaluation_${event_id}`);
     }
     res.status(200).json(responses);
   } catch (error) {
@@ -617,9 +621,7 @@ async function uploadOrUpdatePostEventRequirement(req, res) {
 
 async function createEvent(req, res) {
     try {
-        console.log("Incoming event creation request:", req.body);
         const event = req.body;
-
         // Look up user_id from user_email if needed
         let user_id = event.user_id;
         if (!user_id && event.user_email) {
@@ -741,60 +743,104 @@ async function addCertificate(req, res) {
     }
 }
 
+async function debugDocumentXML(inputPath) {
+    const JSZip = require('jszip');
+    const data = fs.readFileSync(inputPath);
+    const zip = await JSZip.loadAsync(data);
+    const docXml = await zip.file("word/document.xml").async("string");
+    
+    console.log('=== FULL DOCUMENT XML ===');
+    console.log(docXml);
+    console.log('=== END XML ===');
+    
+    // Look for {name} placeholder
+    const nameMatches = docXml.match(/{name}.*?/g);
+    console.log('=== NAME PLACEHOLDER MATCHES ===');
+    console.log(nameMatches);
+    
+    // Look for textbox structures
+    const textboxMatches = docXml.match(/<w:txbxContent>.*?<\/w:txbxContent>/gs);
+    console.log('=== TEXTBOX CONTENT ===');
+    console.log(textboxMatches);
+    
+    return docXml;
+}
+
 async function getSampleCertificate(req, res) {
     try {
         const { event_id } = req.query;
-
-        console.log('addGeneratedCertificate: Fetching certificate template for event_id:', event_id);
+        
+        console.log('getSampleCertificate: Starting for event_id:', event_id);
+        
         const template = await eventModel.getCertificateTemplate(event_id);
         if (!template || !template[0]) throw new Error('No template found for this event');
         
         const templatePath = `/app/certificates/templates/${template[0].template_path}`;
-        console.log('addGeneratedCertificate: Template path:', templatePath);
-        console.log('addGeneratedCertificate: Reading template file:', templatePath);
+        console.log('getSampleCertificate: Template path:', templatePath);
         
-        const templateContent = await fs.promises.readFile(templatePath);
-        if (!templateContent || templateContent.length === 0) {
-            throw new Error('Template file is empty or corrupted');
-        }
+        const content = fs.readFileSync(templatePath, 'binary');
+        const zip = new PizZip(content);
+        
+        // Updated constructor - no more setData, compile, etc.
+        const doc = new Docxtemplater(zip, { 
+            paragraphLoop: true, 
+            linebreaks: true 
+        });
 
+        const fullName = `${req.user.f_name} ${req.user.l_name}`;
+        console.log('getSampleCertificate: Full name:', fullName);
+        
+        // Data for the template
         const data = {
-            name: `${req.user.f_name} ${req.user.l_name}`, // Use req.user instead of Auth
+            name: fullName
         };
 
-        // Generate filenames
-        const safeFirstName = req.user.f_name.replace(/[^a-z0-9]/gi, '_').toLowerCase();
-        const safeLastName = req.user.l_name.replace(/[^a-z0-9]/gi, '_').toLowerCase();
-        const baseFilename = `Certificate_${safeFirstName}_${safeLastName}`;
-        
-        // Temporary paths
+        // Use render(data) instead of setData + render
+        doc.render(data);
+
+        // Use toBuffer() instead of getZip().generate()
+        const buf = doc.toBuffer();
+
+        const baseFilename = `Certificate_${req.user.f_name.replace(/[^a-z0-9]/gi, '_')}_${req.user.l_name.replace(/[^a-z0-9]/gi, '_')}`;
         const docxPath = path.join("/tmp", `${baseFilename}_${Date.now()}.docx`);
         const pdfPath = path.join("/tmp", `${baseFilename}_${Date.now()}.pdf`);
 
-        const handler = new TemplateHandler(templateContent);
-        const doc = await handler.process(templateContent, data);
+        // Write the modified DOCX
+        fs.writeFileSync(docxPath, buf);
+        console.log('getSampleCertificate: DOCX written to:', docxPath);
 
-        // Write temporary DOCX file
-        await fs.promises.writeFile(docxPath, doc);
+        // Convert to PDF with font size adjustment
+        await convertDocxToPdf(docxPath, pdfPath, { name: fullName });
+        console.log('getSampleCertificate: PDF conversion completed');
+        
+        // Check if PDF exists before reading
+        if (!fs.existsSync(pdfPath)) {
+            throw new Error(`PDF file was not created: ${pdfPath}`);
+        }
 
-        // Convert to PDF
-        await convertDocxToPdf(docxPath, pdfPath);
-
-        // Read the generated PDF
         const pdfBuffer = await fs.promises.readFile(pdfPath);
-
+        await debugDocumentXML(docxPath);
         // Clean up temporary files
-        await fs.promises.unlink(docxPath);
-        await fs.promises.unlink(pdfPath);
+        try {
+            await fs.promises.unlink(docxPath);
+            console.log('getSampleCertificate: DOCX temp file cleaned up');
+        } catch (unlinkError) {
+            console.warn('getSampleCertificate: Failed to clean up DOCX:', unlinkError.message);
+        }
 
-        // Return PDF to user
+        try {
+            await fs.promises.unlink(pdfPath);
+            console.log('getSampleCertificate: PDF temp file cleaned up');
+        } catch (unlinkError) {
+            console.warn('getSampleCertificate: Failed to clean up PDF:', unlinkError.message);
+        }
+        
         res.setHeader('Content-Type', 'application/pdf');
         res.setHeader('Content-Disposition', `attachment; filename="${baseFilename}.pdf"`);
         res.send(pdfBuffer);
 
-        console.log('addGeneratedCertificate: Certificate generation and delivery complete');
     } catch (error) {
-        console.error('addGeneratedCertificate: Error:', error.message);
+        console.error('getSampleCertificate: Error:', error.message);
         res.status(500).json({ error: error.message });
     }
 }

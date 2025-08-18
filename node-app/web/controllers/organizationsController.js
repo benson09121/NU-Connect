@@ -469,23 +469,27 @@ async function createExecutiveMember(req, res) {
 
         const {
             organization_id,
-            cycle_number,
             email,
             program_name,
             role_title,
-            rank_level
+            rank_level,
+            org_name
         } = req.body;
 
         const action_by_email = req.user.email;
 
         const result = await organizationsModel.createExecutiveMember({
             organization_id,
-            cycle_number,
             email,
             program_name,
             role_title,
             rank_level,
             action_by_email
+        });
+
+        publishToChannel(`organization_officers_${org_name}`, {
+            operation: 'CREATE',
+            data: result
         });
 
         res.status(201).json({
@@ -506,18 +510,17 @@ async function updateExecutiveMember(req, res) {
 
         const {
             organization_id,
-            cycle_number,
             email,
             program_name,
             role_title,
-            rank_level
+            rank_level,
+            org_name
         } = req.body;
 
         const action_by_email = req.user.email;
 
         const result = await organizationsModel.updateExecutiveMember({
             organization_id,
-            cycle_number,
             email,
             program_name,
             role_title,
@@ -525,8 +528,15 @@ async function updateExecutiveMember(req, res) {
             action_by_email
         });
 
+        console.log(result);
+
+        publishToChannel(`organization_officers_${org_name}`, {
+            operation: 'UPDATE',
+            data: result
+        });
+
         res.status(200).json({
-            message: result.message
+            message: "Update Successful"
         });
     } catch (error) {
         const sqlMessage = error.sqlMessage || error.message || 'An error occurred while updating executive member.';
@@ -543,21 +553,26 @@ async function archiveExecutiveMember(req, res) {
 
         const {
             organization_id,
-            cycle_number,
-            email
+            email,
+            org_name
         } = req.body;
 
         const action_by_email = req.user.email;
 
         const result = await organizationsModel.archiveExecutiveMember({
             organization_id,
-            cycle_number,
             email,
             action_by_email
         });
 
+        publishToChannel(`organization_officers_${org_name}`, {
+            operation: 'DELETE',
+            data: result
+        });
+
+
         res.status(200).json({
-            message: result.message
+            message: "Archive Successful"
         });
     } catch (error) {
         const sqlMessage = error.sqlMessage || error.message || 'An error occurred while archiving executive member.';

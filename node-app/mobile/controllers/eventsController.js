@@ -20,9 +20,50 @@ async function getEvents(req, res) {
 
 async function createEvent(req, res) {
     try {
-        const { user_id, title, description, venue, date, start_time, end_time, organization_id, status, type, is_open_to_all } = req.body;
-        const orgId = parseInt(organization_id, 10);
-        const newEvent = await eventModel.createEvent(user_id, title, description, venue, date, start_time, end_time, orgId, status, type, is_open_to_all);
+        const { 
+            user_id, 
+            title, 
+            description, 
+            venue_type, 
+            venue, 
+            start_date, 
+            end_date, 
+            start_time, 
+            end_time, 
+            organization_id, 
+            cycle_number,
+            event_type,
+            status, 
+            type, 
+            is_open_to,
+            fee,
+            capacity 
+        } = req.body;
+        
+        const orgId = organization_id ? parseInt(organization_id, 10) : null;
+        const cycleNum = cycle_number ? parseInt(cycle_number, 10) : null;
+        const eventFee = fee ? parseInt(fee, 10) : null;
+        const eventCapacity = capacity ? parseInt(capacity, 10) : null;
+        
+        const newEvent = await eventModel.createEvent(
+            user_id, 
+            title, 
+            description, 
+            venue_type || 'Face to face',
+            venue, 
+            start_date || end_date, // fallback for backward compatibility
+            end_date || start_date, // fallback for backward compatibility
+            start_time, 
+            end_time, 
+            orgId, 
+            cycleNum,
+            event_type || 'Organization',
+            status || 'Pending', 
+            type || 'Free', 
+            is_open_to || 'Members only',
+            eventFee,
+            eventCapacity
+        );
 
         // No cache updates or notifications here since the event is pending approval
         res.status(201).json(newEvent);
