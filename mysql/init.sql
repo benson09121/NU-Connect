@@ -7868,7 +7868,6 @@ INSERT INTO tbl_rank_permission(rank_id, permission_id) VALUES
 (1,14),
 (1,23),
 (1,4),
-(1,1),
 (1,25),
 (1,17),
 (1,19),
