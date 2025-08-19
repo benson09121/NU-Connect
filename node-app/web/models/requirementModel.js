@@ -23,7 +23,7 @@ async function addRequirement(requirement_name, is_applicable_to, savePath, user
     }
 }
 
-async function getRequirements(filterType = null){
+async function getRequirements(filterType = null) {
     const connection = await pool.getConnection();
     try {
         if (filterType) {
@@ -34,12 +34,10 @@ async function getRequirements(filterType = null){
             const [rows] = await connection.query('CALL GetRequirements();');
             return rows[0];
         }
-    }
-    catch (error) {
+    } catch (error) {
         console.error('Error fetching requirements:', error);
         throw error;
-    }
-    finally {
+    } finally {
         connection.release();
     }
 }

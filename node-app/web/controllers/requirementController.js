@@ -46,23 +46,36 @@ async function getRequirements(req, res) {
     const { sessionId, type, realtime } = req.query; // realtime optional flag (any truthy value)
     try {
         let filterType = null;
+
+        // Explicit type filter from query (highest priority)
         if (type !== undefined && type !== null && type !== '') {
             const t = type.toString().toLowerCase().trim();
-            if (!['new','renew'].includes(t)) {
+            if (!['new', 'renew'].includes(t)) {
                 return res.status(400).json({ message: 'Invalid type filter (use new or renew)' });
             }
             filterType = t;
+        } else {
+            // Auto-apply based on permissions if no type given
+            const perms = req.user?.permissions || [];
+
+            const hasNew = perms.includes("APPLY_NEW_ORGANIZATION");
+            const hasRenew = perms.includes("APPLY_RENEWAL_ORGANIZATION");
+
+            if (hasNew && !hasRenew) {
+                filterType = "new";
+            } else if (hasRenew && !hasNew) {
+                filterType = "renew";
+            }
+            // If user has both, keep filterType = null (return all, like old behavior)
         }
 
         const requirements = await requirementModel.getRequirements(filterType);
 
-        // Maintain old behavior: just return JSON if no sessionId.
-        // If sessionId provided (and optional realtime flag), subscribe and push a snapshot
+        // Realtime (SSE) support
         if (sessionId) {
             subscribeToChannel(sessionId, "application_requirements");
 
-            // Send an immediate snapshot so connected SSE clients get current data without waiting for a CRUD.
-            // Keep the existing event shape used by CRUD (operation: 'SYNC', data: [...])
+            // Push current snapshot immediately
             publishToChannel('application_requirements', {
                 operation: 'SYNC',
                 data: requirements
