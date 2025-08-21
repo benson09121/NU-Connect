@@ -34,9 +34,10 @@ router.post(
 );
 router.get('/events/getEventPublicationImage', middleware.validateAzureJWT, middleware.hasPermission("VIEW_EVENT"), eventController.getEventPublicationImage);
 router.get('/events', middleware.validateAzureJWT, middleware.hasPermission("VIEW_EVENT"), eventController.getEvents);
+router.get('/events/check-event-title', middleware.validateAzureJWT, middleware.hasPermission("CREATE_EVENT"), eventController.checkEventTitle);
 router.get('/events/evaluation-questions', middleware.validateAzureJWT, middleware.hasPermission("VIEW_EVENT"), eventController.getAllEvaluationQuestions);
 router.get('/events/add-event-status', middleware.validateAzureJWT, eventController.getaddEventStatus);
-router.get('/event-requirements', middleware.validateAzureJWT, middleware.hasPermission("CREATE_EVENT","CREATE_SDAO_EVENT"),eventController.getEventRequirements);
+router.get('/event-requirements', middleware.validateAzureJWT, middleware.hasPermission(["CREATE_EVENT","CREATE_SDAO_EVENT"]),eventController.getEventRequirements);
 router.post('/event-requirements/save', middleware.validateAzureJWT, middleware.hasPermission("MANAGE_REQUIREMENTS"), eventController.saveEventRequirements);
 router.post('/events/addcertificate', middleware.validateAzureJWT, middleware.hasPermission("UPDATE_EVALUATION"), eventController.addCertificate);
 router.get('/events/specific', middleware.validateAzureJWT, middleware.hasPermission("VIEW_EVENT"), eventController.getEventById);

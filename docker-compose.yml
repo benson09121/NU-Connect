@@ -5,11 +5,13 @@ services:
       MYSQL_ROOT_PASSWORD: admin
       MYSQL_USER: admin
       MYSQL_PASSWORD: admin
+      TZ: Asia/Manila
     container_name: mysql
     image: mysql:8.4
     volumes:
       - mysql_volume:/var/lib/mysql
       - ./mysql/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./mysql/my.cnf:/etc/mysql/my.cnf
     ports:
       - "3307:3306"
     networks:
@@ -19,6 +21,8 @@ services:
   node-app:
     container_name: node-app
     build: ./node-app
+    environment:
+      TZ: Asia/Manila
     volumes:
       - /opt/certificates/templates:/app/certificates/templates
       - /opt/certificates/generated:/app/certificates/generated
