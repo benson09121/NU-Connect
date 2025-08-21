@@ -2820,6 +2820,56 @@ END $$
 DELIMITER ;
 
 DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE CheckScheduleConflict(
+    IN p_start_date DATE,
+    IN p_end_date DATE,
+    IN p_start_time TIME,
+    IN p_end_time TIME,
+    IN p_venue VARCHAR(200),
+    IN p_event_id INT
+)
+BEGIN
+    -- Validate input
+    IF p_start_date IS NULL OR p_start_time IS NULL OR p_end_time IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'start_date, start_time, and end_time are required';
+    END IF;
+    
+    -- Set end_date to start_date if not provided
+    IF p_end_date IS NULL THEN
+        SET p_end_date = p_start_date;
+    END IF;
+    
+    -- Check for time and date conflicts
+    SELECT 
+        e.event_id as id,
+        e.title,
+        e.venue as location,
+        CONCAT(e.start_date, ' ', e.start_time) as start_datetime,
+        CONCAT(e.end_date, ' ', e.end_time) as end_datetime
+    FROM tbl_event e
+    WHERE e.status IN ('Approved', 'Pending') -- Only check active events
+        AND (p_event_id IS NULL OR e.event_id != p_event_id) -- Exclude current event if updating
+        AND (
+            -- Date overlap check
+            (e.start_date <= p_end_date AND e.end_date >= p_start_date)
+        )
+        AND (
+            -- Time overlap check
+            (e.start_time < p_end_time AND e.end_time > p_start_time)
+        )
+        AND (
+            -- Venue conflict check (only for face-to-face events with venue)
+            p_venue IS NULL 
+            OR e.venue IS NULL 
+            OR e.venue_type != 'Face to face'
+            OR LOWER(TRIM(e.venue)) = LOWER(TRIM(p_venue))
+        )
+    ORDER BY e.start_date, e.start_time;
+END $$
+DELIMITER ;
+
+DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetEventById(IN p_event_id INT)
 BEGIN
 SELECT
