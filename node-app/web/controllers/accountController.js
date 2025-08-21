@@ -28,7 +28,7 @@ async function addAccount(req, res){
             email, 
             role, 
             program, 
-            req.user.email
+            req.user.email // createdByEmail from authenticated user
         );
         
         publishToChannel('accounts', {
@@ -36,10 +36,35 @@ async function addAccount(req, res){
             data: accounts
         });
 
-        // Send Azure invitation and email (non-blocking)
-        sendInvitationAsync(email).catch(error => {
-            console.error(`Failed to send invitation to ${email}:`, error.message);
-        });
+        // Send Azure invitation and email for new accounts
+        try {
+            const msalConfig = {
+                auth: {
+                    clientId: process.env.AZURE_CLIENT_ID,
+                    authority: `https://login.microsoftonline.com/${process.env.AZURE_TENANT_ID}`,
+                    clientSecret: process.env.AZURE_CLIENT_SECRET,
+                }
+            };
+            const cca = new msal.ConfidentialClientApplication(msalConfig);
+            const token = await getAccessToken(cca);
+            
+            const response = await axios.post(
+                "https://graph.microsoft.com/v1.0/invitations",
+                {
+                    invitedUserEmailAddress: email,
+                    inviteRedirectUrl: process.env.AZURE_REDIRECT_URL,
+                    sendInvitationMessage: false
+                },
+                { headers: { Authorization: `Bearer ${token}` } }
+            );
+            
+            const redemptionUrl = response.data.inviteRedeemUrl;
+            await emailService.sendInvitationEmail(email, redemptionUrl);
+            console.log(`Invitation email sent to ${email}`);
+        } catch (emailError) {
+            console.error('Failed to send invitation email:', emailError);
+            // Don't fail the account creation if email fails
+        }
         
         res.status(200).json({
             success: true,
@@ -54,44 +79,18 @@ async function addAccount(req, res){
     }
 }
 
-async function sendInvitationAsync(email) {
-    try {
-        const msalConfig = {
-            auth: {
-                clientId: process.env.AZURE_CLIENT_ID,
-                authority: `https://login.microsoftonline.com/${process.env.AZURE_TENANT_ID}`,
-                clientSecret: process.env.AZURE_CLIENT_SECRET,
-            }
-        };
-        const cca = new msal.ConfidentialClientApplication(msalConfig);
-        const token = await getAccessToken(cca);
-        
-        const response = await axios.post(
-            "https://graph.microsoft.com/v1.0/invitations",
-            {
-                invitedUserEmailAddress: email,
-                inviteRedirectUrl: process.env.AZURE_REDIRECT_URL,
-                sendInvitationMessage: false
-            },
-            { headers: { Authorization: `Bearer ${token}` } }
-        );
-        
-        const redemptionUrl = response.data.inviteRedeemUrl;
-        await emailService.sendInvitationEmail(email, redemptionUrl);
-        console.log(`Invitation email sent to ${email}`);
-    } catch (emailError) {
-        console.error('Failed to send invitation email:', emailError.message);
-        throw emailError; // Re-throw for proper error handling
-    }
-}
-
 async function updateAccount(req, res){
     const { user_id, role, program, status } = req.body;
     try{
+        // Normalize program value - treat empty strings as null
+        const normalizedProgram = program === '' || program === 'not_applicable' 
+            ? null 
+            : program;
+            
         const accounts = await accountModel.updateAccount(
             user_id, 
             role, 
-            program, 
+            normalizedProgram, 
             status, 
             req.user.email // updatedByEmail from authenticated user
         );

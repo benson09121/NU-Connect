@@ -36,9 +36,14 @@ async function addAccount(email, role, program, createdByEmail) {
 async function updateAccount(user_id, role, program, status, updatedByEmail) {
     const connection = await pool.getConnection();
     try {
+        // Handle null/undefined program values
+        const programName = program === null || program === undefined || program === '' 
+            ? null 
+            : program;
+            
         const [rows] = await connection.query(
             'CALL UpdateManagedAccount(?, ?, ?, ?, ?)',
-            [user_id, role, program, status, updatedByEmail]
+            [user_id, role, programName, status, updatedByEmail]
         );
         return rows[0];
     }

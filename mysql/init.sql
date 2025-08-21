@@ -1739,7 +1739,7 @@ DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE UpdateManagedAccount(
     IN p_user_id VARCHAR(200),
     IN p_role_name VARCHAR(100),
-    IN p_program_name VARCHAR(100),
+    IN p_program_name VARCHAR(100), -- Can now be NULL
     IN p_status ENUM('Active', 'Pending', 'Archive'),
     IN p_updated_by_email VARCHAR(100)
 )
@@ -1774,8 +1774,8 @@ BEGIN
         SET MESSAGE_TEXT = 'Invalid role specified';
     END IF;
 
-    -- Set program_id to NULL if program_name is 'not_applicable', else get program_id
-    IF p_program_name = 'not_applicable' THEN
+    -- Handle program_id logic with NULL support
+    IF p_program_name IS NULL OR p_program_name = 'not_applicable' OR TRIM(p_program_name) = '' THEN
         SET v_program_id = NULL;
     ELSE
         SELECT program_id INTO v_program_id
@@ -1809,7 +1809,7 @@ BEGIN
         'account',
         JSON_OBJECT(
             'role_name', p_role_name, 
-            'program_name', p_program_name, 
+            'program_name', COALESCE(p_program_name, 'No Program'), 
             'status', p_status,
             'target_email', v_email,
             'previous_status', v_current_status
@@ -1821,7 +1821,7 @@ BEGIN
     SELECT u.user_id as id,
            CONCAT(u.f_name, ' ', u.l_name) as name,
            u.email,
-           p.name as program,
+           COALESCE(p.name, 'No Program') as program,
            r.role_name as role,
            u.status,
            u.created_at,
