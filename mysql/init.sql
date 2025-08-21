@@ -8403,13 +8403,12 @@ VALUES("CREATE_EVENT","Organization"),
 ("MANAGE_PROGRAMS","SDAO"),
 ("CREATE_SDAO_EVENT","SDAO"),
 ("APPLY_NEW_ORGANIZATION","Global"),
-("APPLY_RENEWAL_ORGANIZATION","Organization");
+("APPLY_RENEWAL_ORGANIZATION","Organization"),
 ("VIEW_TRANSACTIONS","Global"),
 ("MANAGE_TRANSACTIONS","Global");
 
 INSERT INTO tbl_role_permission (role_id, permission_id) 
 VALUES
-(4,27),
 (4,2),
 (4,3),
 (4,4),
