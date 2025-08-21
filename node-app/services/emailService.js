@@ -1,16 +1,27 @@
 const nodemailer = require('nodemailer');
 
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.GMAIL_USER,
-    pass: process.env.GMAIL_APP_PASS
-  }
-});
+// Validate environment variables
+if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASS) {
+  console.warn('Gmail credentials not configured. Email functionality will be disabled.');
+}
+
+const transporter = process.env.GMAIL_USER && process.env.GMAIL_APP_PASS ? 
+  nodemailer.createTransporter({
+    service: 'gmail',
+    auth: {
+      user: process.env.GMAIL_USER,
+      pass: process.env.GMAIL_APP_PASS
+    }
+  }) : null;
 
 module.exports.sendInvitationEmail = async (recipient, redemptionUrl) => {
+  if (!transporter) {
+    console.warn('Email service not configured. Skipping email send.');
+    return;
+  }
+
   const mailOptions = {
-    from: `"${process.env.FROM_NAME}" <${process.env.FROM_EMAIL}>`,
+    from: `"${process.env.FROM_NAME || 'NU Connect'}" <${process.env.FROM_EMAIL || process.env.GMAIL_USER}>`,
     to: recipient,
     subject: 'You\'re Invited to Join Our Platform!',
     html: generateInvitationTemplate(redemptionUrl)
@@ -20,8 +31,28 @@ module.exports.sendInvitationEmail = async (recipient, redemptionUrl) => {
     await transporter.sendMail(mailOptions);
     console.log(`Invitation sent to ${recipient}`);
   } catch (error) {
-    console.error('Email send error:', error);
-    throw new Error('Failed to send invitation email');
+    console.error('Email send error details:', {
+      code: error.code,
+      response: error.response,
+      message: error.message
+    });
+    
+    // Don't throw error - just log it
+    console.warn(`Failed to send email to ${recipient}, but continuing...`);
+  }
+};
+
+// Test email configuration
+module.exports.testEmailConfig = async () => {
+  if (!transporter) {
+    return { success: false, message: 'Email not configured' };
+  }
+  
+  try {
+    await transporter.verify();
+    return { success: true, message: 'Email configuration valid' };
+  } catch (error) {
+    return { success: false, message: error.message };
   }
 };
 
@@ -57,12 +88,12 @@ function generateInvitationTemplate(redemptionUrl) {
         <p>This link will expire in 7 days. If you have trouble with the button, copy and paste this URL into your browser:</p>
         <p><small>${redemptionUrl}</small></p>
         
-        <p>Best regards,<br>The NUCONNECT TEAM Team</p>
+        <p>Best regards,<br>The NU CONNECT Team</p>
       </div>
       
       <div class="footer">
-        <p>&copy; ${new Date().getFullYear()} Nu COnnect. All rights reserved.</p>
-        <p>[Your Company Address]</p>
+        <p>&copy; ${new Date().getFullYear()} NU Connect. All rights reserved.</p>
+        <p>National University - Dasmariñas</p>
         <p><a href="#">Privacy Policy</a> | <a href="#">Terms of Service</a></p>
       </div>
     </div>
