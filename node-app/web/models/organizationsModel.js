@@ -807,6 +807,7 @@ async function getSingleOrganizationMember(member_id, org_name) {
         connection.release();
     }
 }
+
       
 module.exports = {
     createOrganizationApplication,
