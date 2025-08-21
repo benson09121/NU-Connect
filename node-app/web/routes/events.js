@@ -74,7 +74,7 @@ router.put(
   middleware.hasPermission("MANAGE_REGISTRATION"),
   eventController.approvePaidEventRegistration
 );
-
+router.post('/events/check-schedule-conflict', middleware.validateAzureJWT, middleware.hasPermission(["CREATE_EVENT", "CREATE_SDAO_EVENT"]), eventController.checkScheduleConflict);
 router.put(
   '/events/:event_id/attendees/:user_id/reject/:approver_email',
   middleware.validateAzureJWT,

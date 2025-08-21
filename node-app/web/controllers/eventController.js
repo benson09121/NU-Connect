@@ -861,21 +861,29 @@ async function getSampleCertificate(req, res) {
         res.status(500).json({ error: error.message });
     }
 }
-
 async function getEventPublicationImage(req, res) {
     let {event_id, image_name, cycle_number, organization_name } = req.query;
+    
+    // Add validation
+    if (!event_id || !image_name || !cycle_number || !organization_name) {
+        return res.status(400).json({
+            error: "Missing required parameters: event_id, image_name, cycle_number, organization_name"
+        });
+    }
+    
     const image_name_encoded = encodeURIComponent(image_name);
     const organization_name_encoded = encodeURIComponent(organization_name);
+    
     try {
         res.header('Access-Control-Allow-Origin', 'http://localhost:5173');
-        // Set Content-Disposition so browser handles as image (inline) 
         res.setHeader('Content-Disposition', `inline; filename="${image_name}"`);
-        // X-Accel-Redirect for Nginx internal serving
         res.setHeader('X-Accel-Redirect', `/protected-organization-requirements/${organization_name_encoded}/${cycle_number}/events/${event_id}/publication_images/${image_name_encoded}`);
+        console.log(`getEventPublicationImage: Serving image ${image_name} for event ${event_id}`);
         res.end();
     } catch (error) {
+        console.error('getEventPublicationImage error:', error);
         res.status(500).json({
-            error: error.message || "An error occurred while fetching the logo.",
+            error: error.message || "An error occurred while fetching the publication image.",
         });
     }
 }
@@ -895,6 +903,42 @@ async function checkEventTitle(req, res) {
     } catch (error) {
         res.status(500).json({
             error: error.message || "An error occurred while checking event title.",
+        });
+    }
+}
+
+async function checkScheduleConflict(req, res) {
+    try {
+        const { start_date, end_date, start_time, end_time, venue, venue_type, event_id } = req.body;
+        
+        // Validate required fields
+        if (!start_date || !start_time || !end_time) {
+            return res.status(400).json({ 
+                message: 'start_date, start_time, and end_time are required' 
+            });
+        }
+
+        // For venue conflicts, check only if venue is specified and it's face-to-face
+        const checkVenueConflict = venue_type === 'Face to face' && venue && venue.trim().length > 0;
+        
+        const conflicts = await eventModel.checkScheduleConflict({
+            start_date,
+            end_date: end_date || start_date, // Default to same day if end_date not provided
+            start_time,
+            end_time,
+            venue: checkVenueConflict ? venue.trim() : null,
+            event_id: event_id || null // Exclude current event if updating
+        });
+        
+        const hasConflict = conflicts && conflicts.length > 0;
+        
+        res.status(200).json({
+            conflict: hasConflict,
+            conflicts: hasConflict ? conflicts : []
+        });
+    } catch (error) {
+        res.status(500).json({
+            error: error.message || "An error occurred while checking schedule conflicts.",
         });
     }
 }
@@ -929,5 +973,6 @@ module.exports = {
     addCertificate,
     getSampleCertificate,
     getEventPublicationImage,
-    checkEventTitle
+    checkEventTitle,
+    checkScheduleConflict
 };

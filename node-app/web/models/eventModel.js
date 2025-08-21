@@ -452,6 +452,23 @@ async function checkEventTitle(title) {
     }
 }
 
+async function checkScheduleConflict(params) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL CheckScheduleConflict(?, ?, ?, ?, ?, ?);', [
+            params.start_date,
+            params.end_date,
+            params.start_time,
+            params.end_time,
+            params.venue,
+            params.event_id
+        ]);
+        return rows[0]; // Return the first result set
+    } finally {
+        connection.release();
+    }
+}
+
 module.exports = {
     addEvent,
     getEventRequirements,
@@ -484,5 +501,6 @@ module.exports = {
     getEventEvaluationFeedbackPeriod,
     AddCertificateTemplate,
     getCertificateTemplate,
-    checkEventTitle
+    checkEventTitle,
+    checkScheduleConflict
 };
