@@ -18,12 +18,14 @@ if (!isEmailConfigured()) {
 }
 
 const transporter = isEmailConfigured() ? 
-  nodemailer.createTransport({
+  nodemailer.createTransporter({
     service: 'gmail',
     auth: {
       user: process.env.GMAIL_USER,
       pass: process.env.GMAIL_APP_PASS.replace(/\s/g, '') // Remove all spaces
     },
+    debug: true, // Enable debug for troubleshooting
+    logger: true, // Enable logging
     // Enhanced delivery settings
     secure: true,
     port: 465,
@@ -48,10 +50,22 @@ if (transporter) {
       console.log(`   🏢 Organization: ${process.env.FROM_NAME || 'NU Connect Team'}`);
       console.log(`   🔒 Security: App Password Authentication`);
       console.log(`   📡 SMTP: Gmail (smtp.gmail.com:465)`);
+      console.log('');
+      console.log('💡 Email Delivery Best Practices:');
+      console.log('   1. Ensure 2FA is enabled on Gmail account');
+      console.log('   2. Use a professional "From" name');
+      console.log('   3. Keep email content relevant and not spammy');
+      console.log('   4. Ask recipients to whitelist your domain');
+      console.log('   5. Monitor email reputation and delivery rates');
     })
     .catch(err => {
       console.error('❌ Gmail SMTP verification failed:', err.message);
       console.error('💡 Please check your Gmail App Password in .env file');
+      console.error('🔧 Troubleshooting steps:');
+      console.error('   1. Verify GMAIL_USER and GMAIL_APP_PASS in .env');
+      console.error('   2. Ensure 2FA is enabled on your Gmail account');
+      console.error('   3. Generate a new App Password if needed');
+      console.error('   4. Check Gmail account security settings');
     });
 }
 

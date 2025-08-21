@@ -1,6 +1,7 @@
 const msal = require('@azure/msal-node');
 const axios = require('axios');
 const accountModel = require('../models/accountModel');
+const userActivationModel = require('../models/userActivationModel');
 const emailService = require('../../services/emailService');
 const { subscribeToChannel, publishToChannel } = require('./sseController');
 
@@ -288,6 +289,111 @@ async function approveUserApplication(req, res) {
     }
 }
 
+async function resendInvitationEmail(req, res) {
+    const { email } = req.body;
+    try {
+        if (!email) {
+            return res.status(400).json({ success: false, error: "Email is required." });
+        }
+
+        // Send Azure invitation and email
+        const msalConfig = {
+            auth: {
+                clientId: process.env.AZURE_CLIENT_ID,
+                authority: `https://login.microsoftonline.com/${process.env.AZURE_TENANT_ID}`,
+                clientSecret: process.env.AZURE_CLIENT_SECRET,
+            }
+        };
+        const cca = new msal.ConfidentialClientApplication(msalConfig);
+        const token = await getAccessToken(cca);
+        
+        const response = await axios.post(
+            "https://graph.microsoft.com/v1.0/invitations",
+            {
+                invitedUserEmailAddress: email,
+                inviteRedirectUrl: process.env.AZURE_REDIRECT_URL,
+                sendInvitationMessage: false
+            },
+            { headers: { Authorization: `Bearer ${token}` } }
+        );
+        
+        const redemptionUrl = response.data.inviteRedeemUrl;
+        const emailResult = await emailService.sendInvitationEmail(email, redemptionUrl, true); // true for isResend
+        
+        if (emailResult.success) {
+            res.status(200).json({
+                success: true,
+                message: "Invitation email resent successfully.",
+                data: { email, messageId: emailResult.messageId }
+            });
+        } else {
+            res.status(500).json({
+                success: false,
+                error: "Failed to resend invitation email: " + emailResult.error
+            });
+        }
+    } catch (error) {
+        console.error('Failed to resend invitation email:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message || "An error occurred while resending the invitation email."
+        });
+    }
+}
+
+async function sendTestEmail(req, res) {
+    const { email } = req.body;
+    try {
+        if (!email) {
+            return res.status(400).json({ success: false, error: "Email is required." });
+        }
+
+        const result = await emailService.sendTestEmail(email);
+        
+        if (result.success) {
+            res.status(200).json({
+                success: true,
+                message: "Test email sent successfully.",
+                data: { email, messageId: result.messageId }
+            });
+        } else {
+            res.status(500).json({
+                success: false,
+                error: "Failed to send test email: " + result.error
+            });
+        }
+    } catch (error) {
+        console.error('Failed to send test email:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message || "An error occurred while sending the test email."
+        });
+    }
+}
+
+async function diagnoseEmailDelivery(req, res) {
+    const { email } = req.body;
+    try {
+        if (!email) {
+            return res.status(400).json({ success: false, error: "Email is required." });
+        }
+
+        const result = await emailService.diagnoseEmailDelivery(email);
+        
+        res.status(200).json({
+            success: result.success,
+            message: result.message,
+            data: result.diagnostics || {}
+        });
+    } catch (error) {
+        console.error('Email delivery diagnosis failed:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message || "An error occurred during email delivery diagnosis."
+        });
+    }
+}
+
 async function rejectUserApplication(req, res) {
     const { application_id, rejection_reason } = req.body;
     try {
@@ -301,6 +407,20 @@ async function rejectUserApplication(req, res) {
             rejection_reason || 'No reason provided'
         );
 
+        // Send rejection email to applicant
+        if (application && application.email) {
+            try {
+                await emailService.sendRejectionEmail(
+                    application.email, 
+                    rejection_reason || 'No reason provided',
+                    true // canReapply
+                );
+                console.log(`Rejection email sent to ${application.email}`);
+            } catch (emailError) {
+                console.error('Failed to send rejection email:', emailError);
+            }
+        }
+
         publishToChannel('user-applications', {
             operation: 'UPDATE',
             data: application
@@ -311,6 +431,90 @@ async function rejectUserApplication(req, res) {
         res.status(500).json({
             success: false,
             error: error.message || "An error occurred while rejecting the application.",
+        });
+    }
+}
+
+async function getUserActivationStatus(req, res) {
+    const { email } = req.params;
+    try {
+        if (!email) {
+            return res.status(400).json({
+                success: false,
+                error: "Email address is required"
+            });
+        }
+
+        const userStatus = await userActivationModel.getUserActivationStatus(email);
+        
+        if (!userStatus) {
+            return res.status(404).json({
+                success: false,
+                error: "User not found"
+            });
+        }
+
+        res.status(200).json({
+            success: true,
+            data: userStatus
+        });
+    } catch (error) {
+        console.error('Failed to get user activation status:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message || "An error occurred while fetching user activation status."
+        });
+    }
+}
+
+async function getPendingUsers(req, res) {
+    try {
+        const pendingUsers = await userActivationModel.getPendingUsers();
+        
+        res.status(200).json({
+            success: true,
+            data: pendingUsers,
+            count: pendingUsers.length
+        });
+    } catch (error) {
+        console.error('Failed to get pending users:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message || "An error occurred while fetching pending users."
+        });
+    }
+}
+
+async function manuallyActivateUser(req, res) {
+    const { email } = req.body;
+    try {
+        if (!email) {
+            return res.status(400).json({
+                success: false,
+                error: "Email address is required"
+            });
+        }
+
+        const result = await userActivationModel.manuallyActivateUser(email, req.user.email);
+        
+        if (result) {
+            // Publish update to connected clients
+            publishToChannel('accounts', {
+                operation: 'ACTIVATE',
+                data: { email, activated_by: req.user.email }
+            });
+        }
+
+        res.status(200).json({
+            success: true,
+            message: `User ${email} has been manually activated`,
+            data: { email, activated_by: req.user.email }
+        });
+    } catch (error) {
+        console.error('Failed to manually activate user:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message || "An error occurred while activating the user."
         });
     }
 }
@@ -327,4 +531,10 @@ module.exports = {
     getAllPendingUsersAndApplications,
     approveUserApplication,
     rejectUserApplication,
+    resendInvitationEmail,
+    sendTestEmail,
+    diagnoseEmailDelivery,
+    getUserActivationStatus,
+    getPendingUsers,
+    manuallyActivateUser,
 };
