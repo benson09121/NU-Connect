@@ -2712,6 +2712,15 @@ BEGIN
 
     COMMIT;
 
+    -- Create notification and log for new organization application
+    CALL NotifyNewOrganizationApplication(
+        v_organization_id,
+        v_application_id,
+        v_org_name,
+        p_user_id,
+        v_program_id
+    );
+
     -- Return results
     SELECT
         v_organization_id AS organization_id,
@@ -4217,6 +4226,16 @@ BEGIN
     CALL InitiateEventApprovalProcess(v_event_application_id);
 
     COMMIT;
+
+    -- Create notification and log for new event proposal
+    CALL NotifyNewEventProposal(
+        v_event_id,
+        v_event_application_id,
+        JSON_UNQUOTE(JSON_EXTRACT(p_event, '$.title')),
+        p_organization_id,
+        v_organization_name,
+        p_applicant_user_id
+    );
 
     -- Return success information
     SELECT 
@@ -8522,6 +8541,175 @@ BEGIN
 END $$
 DELIMITER ;
 
+-- Notification creation procedures
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE CreateNotification(
+    IN p_title VARCHAR(255),
+    IN p_message TEXT,
+    IN p_entity_type ENUM('user', 'organization', 'event', 'transaction', 'system'),
+    IN p_entity_id INT,
+    IN p_sender_id VARCHAR(200),
+    IN p_recipient_emails JSON,
+    IN p_action VARCHAR(100)
+)
+BEGIN
+    DECLARE v_notification_id INT;
+    DECLARE v_recipient_count INT;
+    DECLARE v_email VARCHAR(100);
+    DECLARE i INT DEFAULT 0;
+    
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        RESIGNAL;
+    END;
+    
+    START TRANSACTION;
+    
+    -- Create notification record
+    INSERT INTO tbl_notification (
+        title,
+        message,
+        entity_type,
+        entity_id,
+        sender_id,
+        action,
+        created_at
+    ) VALUES (
+        p_title,
+        p_message,
+        p_entity_type,
+        p_entity_id,
+        p_sender_id,
+        p_action,
+        NOW()
+    );
+    
+    SET v_notification_id = LAST_INSERT_ID();
+    
+    -- Add recipients
+    SET v_recipient_count = JSON_LENGTH(p_recipient_emails);
+    WHILE i < v_recipient_count DO
+        SET v_email = JSON_UNQUOTE(JSON_EXTRACT(p_recipient_emails, CONCAT('$[', i, ']')));
+        
+        INSERT INTO tbl_notification_recipient (
+            notification_id,
+            recipient_email,
+            is_read,
+            created_at
+        ) VALUES (
+            v_notification_id,
+            v_email,
+            FALSE,
+            NOW()
+        );
+        
+        SET i = i + 1;
+    END WHILE;
+    
+    COMMIT;
+    
+    SELECT v_notification_id AS notification_id;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE NotifyNewOrganizationApplication(
+    IN p_organization_id INT,
+    IN p_application_id INT,
+    IN p_organization_name VARCHAR(100),
+    IN p_applicant_user_id VARCHAR(200),
+    IN p_program_id INT
+)
+BEGIN
+    DECLARE v_applicant_name VARCHAR(101);
+    DECLARE v_program_name VARCHAR(100);
+    DECLARE v_admin_emails JSON;
+    
+    -- Get applicant name
+    SELECT CONCAT(f_name, ' ', l_name) INTO v_applicant_name
+    FROM tbl_user
+    WHERE user_id = p_applicant_user_id;
+    
+    -- Get program name
+    SELECT name INTO v_program_name
+    FROM tbl_program
+    WHERE program_id = p_program_id;
+    
+    -- Get admin emails (users with role_id = 3)
+    SELECT JSON_ARRAYAGG(email) INTO v_admin_emails
+    FROM tbl_user
+    WHERE role_id = 3 AND status = 'Active';
+    
+    -- Create notification
+    CALL CreateNotification(
+        'New Organization Application',
+        CONCAT('A new organization application has been submitted for "', p_organization_name, '" by ', v_applicant_name, ' from ', v_program_name, ' program. Please review the application for approval.'),
+        'organization',
+        p_organization_id,
+        p_applicant_user_id,
+        v_admin_emails,
+        'application_submitted'
+    );
+    
+    -- Log the event using LogAction
+    CALL LogAction(
+        (SELECT email FROM tbl_user WHERE user_id = p_applicant_user_id),
+        CONCAT('ORGANIZATION_APPLICATION_SUBMITTED: ', p_organization_name),
+        'APPLICATION',
+        CONCAT('{"organization_name":"', p_organization_name, '","program":"', v_program_name, '","application_id":', p_application_id, '}'),
+        NULL,
+        'organization_application_log'
+    );
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE NotifyNewEventProposal(
+    IN p_event_id INT,
+    IN p_event_application_id INT,
+    IN p_event_title VARCHAR(255),
+    IN p_organization_id INT,
+    IN p_organization_name VARCHAR(100),
+    IN p_applicant_user_id VARCHAR(200)
+)
+BEGIN
+    DECLARE v_applicant_name VARCHAR(101);
+    DECLARE v_admin_emails JSON;
+    
+    -- Get applicant name
+    SELECT CONCAT(f_name, ' ', l_name) INTO v_applicant_name
+    FROM tbl_user
+    WHERE user_id = p_applicant_user_id;
+    
+    -- Get admin emails (users with role_id = 3)
+    SELECT JSON_ARRAYAGG(email) INTO v_admin_emails
+    FROM tbl_user
+    WHERE role_id = 3 AND status = 'Active';
+    
+    -- Create notification
+    CALL CreateNotification(
+        'New Event Proposal',
+        CONCAT('A new event proposal "', p_event_title, '" has been submitted by ', v_applicant_name, ' from ', p_organization_name, '. Please review the proposal for approval.'),
+        'event',
+        p_event_id,
+        p_applicant_user_id,
+        v_admin_emails,
+        'proposal_submitted'
+    );
+    
+    -- Log the event using LogAction
+    CALL LogAction(
+        (SELECT email FROM tbl_user WHERE user_id = p_applicant_user_id),
+        CONCAT('EVENT_PROPOSAL_SUBMITTED: ', p_event_title),
+        'APPLICATION',
+        CONCAT('{"event_title":"', p_event_title, '","organization":"', p_organization_name, '","event_application_id":', p_event_application_id, '}'),
+        NULL,
+        'event_proposal_log'
+    );
+END$$
+DELIMITER ;
+
 -- INDEXES
 
 CREATE INDEX idx_org_members_user ON tbl_organization_members(user_id);
@@ -8914,3 +9102,6 @@ INSERT INTO tbl_transaction (
     NULL,
     NULL
 );
+
+
+

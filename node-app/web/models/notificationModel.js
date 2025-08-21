@@ -49,8 +49,79 @@ async function markNotificationRead({ notification_id, user_id, email }) {
   }
 }
 
+async function createNotification({
+  title,
+  message,
+  entity_type,
+  entity_id,
+  sender_id,
+  recipient_emails,
+  action
+}) {
+  if (!title || !message || !entity_type || !sender_id || !recipient_emails) {
+    throw new Error('Missing required notification parameters');
+  }
+  
+  if (!Array.isArray(recipient_emails)) {
+    throw new Error('recipient_emails must be an array');
+  }
+  
+  const conn = await pool.getConnection();
+  try {
+    const [rows] = await conn.query(
+      'CALL CreateNotification(?, ?, ?, ?, ?, ?, ?);',
+      [title, message, entity_type, entity_id, sender_id, JSON.stringify(recipient_emails), action]
+    );
+    return rows[0][0];
+  } finally {
+    conn.release();
+  }
+}
+
+async function notifyNewOrganizationApplication({
+  organization_id,
+  application_id,
+  organization_name,
+  applicant_user_id,
+  program_id
+}) {
+  const conn = await pool.getConnection();
+  try {
+    const [rows] = await conn.query(
+      'CALL NotifyNewOrganizationApplication(?, ?, ?, ?, ?);',
+      [organization_id, application_id, organization_name, applicant_user_id, program_id]
+    );
+    return rows[0];
+  } finally {
+    conn.release();
+  }
+}
+
+async function notifyNewEventProposal({
+  event_id,
+  event_application_id,
+  event_title,
+  organization_id,
+  organization_name,
+  applicant_user_id
+}) {
+  const conn = await pool.getConnection();
+  try {
+    const [rows] = await conn.query(
+      'CALL NotifyNewEventProposal(?, ?, ?, ?, ?, ?);',
+      [event_id, event_application_id, event_title, organization_id, organization_name, applicant_user_id]
+    );
+    return rows[0];
+  } finally {
+    conn.release();
+  }
+}
+
 module.exports = {
   getNotificationsByEmail,
   markNotificationRead,
-  getUserIdByEmail
+  getUserIdByEmail,
+  createNotification,
+  notifyNewOrganizationApplication,
+  notifyNewEventProposal
 };
