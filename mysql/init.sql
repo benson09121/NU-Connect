@@ -1855,26 +1855,80 @@ END $$
 DELIMITER ;
 
 DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE AddRequirement(IN
-	p_requirement_name VARCHAR(255),
-    p_file_path VARCHAR(255),
-    p_created_by VARCHAR(200)
+CREATE DEFINER='admin'@'%' PROCEDURE GetRequirementsFiltered(
+    IN p_type VARCHAR(10)  -- 'new' | 'renew' | NULL
 )
-BEGIN 
+BEGIN
+    DECLARE v_type VARCHAR(10);
+    SET v_type = LOWER(TRIM(p_type));
+    IF v_type = '' THEN SET v_type = NULL; END IF;
+    IF v_type IS NOT NULL AND v_type NOT IN ('new','renew') THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Invalid type filter (expected new or renew)';
+    END IF;
+
+    SELECT
+        requirement_id AS id,
+        requirement_name,
+        is_applicable_to,
+        file_path,
+        created_by,
+        created_at,
+        updated_at
+    FROM tbl_application_requirement
+    WHERE
+        v_type IS NULL
+        OR is_applicable_to = 'both'
+        OR is_applicable_to = v_type
+    ORDER BY requirement_name;
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE AddRequirement(
+    IN p_requirement_name VARCHAR(255),
+    IN p_is_applicable_to ENUM('new','renew','both'),
+    IN p_file_path VARCHAR(255),
+    IN p_created_by VARCHAR(200)
+)
+BEGIN
     DECLARE v_last_id INT;
-	INSERT INTO tbl_application_requirement(requirement_name, file_path, created_by) VALUES(p_requirement_name, p_file_path, p_created_by);
+
+    IF p_requirement_name IS NULL OR TRIM(p_requirement_name) = '' THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Requirement name required';
+    END IF;
+
+    IF p_is_applicable_to IS NULL OR p_is_applicable_to = '' THEN
+        SET p_is_applicable_to = 'new';
+    END IF;
+
+    IF p_is_applicable_to NOT IN ('new','renew','both') THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Invalid is_applicable_to value';
+    END IF;
+
+    INSERT INTO tbl_application_requirement(
+        requirement_name,
+        is_applicable_to,
+        file_path,
+        created_by
+    ) VALUES(
+        p_requirement_name,
+        p_is_applicable_to,
+        NULLIF(p_file_path,''),
+        p_created_by
+    );
+
     SET v_last_id = LAST_INSERT_ID();
 
-    SELECT  
-    requirement_id as id,
-    requirement_name,
-    is_applicable_to,
-    file_path,
-    created_by,
-    created_at,
-    updated_at
-    FROM tbl_application_requirement WHERE requirement_id = v_last_id;
-
+    SELECT
+        requirement_id AS id,
+        requirement_name,
+        is_applicable_to,
+        file_path,
+        created_by,
+        created_at,
+        updated_at
+    FROM tbl_application_requirement
+    WHERE requirement_id = v_last_id;
 END $$
 DELIMITER ;
 
@@ -1908,25 +1962,45 @@ END $$
 DELIMITER ;
 
 DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE UpdateRequirement(IN
-    p_requirement_id INT,
-    p_requirement_name VARCHAR(255),
-    p_file_path VARCHAR(255)
+CREATE PROCEDURE UpdateRequirement(
+    IN p_requirement_id INT,
+    IN p_requirement_name VARCHAR(255),
+    IN p_is_applicable_to_in VARCHAR(10),
+    IN p_file_path_in VARCHAR(255)
 )
 BEGIN
-    UPDATE tbl_application_requirement 
-    SET requirement_name = p_requirement_name, file_path = p_file_path
+    IF p_requirement_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Requirement id required';
+    END IF;
+    IF p_requirement_name IS NULL OR TRIM(p_requirement_name) = '' THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Requirement name required';
+    END IF;
+
+    SET @norm_type = LOWER(TRIM(p_is_applicable_to_in));
+    IF @norm_type IS NULL OR @norm_type = '' THEN
+        SET @norm_type = NULL;
+    ELSEIF @norm_type NOT IN ('new','renew','both') THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Invalid is_applicable_to value';
+    END IF;
+
+    UPDATE tbl_application_requirement
+    SET
+        requirement_name = p_requirement_name,
+        is_applicable_to = COALESCE(@norm_type, is_applicable_to),
+        file_path = COALESCE(NULLIF(p_file_path_in,''), file_path),
+        updated_at = CURRENT_TIMESTAMP
     WHERE requirement_id = p_requirement_id;
 
     SELECT
-    requirement_id as id,
-    requirement_name,
-    is_applicable_to,
-    file_path,
-    created_by,
-    created_at,
-    updated_at
-    FROM tbl_application_requirement WHERE requirement_id = p_requirement_id;
+        requirement_id AS id,
+        requirement_name,
+        is_applicable_to,
+        file_path,
+        created_by,
+        created_at,
+        updated_at
+    FROM tbl_application_requirement
+    WHERE requirement_id = p_requirement_id;
 END $$
 DELIMITER ;
 
@@ -7852,7 +7926,7 @@ VALUES("Student",0,null),
 ("Dean",1,3),
 ("Academic Director",1,4);
 
-INSERT INTO tbl_permission(permission_name,scope)
+INSERT INTO tbl_permission(permission_name, scope)
 VALUES("CREATE_EVENT","Organization"),
 ("UPDATE_EVENT","Organization"),
 ("DELETE_EVENT","Organization"),
@@ -7878,8 +7952,12 @@ VALUES("CREATE_EVENT","Organization"),
 ("WEB_ACCESS","Global"),
 ("MANAGE_REGISTRATION","SDAO"),
 ("SUBMIT_REQUIREMENTS","Global"),
-("MANAGE_PROGRAMS","SDAO"),
+("MANAGE_PROGRAMS","SDAO");
+("CREATE_SDAO_EVENT","SDAO"),
+("APPLY_NEW_ORGANIZATION","Global"),
+("APPLY_RENEWAL_ORGANIZATION","Organization"),
 ("CREATE_SDAO_EVENT","SDAO");
+
 
 INSERT INTO tbl_role_permission (role_id, permission_id) 
 VALUES
@@ -7908,6 +7986,7 @@ VALUES
 (2,16),
 (2,17),
 (2,23),
+(2,28),
 (3,17),
 (4,17),
 (5,17),
