@@ -10,32 +10,34 @@ async function getUserByEmail(email) {
     }
 }
 
-async function addRequirement(requirement_name, savePath, user_id) {
+async function addRequirement(requirement_name, is_applicable_to, savePath, user_id) {
     const connection = await pool.getConnection();
     try {
-        const [rows] = await connection.query('CALL AddRequirement(?, ?, ?)',[requirement_name, savePath, user_id]);
+        const [rows] = await connection.query(
+            'CALL AddRequirement(?, ?, ?, ?);',
+            [requirement_name, is_applicable_to || null, savePath || null, user_id]
+        );
         return rows[0];
-    }
-    catch (error) {
-        console.error('Error fetching permissions:', error);
-        throw error;
-    }
-    finally {
+    } finally {
         connection.release();
     }
 }
 
-async function getRequirements(){
+async function getRequirements(filterType = null) {
     const connection = await pool.getConnection();
     try {
-        const [rows] = await connection.query('CALL GetRequirements();');
-        return rows[0];
-    }
-    catch (error) {
+        if (filterType) {
+            const norm = filterType.toLowerCase();
+            const [rows] = await connection.query('CALL GetRequirementsFiltered(?);', [norm]);
+            return rows[0];
+        } else {
+            const [rows] = await connection.query('CALL GetRequirements();');
+            return rows[0];
+        }
+    } catch (error) {
         console.error('Error fetching requirements:', error);
         throw error;
-    }
-    finally {
+    } finally {
         connection.release();
     }
 }
@@ -70,19 +72,23 @@ async function deleteRequirement(requirement_id){
     }
 }
 
-async function updateRequirement(requirement_id, requirement_name, file_path) {
-    const connection = await pool.getConnection();
-    try {
-        const [rows] = await connection.query('CALL UpdateRequirement(?, ?, ?);', [requirement_id, requirement_name, file_path]);
-        return rows[0];
-    }   
-    catch (error) {
-        console.error('Error updating requirement:', error);
-        throw error;
-    }
-    finally {
-        connection.release();
-    }
+async function updateRequirement(requirement_id, requirement_name, is_applicable_to, file_path) {
+  const connection = await pool.getConnection();
+  try {
+    console.log('[MODEL updateRequirement] args:', {
+      requirement_id,
+      requirement_name,
+      is_applicable_to,
+      file_path: file_path || null
+    });
+    const [rows] = await connection.query(
+      'CALL UpdateRequirement(?, ?, ?, ?);',
+      [requirement_id, requirement_name, is_applicable_to, file_path || null]
+    );
+    return rows[0];
+  } finally {
+    connection.release();
+  }
 }
 
 async function addApplicationPeriod(startDate, endDate, startTime, endTime, user_id){
