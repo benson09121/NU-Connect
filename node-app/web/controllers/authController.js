@@ -1,6 +1,7 @@
 const msal = require('@azure/msal-node');
 const axios = require('axios');
 const userModel = require('../models/userModel');
+const userActivationModel = require('../models/userActivationModel');
 const { sendInvitationEmail } = require('../../services/emailService');
 
 require('dotenv').config();
@@ -50,23 +51,40 @@ async function register(req, res) {
 
 async function login(req, res) {
     try {
+        // Check user status before login
+        const userStatusBefore = await userActivationModel.getUserActivationStatus(req.user.email);
+        const wasActiveBefore = userStatusBefore?.status === 'Active';
+        
         const permissionResult = await userModel.handleLogin(req.user);
         
-        // const isUserExist = await userModel.checkUserExists(req.user.email);
-        // console.log(req.user);
-        // if (isUserExist.length === 0) {
-        //     console.log("Creating user");
-        //     await userModel.createUser(req.user);
-        // }
-        // console.log("isUserExist", isUserExist);
-        // if (!req.user || !req.user.user_id) {
-        //     return res.status(400).json({ error: "User information missing from request." });
-        // }
-        // const permissionResult = await userModel.getPermissions(req.user.user_id);
+        // Check if user was activated during this login
+        if (!wasActiveBefore && userStatusBefore?.status === 'Pending') {
+            console.log(`🎉 User ${req.user.email} activated on first login!`);
+            // Log the activation event
+            await userActivationModel.logUserActivation(
+                req.user.user_id, 
+                req.user.email, 
+                'first_login'
+            );
+        }
+        
         console.log(permissionResult);
         // Extract permissions array from the nested user_info object
         const permissions = permissionResult[0]?.user_info?.permissions || [];
-        permissions.includes("WEB_ACCESS") ? res.status(200).json(permissionResult[0].user_info) : res.status(401).json({ message: "Access Denied" });
+        
+        if (permissions.includes("WEB_ACCESS")) {
+            // Add activation status to response
+            const userInfo = {
+                ...permissionResult[0].user_info,
+                activation_info: {
+                    was_just_activated: !wasActiveBefore && userStatusBefore?.status === 'Pending',
+                    activation_date: wasActiveBefore ? userStatusBefore?.updated_at : new Date().toISOString()
+                }
+            };
+            res.status(200).json(userInfo);
+        } else {
+            res.status(401).json({ message: "Access Denied" });
+        }
     }
     catch (error) {
         console.error("Error in login:", error);
