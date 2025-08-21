@@ -661,14 +661,6 @@ CREATE TABLE tbl_notification_recipient (
     FOREIGN KEY (notification_id) REFERENCES tbl_notification(notification_id) ON DELETE CASCADE
 );
 
--- CREATE TABLE tbl_logs(
---     log_id INT AUTO_INCREMENT PRIMARY KEY,
---     user_id VARCHAR(200) NOT NULL,
---     action TEXT NOT NULL,
---     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
---     FOREIGN KEY (user_id) REFERENCES tbl_user(user_id) ON UPDATE CASCADE
--- );
-
     -- Improved table for logs
 CREATE TABLE tbl_logs (
     log_id INT AUTO_INCREMENT PRIMARY KEY,
@@ -682,36 +674,97 @@ CREATE TABLE tbl_logs (
     FOREIGN KEY (user_id) REFERENCES tbl_user(user_id) ON UPDATE CASCADE
 );
 
-
-CREATE TABLE tbl_transaction(
-    transaction_id INT AUTO_INCREMENT PRIMARY KEY,
-    user_id VARCHAR(200) NOT NULL,
-    amount DECIMAL(10,2) NOT NULL,
-    transaction_type ENUM('Membership Fee', 'Event Fee', 'Event Expenses') NOT NULL,
-    status ENUM('Pending', 'Completed', 'Failed') DEFAULT 'Pending',
-    proof_image VARCHAR(255) DEFAULT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES tbl_user(user_id) ON UPDATE CASCADE
+CREATE TABLE tbl_transaction_type (
+    transaction_type_id INT AUTO_INCREMENT PRIMARY KEY,
+    code VARCHAR(50) UNIQUE NOT NULL,   -- e.g. 'INCOME', 'EXPENSE'
+    label VARCHAR(100) NOT NULL         -- e.g. 'Income', 'Expense'
 );
 
-CREATE TABLE tbl_transaction_membership(
+CREATE TABLE tbl_payment_type (
+    payment_type_id INT AUTO_INCREMENT PRIMARY KEY,
+    code VARCHAR(50) UNIQUE NOT NULL, 
+    label VARCHAR(100) NOT NULL, 
+    category VARCHAR(50) NOT NULL 
+);
+
+CREATE TABLE tbl_transaction (
+    transaction_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id VARCHAR(200) NULL,          -- optional (payer or payee depending on type)
+    payer_name VARCHAR(255) NULL,       -- for external/anonymous payers
+    payee_name VARCHAR(255) NULL,       -- useful for expenses (who was paid)
+    payment_description VARCHAR(255) NOT NULL,
+    amount DECIMAL(10,2) NOT NULL,
+
+    transaction_type_id INT NOT NULL,   -- income or expense
+    payment_type_id INT NOT NULL,       -- cash, gcash, bank, etc.
+
+    status ENUM('Pending', 'Completed', 'Failed') DEFAULT 'Pending',
+    transaction_date DATE NOT NULL,
+    receipt_no VARCHAR(100) NULL,       -- optional for expense
+    proof_image VARCHAR(500) DEFAULT NULL,
+
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+
+    -- archive/unarchive metadata
+    archived_at TIMESTAMP NULL,
+    archived_by VARCHAR(200) NULL,
+    archived_reason VARCHAR(255) NULL,
+    unarchived_at TIMESTAMP NULL,
+    unarchived_by VARCHAR(200) NULL,
+
+    FOREIGN KEY (user_id) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
+    FOREIGN KEY (payment_type_id) REFERENCES tbl_payment_type(payment_type_id) ON UPDATE CASCADE,
+    FOREIGN KEY (transaction_type_id) REFERENCES tbl_transaction_type(transaction_type_id) ON UPDATE CASCADE
+);
+
+CREATE TABLE tbl_transaction_membership (
     transaction_id INT PRIMARY KEY,
     organization_id INT NOT NULL,
     cycle_number INT NOT NULL,
     FOREIGN KEY (transaction_id) REFERENCES tbl_transaction(transaction_id) ON DELETE CASCADE,
     FOREIGN KEY (organization_id, cycle_number) REFERENCES tbl_renewal_cycle(organization_id, cycle_number) ON DELETE CASCADE
+    -- user_id is still enforced through tbl_transaction (not NULL in this context)
 );
 
-CREATE TABLE tbl_transaction_event(
+CREATE TABLE tbl_transaction_event (
     transaction_id INT PRIMARY KEY,
     event_id INT NOT NULL,
     remarks VARCHAR(255) DEFAULT NULL,
+    payer_name_override VARCHAR(255) NULL, -- specific to event transactions if anonymous
     FOREIGN KEY (transaction_id) REFERENCES tbl_transaction(transaction_id) ON DELETE CASCADE,
     FOREIGN KEY (event_id) REFERENCES tbl_event(event_id) ON DELETE CASCADE
 );
 
+CREATE TABLE tbl_transaction_expense (
+    transaction_id INT PRIMARY KEY,
+    expense_category VARCHAR(100) NOT NULL,  -- e.g. Supplies, Logistics, Food
+    reference_doc VARCHAR(255) NULL,        -- invoice, OR number, etc.
+    FOREIGN KEY (transaction_id) REFERENCES tbl_transaction(transaction_id) ON DELETE CASCADE
+);
+
 -- PROCEDURES
 use db_nuconnect;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE LogAction(
+    IN p_user_email VARCHAR(100),
+    IN p_action TEXT,
+    IN p_type VARCHAR(100),
+    IN p_meta_data JSON,
+    IN p_redirect_url VARCHAR(500),
+    IN p_file_path TEXT
+)
+BEGIN
+    DECLARE v_user_id VARCHAR(200);
+    SELECT user_id INTO v_user_id FROM tbl_user WHERE email = p_user_email LIMIT 1;
+    IF v_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='User email not found for logging';
+    END IF;
+    INSERT INTO tbl_logs(user_id, action, type, meta_data, redirect_url, file_path)
+    VALUES (v_user_id, p_action, p_type, p_meta_data, p_redirect_url, p_file_path);
+END$$
+DELIMITER ;
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetAllEvents(IN p_user_id VARCHAR(200))
@@ -7853,6 +7906,371 @@ BEGIN
 END $$
 DELIMITER ;
 
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE CreateTransaction(
+    IN p_user_email VARCHAR(100),
+    IN p_payer_name VARCHAR(255),
+    IN p_payee_name VARCHAR(255),
+    IN p_transaction_type_code VARCHAR(50),
+    IN p_payment_type_code VARCHAR(50),
+    IN p_payment_description VARCHAR(255),
+    IN p_amount DECIMAL(10,2),
+    IN p_status ENUM('Pending','Completed','Failed'),
+    IN p_transaction_date DATE,
+    IN p_proof_image VARCHAR(500),
+    IN p_meta JSON,
+    IN p_event_id INT,
+    IN p_payer_name_override VARCHAR(255),
+    IN p_org_id INT,
+    IN p_cycle_number INT,
+    IN p_expense_category VARCHAR(100),
+    IN p_reference_doc VARCHAR(255)
+)
+BEGIN
+    DECLARE v_user_id VARCHAR(200);
+    DECLARE v_payment_type_id INT;
+    DECLARE v_transaction_type_id INT;
+    DECLARE v_txn_id INT;
+    DECLARE v_type_code VARCHAR(50);
+
+    SELECT transaction_type_id, code
+      INTO v_transaction_type_id, v_type_code
+      FROM tbl_transaction_type
+     WHERE code = p_transaction_type_code
+     LIMIT 1;
+    IF v_transaction_type_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Transaction type code not found';
+    END IF;
+
+    SELECT payment_type_id INTO v_payment_type_id
+      FROM tbl_payment_type WHERE code = p_payment_type_code LIMIT 1;
+    IF v_payment_type_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Payment type code not found';
+    END IF;
+
+    IF p_user_email IS NOT NULL AND p_user_email <> '' THEN
+        SELECT user_id INTO v_user_id FROM tbl_user WHERE email = p_user_email LIMIT 1;
+        IF v_user_id IS NULL THEN
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='User (email) not found';
+        END IF;
+    ELSE
+        SET v_user_id = NULL;
+    END IF;
+
+    INSERT INTO tbl_transaction(
+        user_id,
+        payer_name,
+        payee_name,
+        payment_description,
+        amount,
+        transaction_type_id,
+        payment_type_id,
+        status,
+        transaction_date,
+        receipt_no,
+        proof_image
+    ) VALUES (
+        v_user_id,
+        NULLIF(p_payer_name,''),
+        NULLIF(p_payee_name,''),
+        p_payment_description,
+        p_amount,
+        v_transaction_type_id,
+        v_payment_type_id,
+        COALESCE(p_status,'Pending'),
+        p_transaction_date,
+        'PENDING',
+        NULLIF(p_proof_image,'')
+    );
+
+    SET v_txn_id = LAST_INSERT_ID();
+
+    IF v_type_code = 'INCOME' THEN
+        UPDATE tbl_transaction
+           SET receipt_no = CONCAT('RCPT-', p_payment_type_code, '-', LPAD(v_txn_id,6,'0'))
+         WHERE transaction_id = v_txn_id;
+    ELSE
+        UPDATE tbl_transaction
+           SET receipt_no = NULL
+         WHERE transaction_id = v_txn_id;
+    END IF;
+
+    IF v_type_code = 'INCOME' THEN
+        IF p_event_id IS NOT NULL THEN
+            INSERT INTO tbl_transaction_event(transaction_id, event_id, remarks, payer_name_override)
+            VALUES (v_txn_id, p_event_id, NULL, NULLIF(p_payer_name_override,''));
+        END IF;
+        IF p_org_id IS NOT NULL AND p_cycle_number IS NOT NULL THEN
+            INSERT INTO tbl_transaction_membership(transaction_id, organization_id, cycle_number)
+            VALUES (v_txn_id, p_org_id, p_cycle_number);
+        END IF;
+    END IF;
+
+    IF v_type_code = 'EXPENSE' THEN
+        IF p_expense_category IS NULL OR p_expense_category = '' THEN
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Expense category required for expense transaction';
+        END IF;
+        INSERT INTO tbl_transaction_expense(transaction_id, expense_category, reference_doc)
+        VALUES (v_txn_id, p_expense_category, NULLIF(p_reference_doc,''));
+    END IF;
+
+    CALL LogAction(
+        COALESCE(p_user_email,'system@anonymous.local'),
+        CONCAT('Created transaction #', v_txn_id, ' (', v_type_code, ')'),
+        'transaction_create',
+        p_meta,
+        NULL,
+        NULL
+    );
+
+    CALL GetTransaction(v_txn_id);
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE UpdateTransaction(
+    IN p_transaction_id INT,
+    IN p_user_email VARCHAR(100),
+    IN p_payment_description VARCHAR(255),
+    IN p_amount DECIMAL(10,2),
+    IN p_status ENUM('Pending','Completed','Failed'),
+    IN p_proof_image VARCHAR(500),
+    IN p_meta JSON,
+    IN p_payer_name VARCHAR(255),
+    IN p_payee_name VARCHAR(255),
+    IN p_payer_name_override VARCHAR(255),
+    IN p_expense_category VARCHAR(100),
+    IN p_reference_doc VARCHAR(255)
+)
+BEGIN
+    DECLARE v_actor_id VARCHAR(200);
+    DECLARE v_type_code VARCHAR(50);
+    DECLARE v_exists INT;
+
+    SELECT user_id INTO v_actor_id FROM tbl_user WHERE email = p_user_email LIMIT 1;
+    IF v_actor_id IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Actor user not found'; END IF;
+
+    SELECT tt.code INTO v_type_code
+    FROM tbl_transaction t
+    JOIN tbl_transaction_type tt ON t.transaction_type_id = tt.transaction_type_id
+    WHERE t.transaction_id = p_transaction_id;
+
+    IF v_type_code IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Transaction not found';
+    END IF;
+
+    UPDATE tbl_transaction
+       SET payment_description = COALESCE(p_payment_description, payment_description),
+           amount = COALESCE(p_amount, amount),
+           status = COALESCE(p_status, status),
+           proof_image = COALESCE(NULLIF(p_proof_image,''), proof_image),
+           payer_name = COALESCE(NULLIF(p_payer_name,''), payer_name),
+           payee_name = COALESCE(NULLIF(p_payee_name,''), payee_name),
+           updated_at = CURRENT_TIMESTAMP
+     WHERE transaction_id = p_transaction_id;
+
+    IF ROW_COUNT() = 0 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Update failed'; END IF;
+
+    IF v_type_code = 'INCOME' AND p_payer_name_override IS NOT NULL THEN
+        SELECT COUNT(*) INTO v_exists FROM tbl_transaction_event WHERE transaction_id = p_transaction_id;
+        IF v_exists = 1 THEN
+            UPDATE tbl_transaction_event
+               SET payer_name_override = NULLIF(p_payer_name_override,'')
+             WHERE transaction_id = p_transaction_id;
+        END IF;
+    END IF;
+
+    IF v_type_code = 'EXPENSE' THEN
+        SELECT COUNT(*) INTO v_exists FROM tbl_transaction_expense WHERE transaction_id = p_transaction_id;
+        IF v_exists = 1 THEN
+            UPDATE tbl_transaction_expense
+               SET expense_category = COALESCE(p_expense_category, expense_category),
+                   reference_doc = COALESCE(NULLIF(p_reference_doc,''), reference_doc)
+             WHERE transaction_id = p_transaction_id;
+        END IF;
+    END IF;
+
+    CALL LogAction(
+        p_user_email,
+        CONCAT('Updated transaction #', p_transaction_id, ' (', v_type_code, ')'),
+        'transaction_update',
+        p_meta,
+        NULL,
+        NULL
+    );
+
+    CALL GetTransaction(p_transaction_id);
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE ArchiveTransaction(
+    IN p_transaction_id INT,
+    IN p_user_email VARCHAR(100),
+    IN p_reason VARCHAR(255),
+    IN p_meta JSON
+)
+BEGIN
+    DECLARE v_actor_id VARCHAR(200);
+    SELECT user_id INTO v_actor_id FROM tbl_user WHERE email = p_user_email LIMIT 1;
+    IF v_actor_id IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Actor user not found'; END IF;
+
+    UPDATE tbl_transaction
+       SET archived_at = CURRENT_TIMESTAMP,
+           archived_by = v_actor_id,
+           archived_reason = p_reason,
+           unarchived_at = NULL,
+           unarchived_by = NULL
+     WHERE transaction_id = p_transaction_id
+       AND archived_at IS NULL;
+
+    IF ROW_COUNT() = 0 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Transaction not found or already archived'; END IF;
+
+    CALL LogAction(
+        p_user_email,
+        CONCAT('Archived transaction #', p_transaction_id,' Reason: ', p_reason),
+        'transaction_archive',
+        p_meta,
+        NULL,
+        NULL
+    );
+
+    CALL GetTransaction(p_transaction_id);
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE UnarchiveTransaction(
+    IN p_transaction_id INT,
+    IN p_user_email VARCHAR(100),
+    IN p_meta JSON
+)
+BEGIN
+    DECLARE v_actor_id VARCHAR(200);
+    SELECT user_id INTO v_actor_id FROM tbl_user WHERE email = p_user_email LIMIT 1;
+    IF v_actor_id IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Actor user not found'; END IF;
+
+    UPDATE tbl_transaction
+       SET unarchived_at = CURRENT_TIMESTAMP,
+           unarchived_by = v_actor_id,
+           archived_at = NULL,
+           archived_by = NULL,
+           archived_reason = NULL
+     WHERE transaction_id = p_transaction_id
+       AND archived_at IS NOT NULL;
+
+    IF ROW_COUNT() = 0 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Transaction not archived or not found'; END IF;
+
+    CALL LogAction(
+        p_user_email,
+        CONCAT('Unarchived transaction #', p_transaction_id),
+        'transaction_unarchive',
+        p_meta,
+        NULL,
+        NULL
+    );
+
+    CALL GetTransaction(p_transaction_id);
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetTransaction(
+    IN p_transaction_id INT
+)
+BEGIN
+    SELECT t.*,
+           pt.code AS payment_type_code,
+           pt.label AS payment_type_label,
+           tt.code AS transaction_type_code,
+           tt.label AS transaction_type_label,
+           te.event_id,
+           te.payer_name_override,
+           tm.organization_id,
+           tm.cycle_number,
+           ex.expense_category,
+           ex.reference_doc
+    FROM tbl_transaction t
+    JOIN tbl_payment_type pt ON t.payment_type_id = pt.payment_type_id
+    JOIN tbl_transaction_type tt ON t.transaction_type_id = tt.transaction_type_id
+    LEFT JOIN tbl_transaction_event te ON t.transaction_id = te.transaction_id
+    LEFT JOIN tbl_transaction_membership tm ON t.transaction_id = tm.transaction_id
+    LEFT JOIN tbl_transaction_expense ex ON t.transaction_id = ex.transaction_id
+    WHERE t.transaction_id = p_transaction_id;
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetTransactions(
+    IN p_user_email VARCHAR(100),
+    IN p_status ENUM('Pending','Completed','Failed'),
+    IN p_include_archived BOOLEAN,
+    IN p_event_id INT,
+    IN p_org_id INT,
+    IN p_transaction_type_code VARCHAR(50)      -- optional filter (INCOME / EXPENSE)
+)
+BEGIN
+    DECLARE v_user_id VARCHAR(200);
+    DECLARE v_type_id INT;
+
+    IF p_user_email IS NOT NULL AND p_user_email <> '' THEN
+        SELECT user_id INTO v_user_id FROM tbl_user WHERE email = p_user_email LIMIT 1;
+        IF v_user_id IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='User not found'; END IF;
+    END IF;
+
+    IF p_transaction_type_code IS NOT NULL AND p_transaction_type_code <> '' THEN
+        SELECT transaction_type_id INTO v_type_id
+        FROM tbl_transaction_type
+        WHERE code = p_transaction_type_code
+        LIMIT 1;
+        IF v_type_id IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Transaction type not found'; END IF;
+    END IF;
+
+    SELECT t.*,
+           pt.code AS payment_type_code,
+           pt.label AS payment_type_label,
+           tt.code AS transaction_type_code,
+           tt.label AS transaction_type_label,
+           te.event_id,
+           te.payer_name_override,
+           tm.organization_id,
+           tm.cycle_number,
+           ex.expense_category,
+           ex.reference_doc
+    FROM tbl_transaction t
+    JOIN tbl_payment_type pt ON t.payment_type_id = pt.payment_type_id
+    JOIN tbl_transaction_type tt ON t.transaction_type_id = tt.transaction_type_id
+    LEFT JOIN tbl_transaction_event te ON t.transaction_id = te.transaction_id
+    LEFT JOIN tbl_transaction_membership tm ON t.transaction_id = tm.transaction_id
+    LEFT JOIN tbl_transaction_expense ex ON t.transaction_id = ex.transaction_id
+    WHERE (v_user_id IS NULL OR t.user_id = v_user_id)
+      AND (p_status IS NULL OR t.status = p_status)
+      AND (p_include_archived OR t.archived_at IS NULL)
+      AND (p_event_id IS NULL OR te.event_id = p_event_id)
+      AND (p_org_id IS NULL OR tm.organization_id = p_org_id)
+      AND (v_type_id IS NULL OR t.transaction_type_id = v_type_id)
+    ORDER BY t.created_at DESC;
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetPaymentTypes()
+BEGIN
+    SELECT payment_type_id, code, label, category
+      FROM tbl_payment_type
+     ORDER BY label;
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetTransactionTypes()
+BEGIN
+    SELECT transaction_type_id, code, label
+    FROM tbl_transaction_type
+    ORDER BY label;
+END $$
+DELIMITER ;
+
 -- INDEXES
 
 CREATE INDEX idx_org_members_user ON tbl_organization_members(user_id);
@@ -7956,7 +8374,8 @@ VALUES("CREATE_EVENT","Organization"),
 ("CREATE_SDAO_EVENT","SDAO"),
 ("APPLY_NEW_ORGANIZATION","Global"),
 ("APPLY_RENEWAL_ORGANIZATION","Organization");
-
+("VIEW_TRANSACTIONS","Global"),
+("MANAGE_TRANSACTIONS","Global");
 
 INSERT INTO tbl_role_permission (role_id, permission_id) 
 VALUES
@@ -7980,6 +8399,8 @@ VALUES
 (4,24),
 (4,25),
 (4,26),
+(4,30),
+(4,31),
 (2,6),
 (2,9),
 (2,16),
@@ -8116,3 +8537,129 @@ INSERT INTO tbl_rank_permission(rank_id, permission_id) VALUES
 (1,19),
 (1,20),
 (1,21);
+
+INSERT INTO tbl_transaction_type (code, label) VALUES
+  ('INCOME','Income'),
+  ('EXPENSE','Expense')
+ON DUPLICATE KEY UPDATE label=VALUES(label);
+
+INSERT INTO tbl_payment_type (code, label, category) VALUES
+('CH', 'Cash', 'Cash'),
+('CD', 'Credit/Debit Card', 'Card'),
+('BT', 'Bank Transfer', 'Bank'),
+('GC', 'GCash', 'E-Wallet'),
+('MY', 'Maya', 'E-Wallet'),
+('PP', 'PayPal', 'Online');
+
+INSERT INTO tbl_transaction (
+    user_id, payer_name, payee_name, payment_description, amount,
+    transaction_type_id, payment_type_id, status,
+    transaction_date, receipt_no, proof_image
+) VALUES (
+    (SELECT user_id FROM tbl_user WHERE email='javierbb@students.nu-dasma.edu.ph'),
+    NULL,
+    NULL,
+    'Membership Fee Payment',
+    500.00,
+    (SELECT transaction_type_id FROM tbl_transaction_type WHERE code='INCOME'),
+    (SELECT payment_type_id FROM tbl_payment_type WHERE code='GC'),
+    'Pending',
+    CURDATE(),
+    'RCPT-GC-0001',
+    'proofs/membership_fee_gc_0001.png'
+);
+
+-- Income: Event Registration (user payer)
+INSERT INTO tbl_transaction (
+    user_id, payer_name, payee_name, payment_description, amount,
+    transaction_type_id, payment_type_id, status,
+    transaction_date, receipt_no, proof_image
+) VALUES (
+    (SELECT user_id FROM tbl_user WHERE email='falconcs@students.nu-dasma.edu.ph'),
+    NULL,
+    NULL,
+    'Event Registration',
+    150.00,
+    (SELECT transaction_type_id FROM tbl_transaction_type WHERE code='INCOME'),
+    (SELECT payment_type_id FROM tbl_payment_type WHERE code='CH'),
+    'Completed',
+    CURDATE(),
+    'RCPT-CH-0002',
+    NULL
+);
+
+-- Income: Anonymous Sponsorship (external payer)
+INSERT INTO tbl_transaction (
+    user_id, payer_name, payee_name, payment_description, amount,
+    transaction_type_id, payment_type_id, status,
+    transaction_date, receipt_no, proof_image
+) VALUES (
+    NULL,
+    'External Sponsor Corp',
+    NULL,
+    'Sponsorship Donation',
+    2500.00,
+    (SELECT transaction_type_id FROM tbl_transaction_type WHERE code='INCOME'),
+    (SELECT payment_type_id FROM tbl_payment_type WHERE code='BT'),
+    'Completed',
+    CURDATE(),
+    'RCPT-BT-0003',
+    'proofs/donation_bt_0003.jpg'
+);
+
+-- Income: Failed Merch Purchase (for status testing)
+INSERT INTO tbl_transaction (
+    user_id, payer_name, payee_name, payment_description, amount,
+    transaction_type_id, payment_type_id, status,
+    transaction_date, receipt_no, proof_image
+) VALUES (
+    (SELECT user_id FROM tbl_user WHERE email='mendozasm@students.nu-dasma.edu.ph'),
+    NULL,
+    NULL,
+    'Merch Purchase',
+    300.00,
+    (SELECT transaction_type_id FROM tbl_transaction_type WHERE code='INCOME'),
+    (SELECT payment_type_id FROM tbl_payment_type WHERE code='CD'),
+    'Failed',
+    CURDATE(),
+    'RCPT-CD-0004',
+    NULL
+);
+
+-- Expense: Venue Rental (no receipt number for expense)
+INSERT INTO tbl_transaction (
+    user_id, payer_name, payee_name, payment_description, amount,
+    transaction_type_id, payment_type_id, status,
+    transaction_date, receipt_no, proof_image
+) VALUES (
+    (SELECT user_id FROM tbl_user WHERE email='arisgc@students.nu-dasma.edu.ph'),
+    NULL,
+    'ABC Convention Center',
+    'Venue Rental for General Assembly',
+    5000.00,
+    (SELECT transaction_type_id FROM tbl_transaction_type WHERE code='EXPENSE'),
+    (SELECT payment_type_id FROM tbl_payment_type WHERE code='CH'),
+    'Completed',
+    CURDATE(),
+    NULL,
+    'proofs/expense_venue_ga.png'
+);
+
+-- Expense: Printing Supplies
+INSERT INTO tbl_transaction (
+    user_id, payer_name, payee_name, payment_description, amount,
+    transaction_type_id, payment_type_id, status,
+    transaction_date, receipt_no, proof_image
+) VALUES (
+    (SELECT user_id FROM tbl_user WHERE email='arisgc@students.nu-dasma.edu.ph'),
+    NULL,
+    'PrintWorks Stationers',
+    'Flyers & IDs Printing',
+    1200.00,
+    (SELECT transaction_type_id FROM tbl_transaction_type WHERE code='EXPENSE'),
+    (SELECT payment_type_id FROM tbl_payment_type WHERE code='GC'),
+    'Pending',
+    CURDATE(),
+    NULL,
+    NULL
+);
