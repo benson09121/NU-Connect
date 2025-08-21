@@ -304,6 +304,7 @@ async function createEventApplication(req, res) {
     // Parse event and requirements from the request
     const event = JSON.parse(req.body.event);
     const requirements = JSON.parse(req.body.requirements);
+    const publicationImage = req.files?.publicationImage;
 
     // Lookup user_id from email if not present
     let applicant_user_id = req.user?.user_id;
@@ -314,8 +315,6 @@ async function createEventApplication(req, res) {
       }
       applicant_user_id = user.user_id;
     }
-
-    // Lookup organization_id from tbl_organization_members if not provided
     let organization_id = event.organization_id;
     let cycle_number = event.cycle_number;
     if ((!organization_id || !cycle_number) && applicant_user_id) {
@@ -326,7 +325,6 @@ async function createEventApplication(req, res) {
       }
     }
 
-    // Handle file uploads for requirements
     const requirementFiles = {};
     requirements.forEach(reqItem => {
       const fileKey = `requirement_${reqItem.requirement_id}`;
@@ -335,7 +333,6 @@ async function createEventApplication(req, res) {
       }
     });
 
-    // Generate filenames for requirements and use them for both DB and file upload
     const requirementFilePaths = requirements.map(reqItem => {
       const file = requirementFiles[reqItem.requirement_id];
       if (file) {
@@ -351,6 +348,12 @@ async function createEventApplication(req, res) {
         };
       }
     });
+
+    // Add publication image filename to event object if it exists
+    if (publicationImage) {
+      const publicationImageFilename = publicationImage.name || 'publication_image.png';
+      event.image = publicationImageFilename;
+    }
 
     // Call the stored procedure
     const dbResult = await eventModel.createEventApplication(
@@ -372,6 +375,21 @@ async function createEventApplication(req, res) {
       fs.mkdirSync(requirementsDir, { recursive: true });
     }
 
+    // Only create publication image directory and save file if publicationImage exists
+    if (publicationImage) {
+      const publicationImageDir = path.join(orgDir, 'publication_images');
+      if (!fs.existsSync(publicationImageDir)) {
+        fs.mkdirSync(publicationImageDir, { recursive: true });
+      }
+
+      // Use the original filename instead of hardcoded name
+      const publicationImageFilename = publicationImage.name || 'publication_image.png';
+      fs.writeFileSync(
+        path.join(publicationImageDir, publicationImageFilename),
+        publicationImage.data
+      );
+    }
+
     requirements.forEach(reqItem => {
       const file = requirementFiles[reqItem.requirement_id];
       if (file) {
@@ -382,7 +400,6 @@ async function createEventApplication(req, res) {
         );
       }
     });
-
 
     const result = await eventModel.getEventById(dbResult[0].event_id);
     publishToChannel(`events`, {
@@ -845,6 +862,24 @@ async function getSampleCertificate(req, res) {
     }
 }
 
+async function getEventPublicationImage(req, res) {
+    let {event_id, image_name, cycle_number, organization_name } = req.query;
+    const image_name_encoded = encodeURIComponent(image_name);
+    const organization_name_encoded = encodeURIComponent(organization_name);
+    try {
+        res.header('Access-Control-Allow-Origin', 'http://localhost:5173');
+        // Set Content-Disposition so browser handles as image (inline) 
+        res.setHeader('Content-Disposition', `inline; filename="${image_name}"`);
+        // X-Accel-Redirect for Nginx internal serving
+        res.setHeader('X-Accel-Redirect', `/protected-organization-requirements/${organization_name_encoded}/${cycle_number}/events/${event_id}/publication_images/${image_name_encoded}`);
+        res.end();
+    } catch (error) {
+        res.status(500).json({
+            error: error.message || "An error occurred while fetching the logo.",
+        });
+    }
+}
+
 module.exports = {
     addEvent,
     getEventRequirements,
@@ -874,4 +909,5 @@ module.exports = {
     getEventEvaluationFeedbackPeriod,
     addCertificate,
     getSampleCertificate,
+    getEventPublicationImage
 };

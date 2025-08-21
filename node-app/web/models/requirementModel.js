@@ -121,6 +121,69 @@ async function addEventRequirement(requirement_name, requirement_type, savePath,
     }
 }
 
+async function getSpecificEventRequirement(requirement_id) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetSpecificEventRequirement(?)', [requirement_id]);
+        return rows[0];
+    }
+    catch (error) {
+        console.error('Error fetching specific event requirement:', error);
+        throw error;
+    }
+    finally {
+        connection.release();
+    }
+}
+
+async function updateEventRequirement(requirement_id, requirement_name, requirement_type, file_path, updated_by) {
+    const connection = await pool.getConnection();
+    const fs = require('fs');
+    const path = require('path');
+    
+    try {
+        const [rows] = await connection.query('CALL UpdateEventRequirement(?, ?, ?, ?, ?)', [requirement_id, requirement_name, requirement_type, file_path, updated_by]);
+        
+        // Handle old file deletion if a new file path is provided and old file exists
+        if (rows[0] && rows[0][0] && rows[0][0].old_file_path && file_path && file_path !== rows[0][0].old_file_path) {
+            const oldFilePath = path.join('/app/requirements', rows[0][0].old_file_path);
+            try {
+                if (fs.existsSync(oldFilePath)) {
+                    fs.unlinkSync(oldFilePath);
+                    console.log(`Deleted old file: ${oldFilePath}`);
+                }
+            } catch (fileError) {
+                console.error('Error deleting old file:', fileError);
+                // Don't throw here - the database update was successful
+            }
+        }
+        
+        return rows[0];
+    }
+    catch (error) {
+        console.error('Error updating event requirement:', error);
+        throw error;
+    }
+    finally {
+        connection.release();
+    }
+}
+
+async function archiveEventRequirement(requirement_id, archived_by) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL ArchiveEventRequirement(?, ?)', [requirement_id, archived_by]);
+        return rows[0];
+    }
+    catch (error) {
+        console.error('Error archiving event requirement:', error);
+        throw error;
+    }
+    finally {
+        connection.release();
+    }
+}
+
 async function getAllPeriodsWithApplications() {
     const connection = await pool.getConnection();
     try {
@@ -207,5 +270,8 @@ module.exports = {
     getActiveApplicationPeriodSimple,
     updateApplicationPeriod,
     terminateActiveApplicationPeriod,
-    addEventRequirement
+    addEventRequirement,
+    getSpecificEventRequirement,
+    updateEventRequirement,
+    archiveEventRequirement
 };

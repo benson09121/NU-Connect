@@ -67,7 +67,7 @@ CREATE TABLE tbl_user_application (
 CREATE TABLE tbl_permission(
     permission_id INT AUTO_INCREMENT PRIMARY KEY,
     permission_name VARCHAR(200) UNIQUE NOT NULL,
-    scope ENUM('Global', 'Executive', 'Committee') DEFAULT 'Global',
+    scope ENUM('Global', 'SDAO', 'Organization', "Approver") DEFAULT 'Global',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -288,6 +288,7 @@ CREATE TABLE tbl_event (
     user_id VARCHAR(200) NOT NULL,
     title VARCHAR(300) NOT NULL,
     description TEXT NOT NULL,
+    image TEXT,
     venue_type ENUM('Face to face', 'Online') DEFAULT 'face to face',
     venue VARCHAR(200) NULL,
     start_date DATE NOT NULL,
@@ -408,6 +409,7 @@ CREATE TABLE tbl_event_application_requirement (
     requirement_name VARCHAR(255) NOT NULL,
     is_applicable_to ENUM('pre-event', 'post-event') DEFAULT 'pre-event',
     file_path VARCHAR(255) NULL,
+    status ENUM('active', 'archived') DEFAULT 'active',
     created_by VARCHAR(200) NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -2669,6 +2671,7 @@ BEGIN
         e.event_id as id,
         e.title,
         e.description,
+        e.image,
         e.start_date,
         e.end_date,
         e.start_time,
@@ -2681,12 +2684,14 @@ BEGIN
         e.venue,
         e.organization_id,
         o.name AS organization_name,
+        rc.cycle_number,
         e.status,
         e.type,
         e.user_id,
         e.created_at
     FROM tbl_event e
-    LEFT JOIN tbl_organization o ON e.organization_id = o.organization_id;
+    LEFT JOIN tbl_organization o ON e.organization_id = o.organization_id
+    LEFT JOIN tbl_renewal_cycle rc ON e.organization_id = rc.organization_id AND e.cycle_number = rc.cycle_number;
 END $$
 DELIMITER ;
 
@@ -2694,29 +2699,31 @@ DELIMITER ;
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetEventById(IN p_event_id INT)
 BEGIN
-    SELECT 
-        e.event_id as id,
+SELECT
+     e.event_id as id,
         e.title,
         e.description,
+        e.image,
         e.start_date,
         e.end_date,
         e.start_time,
         e.end_time,
         e.capacity,
         e.certificate,
-        e.event_type,
         e.fee,
         e.is_open_to,
         e.venue_type,
         e.venue,
         e.organization_id,
         o.name AS organization_name,
+        rc.cycle_number,
         e.status,
         e.type,
         e.user_id,
         e.created_at
     FROM tbl_event e
     LEFT JOIN tbl_organization o ON e.organization_id = o.organization_id
+    LEFT JOIN tbl_renewal_cycle rc ON e.organization_id = rc.organization_id AND e.cycle_number = rc.cycle_number
     WHERE e.event_id = p_event_id;
 END $$
 DELIMITER ;
@@ -3269,8 +3276,15 @@ BEGIN
         ON org.organization_id = app.organization_id
     LEFT JOIN tbl_program p
         ON org.base_program_id = p.program_id
-    WHERE app.status = 'Pending'
-    ORDER BY org.created_at DESC, app.created_at DESC;
+    WHERE app.status = 'Pending' OR app.status = 'Rejected'
+    ORDER BY 
+        CASE app.status 
+            WHEN 'Pending' THEN 1 
+            WHEN 'Rejected' THEN 2 
+            ELSE 3 
+        END,
+        org.created_at DESC, 
+        app.created_at DESC;
 END$$
 DELIMITER ;
 
@@ -3918,6 +3932,7 @@ BEGIN
     ORDER BY eap.step_number;
 END $$
 DELIMITER ;
+
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE CreateEventApplication(
     IN p_organization_id INT,
@@ -3968,6 +3983,7 @@ BEGIN
         event_type,
         title,
         description,
+        image,
         venue_type,
         venue,
         start_date,
@@ -3986,6 +4002,7 @@ BEGIN
         'Organization',
         JSON_UNQUOTE(JSON_EXTRACT(p_event, '$.title')),
         JSON_UNQUOTE(JSON_EXTRACT(p_event, '$.description')),
+        JSON_UNQUOTE(JSON_EXTRACT(p_event, '$.image')),
         JSON_UNQUOTE(JSON_EXTRACT(p_event, '$.venue_type')),
         JSON_UNQUOTE(JSON_EXTRACT(p_event, '$.venue')),
         JSON_UNQUOTE(JSON_EXTRACT(p_event, '$.start_date')),
@@ -4839,7 +4856,8 @@ DELIMITER ;
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetEventRequirements()
 BEGIN
-    SELECT * FROM tbl_event_application_requirement;
+    SELECT * FROM tbl_event_application_requirement
+    WHERE status = 'active';
 END $$
 DELIMITER ;
 
@@ -6476,6 +6494,153 @@ BEGIN
     -- Return success message with new ID
     SELECT CONCAT('Requirement added successfully. ID: ', LAST_INSERT_ID()) AS message;
 END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetSpecificEventRequirement(
+    IN p_requirement_id INT
+)
+BEGIN
+    -- Validate requirement ID
+    IF p_requirement_id IS NULL OR p_requirement_id <= 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Invalid requirement ID';
+    END IF;
+
+    -- Get the specific event requirement
+    SELECT 
+        requirement_id,
+        requirement_name,
+        is_applicable_to,
+        file_path,
+        created_by,
+        created_at
+    FROM tbl_event_application_requirement 
+    WHERE requirement_id = p_requirement_id;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE UpdateEventRequirement(
+    IN p_requirement_id INT,
+    IN p_requirement_name VARCHAR(255),
+    IN p_requirement_type ENUM('pre-event', 'post-event'),
+    IN p_file_path VARCHAR(255),
+    IN p_updated_by VARCHAR(200)
+)
+BEGIN
+    DECLARE v_user_exists INT;
+    DECLARE v_requirement_exists INT;
+    DECLARE v_old_file_path VARCHAR(255);
+
+    -- Validate requirement ID
+    IF p_requirement_id IS NULL OR p_requirement_id <= 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Invalid requirement ID';
+    END IF;
+
+    -- Validate requirement name
+    IF TRIM(p_requirement_name) = '' THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Requirement name cannot be empty';
+    END IF;
+
+    -- Check if updating user exists
+    SELECT COUNT(*) INTO v_user_exists
+    FROM tbl_user
+    WHERE user_id = p_updated_by;
+
+    IF v_user_exists = 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Updating user does not exist';
+    END IF;
+
+    -- Check if requirement exists and get old file path
+    SELECT COUNT(*), file_path INTO v_requirement_exists, v_old_file_path
+    FROM tbl_event_application_requirement
+    WHERE requirement_id = p_requirement_id;
+
+    IF v_requirement_exists = 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Event requirement not found';
+    END IF;
+
+    -- Update the requirement
+    UPDATE tbl_event_application_requirement 
+    SET 
+        requirement_name = p_requirement_name,
+        is_applicable_to = p_requirement_type,
+        file_path = NULLIF(p_file_path, ''),  -- Convert empty string to NULL
+        updated_at = CURRENT_TIMESTAMP
+    WHERE requirement_id = p_requirement_id;
+    
+    -- Return the old file path and success message
+    SELECT 
+        p_requirement_id as requirement_id,
+        v_old_file_path as old_file_path,
+        CONCAT('Event requirement updated successfully. ID: ', p_requirement_id) AS message;
+END$$
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE ArchiveEventRequirement(
+    IN p_requirement_id INT,
+    IN p_archived_by VARCHAR(200)
+)
+BEGIN
+    DECLARE v_user_exists INT;
+    DECLARE v_requirement_exists INT;
+    DECLARE v_requirement_status ENUM('active', 'archived');
+
+    -- Validate requirement ID
+    IF p_requirement_id IS NULL OR p_requirement_id <= 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Invalid requirement ID';
+    END IF;
+
+    -- Check if archiving user exists
+    SELECT COUNT(*) INTO v_user_exists
+    FROM tbl_user
+    WHERE user_id = p_archived_by;
+
+    IF v_user_exists = 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Archiving user does not exist';
+    END IF;
+
+    -- Check if requirement exists
+    SELECT COUNT(*) INTO v_requirement_exists
+    FROM tbl_event_application_requirement
+    WHERE requirement_id = p_requirement_id;
+
+    IF v_requirement_exists = 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Event requirement not found';
+    END IF;
+
+    -- Get current status
+    SELECT status INTO v_requirement_status
+    FROM tbl_event_application_requirement
+    WHERE requirement_id = p_requirement_id;
+
+    -- Check if already archived
+    IF v_requirement_status = 'archived' THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Event requirement is already archived';
+    END IF;
+
+    -- Archive the requirement
+    UPDATE tbl_event_application_requirement 
+    SET 
+        status = 'archived',
+        updated_at = CURRENT_TIMESTAMP
+    WHERE requirement_id = p_requirement_id;
+    
+    -- Return success message
+    SELECT 
+        p_requirement_id as requirement_id,
+        CONCAT('Event requirement archived successfully. ID: ', p_requirement_id) AS message;
+END$$
+DELIMITER ;
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE UpdateCommitteeMember(
@@ -8179,38 +8344,38 @@ VALUES("Student",0,null),
 ("Dean",1,3),
 ("Academic Director",1,4);
 
-INSERT INTO tbl_permission(permission_name)
-VALUES("CREATE_EVENT"),
-("UPDATE_EVENT"),
-("DELETE_EVENT"),
-("VIEW_EVENT"),
-("REGISTER_EVENT"),
-("APPLY_ORGANIZATION"),
-("APPROVE_ORGANIZATION"),
-("ARCHIVE_ORGANIZATION"),
-("VIEW_ORGANIZATION"),
-("MANAGE_ACCOUNT"),
-("CREATE_COMMITTEE"),
-("UPDATE_COMMITTEE"),
-("DELETE_COMMITTEE"),
-("VIEW_COMMITTEE"),
-("MANAGE_REQUIREMENTS"),
-("VIEW_APPLICATION"),
-("MANAGE_APPLICATIONS"),
-("CREATE_EVALUATION"),
-("UPDATE_EVALUATION"),
-("DELETE_EVALUATION"),
-("VIEW_EVALUATION"),
-("VIEW_LOGS"),
-("WEB_ACCESS"),
-("MANAGE_REGISTRATION"),
-("SUBMIT_REQUIREMENTS"),
-("MANAGE_PROGRAMS"),
-("CREATE_SDAO_EVENT"),
-("APPLY_NEW_ORGANIZATION"),
-("APPLY_RENEWAL_ORGANIZATION"),
-("VIEW_TRANSACTIONS"),
-("MANAGE_TRANSACTIONS");
+INSERT INTO tbl_permission(permission_name, scope)
+VALUES("CREATE_EVENT","Organization"),
+("UPDATE_EVENT","Organization"),
+("DELETE_EVENT","Organization"),
+("VIEW_EVENT","Organization"),
+("REGISTER_EVENT","Organization"),
+("APPLY_ORGANIZATION","Organization"),
+("APPROVE_ORGANIZATION","Approver"),
+("ARCHIVE_ORGANIZATION","SDAO"),
+("VIEW_ORGANIZATION","Global"),
+("MANAGE_ACCOUNT","SDAO"),
+("CREATE_COMMITTEE","Organization"),
+("UPDATE_COMMITTEE","Organization"),
+("DELETE_COMMITTEE","Organization"),
+("VIEW_COMMITTEE","Organization"),
+("MANAGE_REQUIREMENTS","SDAO"),
+("VIEW_APPLICATION","Approver"),
+("MANAGE_APPLICATIONS","SDAO"),
+("CREATE_EVALUATION","Organization"), 
+("UPDATE_EVALUATION","Organization"),
+("DELETE_EVALUATION","Organization"),
+("VIEW_EVALUATION","Organization"),
+("VIEW_LOGS","SDAO"),
+("WEB_ACCESS","Global"),
+("MANAGE_REGISTRATION","SDAO"),
+("SUBMIT_REQUIREMENTS","Global"),
+("MANAGE_PROGRAMS","SDAO"),
+("CREATE_SDAO_EVENT","SDAO"),
+("APPLY_NEW_ORGANIZATION","Global"),
+("APPLY_RENEWAL_ORGANIZATION","Organization");
+("VIEW_TRANSACTIONS","Global"),
+("MANAGE_TRANSACTIONS","Global");
 
 INSERT INTO tbl_role_permission (role_id, permission_id) 
 VALUES
