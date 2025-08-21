@@ -94,7 +94,7 @@ async function createOrganizationApplication(req, res) {
         const executives = JSON.parse(req.body.executives);
         const requirements = JSON.parse(req.body.requirements);
 
-        const logoFile = req.files?.logo; 
+        const logoFile = req.files?.logo;
         const requirementFiles = {};
 
         requirements.forEach(reqItem => {

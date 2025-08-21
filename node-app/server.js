@@ -72,6 +72,10 @@ app.use('/api/web', emailSuggestionsRoutes);
 app.use('/api/web', notificationsRoutes);
 app.use('/api/web/public', publicRoutes);
 
+// Initialize cron jobs
+const { initializeCronJobs } = require('./jobs');
+initializeCronJobs();
+
 // Add this line with other route uses
 // Global error handler for unhandled promise rejections
 process.on('unhandledRejection', (reason, promise) => {
