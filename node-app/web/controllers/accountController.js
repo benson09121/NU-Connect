@@ -82,10 +82,15 @@ async function addAccount(req, res){
 async function updateAccount(req, res){
     const { user_id, role, program, status } = req.body;
     try{
+        // Normalize program value - treat empty strings as null
+        const normalizedProgram = program === '' || program === 'not_applicable' 
+            ? null 
+            : program;
+            
         const accounts = await accountModel.updateAccount(
             user_id, 
             role, 
-            program, 
+            normalizedProgram, 
             status, 
             req.user.email // updatedByEmail from authenticated user
         );

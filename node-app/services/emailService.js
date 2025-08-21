@@ -1,48 +1,67 @@
 const nodemailer = require('nodemailer');
 
 // Validate environment variables
-if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASS) {
-  console.warn('Gmail credentials not configured. Email functionality will be disabled.');
+const isEmailConfigured = () => {
+  const hasUser = process.env.GMAIL_USER && process.env.GMAIL_USER.includes('@');
+  const hasPass = process.env.GMAIL_APP_PASS && process.env.GMAIL_APP_PASS.length >= 16;
+  
+  if (!hasUser) console.warn('❌ GMAIL_USER not configured or invalid');
+  if (!hasPass) console.warn('❌ GMAIL_APP_PASS not configured or too short');
+  
+  return hasUser && hasPass;
+};
+
+if (!isEmailConfigured()) {
+  console.warn('Gmail credentials not properly configured. Email functionality will be disabled.');
 }
 
-const transporter = process.env.GMAIL_USER && process.env.GMAIL_APP_PASS ? 
-  nodemailer.createTransporter({
+const transporter = isEmailConfigured() ? 
+  nodemailer.createTransport({
     service: 'gmail',
     auth: {
       user: process.env.GMAIL_USER,
-      pass: process.env.GMAIL_APP_PASS
-    }
+      pass: process.env.GMAIL_APP_PASS.replace(/\s/g, '') // Remove spaces
+    },
+    debug: false, // Set to true for detailed logs
+    logger: false
   }) : null;
+
+// Test connection on startup
+if (transporter) {
+  transporter.verify()
+    .then(() => console.log('✅ Gmail SMTP connection verified'))
+    .catch(err => console.error('❌ Gmail SMTP verification failed:', err.message));
+}
 
 module.exports.sendInvitationEmail = async (recipient, redemptionUrl) => {
   if (!transporter) {
     console.warn('Email service not configured. Skipping email send.');
-    return;
+    return { success: false, message: 'Email service not configured' };
   }
 
   const mailOptions = {
-    from: `"${process.env.FROM_NAME || 'NU Connect'}" <${process.env.FROM_EMAIL || process.env.GMAIL_USER}>`,
+    from: `"${process.env.FROM_NAME || 'NU Connect'}" <${process.env.GMAIL_USER}>`,
     to: recipient,
-    subject: 'You\'re Invited to Join Our Platform!',
-    html: generateInvitationTemplate(redemptionUrl)
+    subject: 'You\'re Invited to Join NU Connect!',
+    html: generateInvitationTemplate(redemptionUrl),
+    text: `You've been invited to join NU Connect! Visit: ${redemptionUrl}`
   };
 
   try {
-    await transporter.sendMail(mailOptions);
-    console.log(`Invitation sent to ${recipient}`);
+    const info = await transporter.sendMail(mailOptions);
+    console.log(`✅ Invitation sent to ${recipient} (ID: ${info.messageId})`);
+    return { success: true, messageId: info.messageId };
   } catch (error) {
-    console.error('Email send error details:', {
+    console.error('❌ Email send failed:', {
       code: error.code,
-      response: error.response,
+      recipient: recipient,
       message: error.message
     });
     
-    // Don't throw error - just log it
-    console.warn(`Failed to send email to ${recipient}, but continuing...`);
+    return { success: false, error: error.message };
   }
 };
 
-// Test email configuration
 module.exports.testEmailConfig = async () => {
   if (!transporter) {
     return { success: false, message: 'Email not configured' };
@@ -94,7 +113,6 @@ function generateInvitationTemplate(redemptionUrl) {
       <div class="footer">
         <p>&copy; ${new Date().getFullYear()} NU Connect. All rights reserved.</p>
         <p>National University - Dasmariñas</p>
-        <p><a href="#">Privacy Policy</a> | <a href="#">Terms of Service</a></p>
       </div>
     </div>
   </body>
