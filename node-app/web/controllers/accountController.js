@@ -189,8 +189,14 @@ async function getRoles(req, res) {
 }
 
 async function getAllPendingUsersAndApplications(req, res) {
+    const { sessionId } = req.query;
     try {
         const result = await accountModel.getAllPendingUsersAndApplications();
+        
+        if(sessionId){
+            subscribeToChannel(sessionId, "user-applications");
+        }
+        
         res.status(200).json({ success: true, data: result });
     } catch (error) {
         res.status(500).json({
@@ -283,12 +289,17 @@ async function approveUserApplication(req, res) {
 }
 
 async function rejectUserApplication(req, res) {
-    const { application_id } = req.body;
+    const { application_id, rejection_reason } = req.body;
     try {
         if (!application_id) {
             return res.status(400).json({ success: false, error: "application_id is required." });
         }
-        const application = await accountModel.rejectUserApplication(application_id);
+        
+        const application = await accountModel.rejectUserApplication(
+            application_id, 
+            req.user.email, // rejectedByEmail from authenticated user
+            rejection_reason || 'No reason provided'
+        );
 
         publishToChannel('user-applications', {
             operation: 'UPDATE',

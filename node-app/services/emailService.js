@@ -3,16 +3,18 @@ const nodemailer = require('nodemailer');
 // Validate environment variables
 const isEmailConfigured = () => {
   const hasUser = process.env.GMAIL_USER && process.env.GMAIL_USER.includes('@');
-  const hasPass = process.env.GMAIL_APP_PASS && process.env.GMAIL_APP_PASS.length >= 16;
+  const hasPass = process.env.GMAIL_APP_PASS && process.env.GMAIL_APP_PASS.replace(/\s/g, '').length >= 16;
   
   if (!hasUser) console.warn('❌ GMAIL_USER not configured or invalid');
-  if (!hasPass) console.warn('❌ GMAIL_APP_PASS not configured or too short');
+  if (!hasPass) console.warn('❌ GMAIL_APP_PASS not configured or invalid format');
   
   return hasUser && hasPass;
 };
 
 if (!isEmailConfigured()) {
-  console.warn('Gmail credentials not properly configured. Email functionality will be disabled.');
+  console.warn('📧 Gmail credentials not properly configured. Email functionality will be disabled.');
+} else {
+  console.log('📧 Gmail credentials configured for:', process.env.GMAIL_USER);
 }
 
 const transporter = isEmailConfigured() ? 
@@ -20,22 +22,25 @@ const transporter = isEmailConfigured() ?
     service: 'gmail',
     auth: {
       user: process.env.GMAIL_USER,
-      pass: process.env.GMAIL_APP_PASS.replace(/\s/g, '') // Remove spaces
+      pass: process.env.GMAIL_APP_PASS.replace(/\s/g, '') // Remove all spaces
     },
-    debug: false, // Set to true for detailed logs
+    debug: false,
     logger: false
   }) : null;
 
 // Test connection on startup
 if (transporter) {
   transporter.verify()
-    .then(() => console.log('✅ Gmail SMTP connection verified'))
-    .catch(err => console.error('❌ Gmail SMTP verification failed:', err.message));
+    .then(() => console.log('✅ Gmail SMTP connection verified successfully'))
+    .catch(err => {
+      console.error('❌ Gmail SMTP verification failed:', err.message);
+      console.error('💡 Please check your Gmail App Password in .env file');
+    });
 }
 
 module.exports.sendInvitationEmail = async (recipient, redemptionUrl) => {
   if (!transporter) {
-    console.warn('Email service not configured. Skipping email send.');
+    console.warn('📧 Email service not configured. Skipping email send.');
     return { success: false, message: 'Email service not configured' };
   }
 
@@ -49,14 +54,14 @@ module.exports.sendInvitationEmail = async (recipient, redemptionUrl) => {
 
   try {
     const info = await transporter.sendMail(mailOptions);
-    console.log(`✅ Invitation sent to ${recipient} (ID: ${info.messageId})`);
+    console.log(`✅ Invitation email sent to ${recipient} (ID: ${info.messageId})`);
     return { success: true, messageId: info.messageId };
   } catch (error) {
-    console.error('❌ Email send failed:', {
-      code: error.code,
-      recipient: recipient,
-      message: error.message
-    });
+    console.error('❌ Email send failed for', recipient, ':', error.message);
+    
+    if (error.code === 'EAUTH') {
+      console.error('💡 Authentication failed. Please check Gmail App Password.');
+    }
     
     return { success: false, error: error.message };
   }
