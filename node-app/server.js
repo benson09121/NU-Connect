@@ -48,6 +48,7 @@ const programsRoutesWeb = require('./web/routes/programs');
 const sse = require('./web/routes/sse');
 const emailSuggestionsRoutes = require('./web/routes/emailSuggestions');
 const notificationsRoutes = require('./web/routes/notifications');
+const transactionsRoutes = require('./web/routes/transactions');
 const publicRoutes = require('./web/routes/public');
 
 
@@ -70,6 +71,7 @@ app.use('/api/web', programsRoutesWeb);
 app.use('/api/web', sse);
 app.use('/api/web', emailSuggestionsRoutes);
 app.use('/api/web', notificationsRoutes);
+app.use('/api/web', transactionsRoutes);
 app.use('/api/web/public', publicRoutes);
 
 // Add this line with other route uses
