@@ -7952,11 +7952,10 @@ VALUES("CREATE_EVENT","Organization"),
 ("WEB_ACCESS","Global"),
 ("MANAGE_REGISTRATION","SDAO"),
 ("SUBMIT_REQUIREMENTS","Global"),
-("MANAGE_PROGRAMS","SDAO");
+("MANAGE_PROGRAMS","SDAO"),
 ("CREATE_SDAO_EVENT","SDAO"),
 ("APPLY_NEW_ORGANIZATION","Global"),
-("APPLY_RENEWAL_ORGANIZATION","Organization"),
-("CREATE_SDAO_EVENT","SDAO");
+("APPLY_RENEWAL_ORGANIZATION","Organization");
 
 
 INSERT INTO tbl_role_permission (role_id, permission_id) 
