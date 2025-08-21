@@ -28,6 +28,13 @@ router.post(
   controller.archive
 );
 
+router.post(
+  '/transactions/unarchive',
+  middleware.validateAzureJWT,
+  middleware.hasPermission([MANAGE]),
+  controller.unarchive
+);
+
 router.get(
   '/transactions/:id',
   middleware.validateAzureJWT,
@@ -40,6 +47,20 @@ router.get(
   middleware.validateAzureJWT,
   middleware.hasPermission([VIEW, MANAGE]),
   controller.list
+);
+
+router.get(
+  '/transaction-types',
+  middleware.validateAzureJWT,
+  middleware.hasPermission([VIEW, MANAGE]),
+  controller.getTransactionTypes
+);
+
+router.get(
+  '/payment-types',
+  middleware.validateAzureJWT,
+  middleware.hasPermission([VIEW, MANAGE]),
+  controller.getPaymentTypes
 );
 
 module.exports = router;
