@@ -158,13 +158,14 @@ async function approveUserApplication(application_id) {
     }
 }
 
-async function rejectUserApplication(application_id) {
+async function rejectUserApplication(application_id, rejectedByEmail, rejectionReason) {
     const connection = await pool.getConnection();
     try {
-        const [beforeRows] = await connection.query('SELECT * FROM tbl_user_application WHERE application_id = ?', [application_id]);
-        await connection.query('CALL RejectUserApplication(?);', [application_id]);
-        const [afterRows] = await connection.query('SELECT * FROM tbl_user_application WHERE application_id = ?', [application_id]);
-        return afterRows[0] || beforeRows[0];
+        const [rows] = await connection.query(
+            'CALL RejectUserApplication(?, ?, ?);', 
+            [application_id, rejectedByEmail, rejectionReason]
+        );
+        return rows[0][0];
     } finally {
         connection.release();
     }

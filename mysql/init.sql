@@ -60,14 +60,21 @@ CREATE TABLE tbl_user(
 
 CREATE TABLE tbl_user_application (
     application_id INT AUTO_INCREMENT PRIMARY KEY,
-    email VARCHAR(100) NOT NULL UNIQUE,
+    email VARCHAR(100) NOT NULL,
     role_id INT NOT NULL,
     program_id INT NOT NULL,
     reason TEXT NOT NULL,
     status ENUM('Pending', 'Approved', 'Rejected') DEFAULT 'Pending',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    rejected_reason TEXT NULL,
+    rejected_at TIMESTAMP NULL,
+    rejected_by VARCHAR(200) NULL,
+    archived_at TIMESTAMP NULL,
+    archived_by VARCHAR(200) NULL,
     FOREIGN KEY (role_id) REFERENCES tbl_role(role_id),
-    FOREIGN KEY (program_id) REFERENCES tbl_program(program_id)
+    FOREIGN KEY (program_id) REFERENCES tbl_program(program_id),
+    FOREIGN KEY (rejected_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
+    FOREIGN KEY (archived_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE
 );
 
 CREATE TABLE tbl_permission(
@@ -7470,14 +7477,14 @@ DELIMITER ;
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetPrograms()
 BEGIN
-    -- Return all programs
     SELECT 
         program_id,
         name,
-        description
+        abbreviation,
+        college_id
     FROM tbl_program
     ORDER BY name;
-END$$
+END $$
 DELIMITER ;
 
 DELIMITER $$
@@ -7518,36 +7525,6 @@ END $$
 DELIMITER ;
 
 DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE AddUserApplication(
-    IN p_email VARCHAR(100),
-    IN p_role_name VARCHAR(100),
-    IN p_program_id INT,
-    IN p_reason TEXT
-)
-BEGIN
-    DECLARE v_role_id INT;
-    DECLARE v_exists INT DEFAULT 0;
-
-    -- Lookup role_id from role name
-    SELECT role_id INTO v_role_id FROM tbl_role WHERE role_name = p_role_name LIMIT 1;
-    IF v_role_id IS NULL THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Invalid role specified';
-    END IF;
-
-    -- Check for duplicate email
-    SELECT COUNT(*) INTO v_exists FROM tbl_user_application WHERE email = p_email;
-    IF v_exists > 0 THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'You already have a pending application. Please wait for approval or contact support.';
-    END IF;
-
-    INSERT INTO tbl_user_application (email, role_id, program_id, reason)
-    VALUES (p_email, v_role_id, p_program_id, p_reason);
-
-    SELECT * FROM tbl_user_application WHERE application_id = LAST_INSERT_ID();
-END$$
-DELIMITER ;
-
-DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetAllPendingUsersAndApplications()
 BEGIN
     -- Pending registered users
@@ -7563,13 +7540,17 @@ BEGIN
         r.role_name,
         u.status,
         u.created_at,
-        NULL AS reason
+        NULL AS reason,
+        NULL AS application_id,
+        NULL AS rejected_reason,
+        NULL AS rejected_at,
+        NULL AS rejected_by_email
     FROM tbl_user u
     JOIN tbl_role r ON u.role_id = r.role_id
     LEFT JOIN tbl_program p ON u.program_id = p.program_id
-    WHERE u.status = 'Pending';
+    WHERE u.status = 'Pending' AND u.archived_at IS NULL;
 
-    -- Pending applications
+    -- Only pending and rejected applications (not approved)
     SELECT 
         'application' AS source,
         NULL AS user_id,
@@ -7583,12 +7564,88 @@ BEGIN
         a.status,
         a.created_at,
         a.reason,
-        a.application_id
+        a.application_id,
+        a.rejected_reason,
+        a.rejected_at,
+        rej_user.email AS rejected_by_email
     FROM tbl_user_application a
     JOIN tbl_role r ON a.role_id = r.role_id
     LEFT JOIN tbl_program p ON a.program_id = p.program_id
-    WHERE a.status = 'Pending';
-END$$
+    LEFT JOIN tbl_user rej_user ON a.rejected_by = rej_user.user_id
+    WHERE a.archived_at IS NULL 
+      AND a.status IN ('Pending')  
+    ORDER BY a.created_at DESC;
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE AddUserApplication(
+    IN p_email VARCHAR(100),
+    IN p_role_name VARCHAR(100),
+    IN p_program_id INT,
+    IN p_reason TEXT
+)
+BEGIN
+    DECLARE v_role_id INT;
+    DECLARE v_pending_count INT DEFAULT 0;
+    
+    -- Get role ID from role name
+    SELECT role_id INTO v_role_id 
+    FROM tbl_role 
+    WHERE role_name = p_role_name;
+
+    IF v_role_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' 
+        SET MESSAGE_TEXT = 'Invalid role specified';
+    END IF;
+
+    -- Check for existing pending application
+    SELECT COUNT(*) INTO v_pending_count
+    FROM tbl_user_application 
+    WHERE email = p_email AND status = 'Pending' AND archived_at IS NULL;
+
+    IF v_pending_count > 0 THEN
+        SIGNAL SQLSTATE '45000' 
+        SET MESSAGE_TEXT = 'You already have a pending application. Please wait for approval or contact support.';
+    END IF;
+
+    -- Archive any old rejected applications for this email
+    UPDATE tbl_user_application 
+    SET archived_at = CURRENT_TIMESTAMP,
+        archived_by = (SELECT user_id FROM tbl_user WHERE email = p_email LIMIT 1)
+    WHERE email = p_email AND status = 'Rejected' AND archived_at IS NULL;
+
+    -- Create new application
+    INSERT INTO tbl_user_application (
+        email,
+        role_id,
+        program_id,
+        reason,
+        status
+    ) VALUES (
+        p_email,
+        v_role_id,
+        p_program_id,
+        p_reason,
+        'Pending'
+    );
+
+    -- Return the created application
+    SELECT 
+        a.application_id,
+        a.email,
+        a.program_id,
+        p.name AS program_name,
+        a.role_id,
+        r.role_name,
+        a.reason,
+        a.status,
+        a.created_at
+    FROM tbl_user_application a
+    JOIN tbl_role r ON a.role_id = r.role_id
+    LEFT JOIN tbl_program p ON a.program_id = p.program_id
+    WHERE a.application_id = LAST_INSERT_ID();
+END $$
 DELIMITER ;
 
 DELIMITER $$
@@ -7607,7 +7664,7 @@ BEGIN
     SELECT email, role_id, program_id, reason
     INTO v_email, v_role_id, v_program_id, v_reason
     FROM tbl_user_application
-    WHERE application_id = p_application_id AND status = 'Pending';
+    WHERE application_id = p_application_id AND status = 'Pending' AND archived_at IS NULL;
 
     IF v_email IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Application not found or not pending';
@@ -7622,8 +7679,8 @@ BEGIN
     SELECT COUNT(*) INTO v_exists FROM tbl_user WHERE email = v_email;
 
     IF v_exists = 0 THEN
-        -- Create user with status 'Active'
-        SET v_user_id = CONCAT('pending-', UUID_SHORT());
+        -- Create user with status 'Pending' (will be activated on first login)
+        SET v_user_id = CONCAT('pending-', UUID());
         INSERT INTO tbl_user (
             user_id,
             email,
@@ -7637,23 +7694,98 @@ BEGIN
             v_program_id,
             'Pending'
         );
+    ELSE
+        -- Update existing user
+        UPDATE tbl_user 
+        SET role_id = v_role_id,
+            program_id = v_program_id,
+            status = 'Active',
+            archived_at = NULL,
+            archived_by = NULL,
+            archived_reason = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE email = v_email;
     END IF;
 
     -- Return the approved application details
-    SELECT * FROM tbl_user_application WHERE application_id = p_application_id;
-END$$
+    SELECT 
+        a.application_id,
+        a.email,
+        a.program_id,
+        p.name AS program_name,
+        a.role_id,
+        r.role_name,
+        a.reason,
+        a.status,
+        a.created_at
+    FROM tbl_user_application a
+    JOIN tbl_role r ON a.role_id = r.role_id
+    LEFT JOIN tbl_program p ON a.program_id = p.program_id
+    WHERE a.application_id = p_application_id;
+END $$
 DELIMITER ;
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE RejectUserApplication(
-    IN p_application_id INT
+    IN p_application_id INT,
+    IN p_rejected_by_email VARCHAR(100),
+    IN p_rejection_reason TEXT
 )
 BEGIN
-    -- Mark application as rejected
+    DECLARE v_rejected_by_id VARCHAR(200);
+    DECLARE v_email VARCHAR(100);
+
+    -- Get rejector user_id
+    SELECT user_id INTO v_rejected_by_id FROM tbl_user WHERE email = p_rejected_by_email LIMIT 1;
+    IF v_rejected_by_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Rejector user not found';
+    END IF;
+
+    -- Get application email for logging
+    SELECT email INTO v_email FROM tbl_user_application WHERE application_id = p_application_id;
+
+    -- Mark application as rejected with full metadata
     UPDATE tbl_user_application
-    SET status = 'Rejected'
-    WHERE application_id = p_application_id AND status = 'Pending';
-END$$
+    SET status = 'Rejected',
+        rejected_reason = COALESCE(p_rejection_reason, 'No reason provided'),
+        rejected_at = CURRENT_TIMESTAMP,
+        rejected_by = v_rejected_by_id
+    WHERE application_id = p_application_id AND status = 'Pending' AND archived_at IS NULL;
+
+    -- Log the rejection
+    CALL LogAction(
+        p_rejected_by_email,
+        CONCAT('Rejected user application for ', v_email),
+        'application',
+        JSON_OBJECT(
+            'application_id', p_application_id,
+            'target_email', v_email,
+            'rejection_reason', COALESCE(p_rejection_reason, 'No reason provided')
+        ),
+        NULL,
+        NULL
+    );
+
+    -- Return the rejected application
+    SELECT 
+        a.application_id,
+        a.email,
+        a.program_id,
+        p.name AS program_name,
+        a.role_id,
+        r.role_name,
+        a.reason,
+        a.status,
+        a.created_at,
+        a.rejected_reason,
+        a.rejected_at,
+        rej_user.email AS rejected_by_email
+    FROM tbl_user_application a
+    JOIN tbl_role r ON a.role_id = r.role_id
+    LEFT JOIN tbl_program p ON a.program_id = p.program_id
+    LEFT JOIN tbl_user rej_user ON a.rejected_by = rej_user.user_id
+    WHERE a.application_id = p_application_id;
+END $$
 DELIMITER ;
 
 DELIMITER $$
