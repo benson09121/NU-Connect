@@ -442,6 +442,16 @@ async function getCertificateTemplate(event_id) {
     }
 }
 
+async function checkEventTitle(title) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL CheckEventTitle(?);', [title]);
+        return rows[0][0]; // Return the first row of the first result set
+    } finally {
+        connection.release();
+    }
+}
+
 module.exports = {
     addEvent,
     getEventRequirements,
@@ -473,5 +483,6 @@ module.exports = {
     getEventApprovalTimeline,
     getEventEvaluationFeedbackPeriod,
     AddCertificateTemplate,
-    getCertificateTemplate
+    getCertificateTemplate,
+    checkEventTitle
 };

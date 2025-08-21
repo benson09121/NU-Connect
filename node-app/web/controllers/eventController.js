@@ -880,6 +880,25 @@ async function getEventPublicationImage(req, res) {
     }
 }
 
+async function checkEventTitle(req, res) {
+    try {
+        const { event_title } = req.query;
+
+        if (!event_title || event_title.trim().length === 0) {
+            return res.status(400).json({ message: 'Event title is required' });
+        }
+
+        const result = await eventModel.checkEventTitle(event_title.trim());
+        const taken = result && result.exists === 1;
+        
+        res.status(200).json({ taken });
+    } catch (error) {
+        res.status(500).json({
+            error: error.message || "An error occurred while checking event title.",
+        });
+    }
+}
+
 module.exports = {
     addEvent,
     getEventRequirements,
@@ -909,5 +928,6 @@ module.exports = {
     getEventEvaluationFeedbackPeriod,
     addCertificate,
     getSampleCertificate,
-    getEventPublicationImage
+    getEventPublicationImage,
+    checkEventTitle
 };

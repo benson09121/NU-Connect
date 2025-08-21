@@ -7,7 +7,7 @@ FLUSH PRIVILEGES;
 FLUSH PRIVILEGES;
 
 -- Sets the Timezone to GMT+08 Timezone for the Pilipinas! 
-SET GLOBAL time_zone = '+8:00';
+SET GLOBAL time_zone = '+08:00';
 SET GLOBAL event_scheduler = ON;
 
  DROP DATABASE IF EXISTS db_nuconnect;
@@ -2642,6 +2642,33 @@ BEGIN
 END $$
 DELIMITER ;
 
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE CheckEventTitle(
+    IN p_title VARCHAR(300)
+)
+BEGIN
+    DECLARE v_count INT DEFAULT 0;
+    
+    -- Validate input
+    IF p_title IS NULL OR TRIM(p_title) = '' THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Event title is required';
+    END IF;
+    
+    -- Check if the title exists (case-insensitive)
+    SELECT COUNT(*) INTO v_count
+    FROM tbl_event
+    WHERE LOWER(TRIM(title)) = LOWER(TRIM(p_title))
+    AND status != 'Rejected'; -- Only check non-rejected events
+    
+    -- Return result
+    SELECT 
+        CASE 
+            WHEN v_count > 0 THEN 1
+            ELSE 0
+        END AS `exists`;
+END $$
+DELIMITER ;
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetEventById(IN p_event_id INT)
@@ -6477,7 +6504,6 @@ CREATE DEFINER='admin'@'%' PROCEDURE UpdateEventRequirement(
 )
 BEGIN
     DECLARE v_user_exists INT;
-    DECLARE v_requirement_exists INT;
     DECLARE v_old_file_path VARCHAR(255);
 
     -- Validate requirement ID
@@ -6503,11 +6529,14 @@ BEGIN
     END IF;
 
     -- Check if requirement exists and get old file path
-    SELECT COUNT(*), file_path INTO v_requirement_exists, v_old_file_path
+    SELECT file_path INTO v_old_file_path
     FROM tbl_event_application_requirement
     WHERE requirement_id = p_requirement_id;
 
-    IF v_requirement_exists = 0 THEN
+    -- Check if we found the requirement
+    IF v_old_file_path IS NULL AND NOT EXISTS(
+        SELECT 1 FROM tbl_event_application_requirement WHERE requirement_id = p_requirement_id
+    ) THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'Event requirement not found';
     END IF;
@@ -6527,6 +6556,7 @@ BEGIN
         v_old_file_path as old_file_path,
         CONCAT('Event requirement updated successfully. ID: ', p_requirement_id) AS message;
 END$$
+DELIMITER ;
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE ArchiveEventRequirement(
@@ -7980,6 +8010,7 @@ VALUES
 (4,24),
 (4,25),
 (4,26),
+(4,27),
 (2,6),
 (2,9),
 (2,16),
