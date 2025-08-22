@@ -610,12 +610,12 @@ async function archiveOrganizationMember({ member_id, archived_by_email }) {
     }
 }
 
-async function GetApprovalTimeline(org_name) {
+async function GetApprovalTimeline(org_name, app_id) {
     const connection = await pool.getConnection();
     try {
         const [rows] = await connection.query(
-            'CALL GetApprovalTimeline(?);',
-            [org_name]
+            'CALL GetApprovalTimeline(?, ?);',
+            [org_name, app_id]
         );
         return rows[0];
     } catch (error) {

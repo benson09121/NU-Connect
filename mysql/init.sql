@@ -586,23 +586,6 @@ CREATE TABLE tbl_application_period (
     FOREIGN KEY (created_by) REFERENCES tbl_user(user_id)
 );
 
-CREATE TABLE tbl_approval_process(
-    approval_id INT AUTO_INCREMENT PRIMARY KEY,
-    organization_id INT NOT NULL,
-    period_id INT NULL,
-    approver_id VARCHAR(200) NOT NULL,
-    approval_role_id INT NOT NULL,
-    application_type ENUM('new', 'renewal') NOT NULL DEFAULT 'new',
-    status ENUM('Pending', 'Approved', 'Rejected') DEFAULT 'Pending',
-    comment TEXT,
-    step INT NOT NULL,
-    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (organization_id) REFERENCES tbl_organization(organization_id) ON DELETE CASCADE,
-    FOREIGN KEY (period_id) REFERENCES tbl_application_period(period_id) ON DELETE CASCADE,
-    FOREIGN KEY (approver_id) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
-    FOREIGN KEY (approval_role_id) REFERENCES tbl_role(role_id) ON DELETE CASCADE
-);
-
 CREATE TABLE tbl_application (
     application_id INT AUTO_INCREMENT PRIMARY KEY,
     organization_id INT NULL, -- Existing org for renewals
@@ -616,6 +599,25 @@ CREATE TABLE tbl_application (
     FOREIGN KEY (organization_id, cycle_number) REFERENCES tbl_renewal_cycle(organization_id, cycle_number) ON DELETE SET NULL ,
     FOREIGN KEY (period_id) REFERENCES tbl_application_period(period_id),
     FOREIGN KEY (applicant_user_id) REFERENCES tbl_user(user_id)
+);
+
+CREATE TABLE tbl_approval_process(
+    approval_id INT AUTO_INCREMENT PRIMARY KEY,
+    application_id INT NOT NULL,
+    period_id INT NULL,
+    -- organization_id INT NOT NULL, -- REMOVED
+    approver_id VARCHAR(200) NOT NULL,
+    approval_role_id INT NOT NULL,
+    application_type ENUM('new', 'renewal') NOT NULL DEFAULT 'new',
+    status ENUM('Pending', 'Approved', 'Rejected') DEFAULT 'Pending',
+    comment TEXT,
+    step INT NOT NULL,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (application_id) REFERENCES tbl_application(application_id) ON DELETE CASCADE,
+    FOREIGN KEY (period_id) REFERENCES tbl_application_period(period_id) ON DELETE CASCADE,
+    -- FOREIGN KEY (organization_id) REFERENCES tbl_organization(organization_id) ON DELETE CASCADE, -- REMOVED
+    FOREIGN KEY (approver_id) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
+    FOREIGN KEY (approval_role_id) REFERENCES tbl_role(role_id) ON DELETE CASCADE
 );
 
 CREATE TABLE tbl_application_approval (
@@ -679,7 +681,7 @@ CREATE TABLE tbl_logs (
     log_id INT AUTO_INCREMENT PRIMARY KEY,
     user_id VARCHAR(200) NOT NULL,
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    action TEXT NOT NULL,
+    action_type TEXT NOT NULL,
     redirect_url VARCHAR(500) DEFAULT NULL,
     file_path TEXT DEFAULT NULL, -- can store JSON array as string
     meta_data JSON DEFAULT NULL, -- flexible key-value storage
@@ -774,7 +776,7 @@ BEGIN
     IF v_user_id IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='User email not found for logging';
     END IF;
-    INSERT INTO tbl_logs(user_id, action, type, meta_data, redirect_url, file_path)
+    INSERT INTO tbl_logs(user_id, action_type, type, meta_data, redirect_url, file_path)
     VALUES (v_user_id, p_action, p_type, p_meta_data, p_redirect_url, p_file_path);
 END$$
 DELIMITER ;
@@ -2486,7 +2488,7 @@ BEGIN
                 (v_application_type = 'new' AND v_role_id = v_adviser_role_id)
             ) THEN
                 INSERT INTO tbl_approval_process (
-                    organization_id,
+                    application_id,
                     period_id,
                     approver_id,
                     approval_role_id,
@@ -2495,7 +2497,7 @@ BEGIN
                     step
                 )
                 VALUES (
-                    v_org_id,
+                    p_application_id,
                     v_period_id,
                     v_approver_id,
                     v_role_id,
@@ -2506,7 +2508,7 @@ BEGIN
                 SET v_first_step = FALSE;
             ELSE
                 INSERT INTO tbl_approval_process (
-                    organization_id,
+                    application_id,
                     period_id,
                     approver_id,
                     approval_role_id,
@@ -2515,7 +2517,7 @@ BEGIN
                     step
                 )
                 VALUES (
-                    v_org_id,
+                    p_application_id,
                     v_period_id,
                     v_approver_id,
                     v_role_id,
@@ -2530,10 +2532,11 @@ BEGIN
     CLOSE role_cursor;
 
     -- Link approvals to application
+
     INSERT INTO tbl_application_approval (application_id, approval_id)
     SELECT p_application_id, approval_id
     FROM tbl_approval_process
-    WHERE organization_id = v_org_id
+    WHERE application_id = p_application_id
     AND period_id = v_period_id
     AND approver_id IS NOT NULL;
 
@@ -2577,7 +2580,7 @@ BEGIN
 
     -- Update application status
     IF EXISTS (SELECT 1 FROM tbl_approval_process 
-               WHERE organization_id = v_org_id
+               WHERE application_id = p_application_id
                AND period_id = v_period_id
                AND approver_id IS NOT NULL) THEN
         UPDATE tbl_application 
@@ -2591,47 +2594,80 @@ BEGIN
 END$$
 DELIMITER ;
 
+
 DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE CreateOrganizationApplication(
+CREATE DEFINER=`admin`@`%` PROCEDURE CreateOrganizationApplication(
     IN p_organization   JSON,
     IN p_executives     JSON,
     IN p_requirements   JSON,
     IN p_user_id        VARCHAR(200)
-    )
+)
 BEGIN
-    DECLARE v_organization_id   INT;
-    DECLARE v_program_id        INT;
-    DECLARE v_period_id         INT;
-    DECLARE v_application_id    INT;
-    DECLARE v_president_id      VARCHAR(200) DEFAULT NULL;
-    DECLARE v_org_name          VARCHAR(100);
-    DECLARE v_logo_filename     VARCHAR(255);
-    DECLARE i                   INT DEFAULT 0;
-    DECLARE v_requirement_count INT;
-    DECLARE v_rank_number       INT;
-    DECLARE v_rank_id           INT;
-    DECLARE v_error_msg         VARCHAR(255);
-    DECLARE v_name_exists       TINYINT(1) DEFAULT 0;
-    DECLARE v_fname             VARCHAR(50);
-    DECLARE v_lname             VARCHAR(50);
-    DECLARE v_role              VARCHAR(100);
-    DECLARE v_email             VARCHAR(100);
-    DECLARE v_exec_user_id      VARCHAR(200);
-    DECLARE v_exec_role_id      INT;
-    DECLARE v_req_id            INT;
-    DECLARE v_file_path         VARCHAR(255);
-    DECLARE v_exec_count        INT DEFAULT JSON_LENGTH(p_executives);
-    DECLARE v_cycle_number      INT;
+    -- Declarations
+    DECLARE v_is_resubmission    TINYINT(1) DEFAULT 0;
+    DECLARE v_organization_id    INT;
+    DECLARE v_program_id         INT;
+    DECLARE v_period_id          INT;
+    DECLARE v_application_id     INT;
+    DECLARE v_president_id       VARCHAR(200) DEFAULT NULL;
+    DECLARE v_org_name           VARCHAR(100);
+    DECLARE v_logo_filename      VARCHAR(255);
+    DECLARE i                    INT DEFAULT 0;
+    DECLARE v_requirement_count  INT DEFAULT 0;
+    DECLARE v_rank_number        INT;
+    DECLARE v_rank_id            INT;
+    DECLARE v_error_msg          VARCHAR(255);
+    DECLARE v_name_exists        TINYINT(1) DEFAULT 0;
+    DECLARE v_fname              VARCHAR(50);
+    DECLARE v_lname              VARCHAR(50);
+    DECLARE v_role               VARCHAR(100);
+    DECLARE v_email              VARCHAR(100);
+    DECLARE v_exec_user_id       VARCHAR(200);
+    DECLARE v_exec_role_id       INT;
+    DECLARE v_req_id             INT;
+    DECLARE v_file_path          VARCHAR(255);
+    DECLARE v_exec_count         INT DEFAULT 0;
+    DECLARE v_cycle_number       INT DEFAULT 1;
+    DECLARE v_fee_type           VARCHAR(50) DEFAULT 'Free';
+    DECLARE v_fee_amount         DECIMAL(10,2);
+    DECLARE v_dept_count         INT DEFAULT 0;
+
+    -- Error handler
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
         ROLLBACK;
         RESIGNAL;
     END;
-    
-    SET @fee_type = JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.fee_duration'));
-    IF @fee_type IS NULL OR @fee_type NOT IN ('Per Term', 'Whole Academic Year', 'Free') OR @fee_type = '' THEN
-        SET @fee_type = 'Free';
+
+    -- Safely interpret boolean-ish JSON value for is_resubmission
+    SET @__is_resub = JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.is_resubmission'));
+    SET v_is_resubmission = IF(@__is_resub IN ('1','true','TRUE'), 1, 0);
+
+    -- If this is a resubmission, route to separate procedure and return
+    IF v_is_resubmission = 1 THEN
+        CALL ResubmitOrganizationApplication(p_organization, p_executives, p_requirements, p_user_id);
+        -- assume resubmission procedure handles commit/return; exit early
     END IF;
+
+    -- Determine fee type safely
+    SET @__fee = JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.fee_duration'));
+    IF @__fee IS NOT NULL AND @__fee != '' AND @__fee IN ('Per Term', 'Whole Academic Year', 'Free') THEN
+        SET v_fee_type = @__fee;
+    ELSE
+        SET v_fee_type = 'Free';
+    END IF;
+
+    -- parse fee amount (nullable)
+    SET @__fee_amt = JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.fee_amount'));
+    IF @__fee_amt IS NULL OR @__fee_amt = '' THEN
+        SET v_fee_amount = NULL;
+    ELSE
+        SET v_fee_amount = NULLIF(CAST(@__fee_amt AS DECIMAL(10,2)), 0);
+    END IF;
+
+    -- number of executives and department count (defensive)
+    SET v_exec_count = COALESCE(JSON_LENGTH(p_executives), 0);
+    SET v_dept_count  = COALESCE(JSON_LENGTH(p_organization, '$.department'), 0);
 
     START TRANSACTION;
 
@@ -2639,20 +2675,15 @@ BEGIN
     SELECT program_id INTO v_program_id
     FROM tbl_user
     WHERE user_id = p_user_id;
-
     IF v_program_id IS NULL THEN
-        SIGNAL SQLSTATE '45000'
-          SET MESSAGE_TEXT = 'User program not found';
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'User program not found';
     END IF;
 
     -- Check organization name uniqueness
     SET v_org_name = JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.organization_name'));
-    SELECT EXISTS(SELECT 1 FROM tbl_organization WHERE name = v_org_name)
-    INTO v_name_exists;
-
+    SELECT EXISTS(SELECT 1 FROM tbl_organization WHERE name = v_org_name) INTO v_name_exists;
     IF v_name_exists = 1 THEN
-        SIGNAL SQLSTATE '45000'
-          SET MESSAGE_TEXT = 'Organization name already exists';
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Organization name already exists';
     END IF;
 
     -- Create organization
@@ -2675,8 +2706,8 @@ BEGIN
         JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.organization_logo')),
         v_program_id,
         'Pending',
-        @fee_type,
-        NULLIF(CAST(JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.fee_amount')) AS DECIMAL(10,2)), 0),
+        v_fee_type,
+        v_fee_amount,
         TRUE,
         FALSE,
         JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.category'))
@@ -2686,14 +2717,12 @@ BEGIN
 
     -- Add departments/courses
     SET i = 0;
-    SET @dept_count = JSON_LENGTH(p_organization, '$.department');
-    WHILE i < @dept_count DO
+    WHILE i < v_dept_count DO
         SET @abbr = JSON_UNQUOTE(JSON_EXTRACT(p_organization, CONCAT('$.department[', i, ']')));
         SELECT program_id INTO @additional_program_id
         FROM tbl_program
         WHERE UPPER(abbreviation) = UPPER(@abbr)
         LIMIT 1;
-
         IF @additional_program_id IS NOT NULL AND @additional_program_id != v_program_id THEN
             INSERT INTO tbl_organization_course (organization_id, program_id)
             VALUES (v_organization_id, @additional_program_id);
@@ -2701,18 +2730,12 @@ BEGIN
         SET i = i + 1;
     END WHILE;
 
-    -- FIRST PASS: Create users and identify president
+    -- FIRST PASS: Create users (if missing) and identify president
     SET i = 0;
     WHILE i < v_exec_count DO
-        -- Reset variables
-        SET v_fname = NULL;
-        SET v_lname = NULL;
-        SET v_role = NULL;
-        SET v_email = NULL;
-        SET v_rank_number = NULL;
-        SET v_exec_user_id = NULL;
-        
-        -- Extract executive data
+        SET v_fname = NULL; SET v_lname = NULL; SET v_role = NULL; SET v_email = NULL;
+        SET v_rank_number = NULL; SET v_exec_user_id = NULL;
+
         SET @executive = JSON_EXTRACT(p_executives, CONCAT('$[', i, ']'));
         SET v_fname = JSON_UNQUOTE(JSON_EXTRACT(@executive, '$.f_name'));
         SET v_lname = JSON_UNQUOTE(JSON_EXTRACT(@executive, '$.l_name'));
@@ -2722,8 +2745,7 @@ BEGIN
 
         -- Validate rank
         IF NOT EXISTS (SELECT 1 FROM tbl_executive_rank WHERE rank_level = v_rank_number) THEN
-            SIGNAL SQLSTATE '45000'
-              SET MESSAGE_TEXT = 'Invalid rank number';
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Invalid rank number';
         END IF;
 
         -- Find or create user
@@ -2731,7 +2753,6 @@ BEGIN
         FROM tbl_user
         WHERE email = v_email
         LIMIT 1;
-
         IF v_exec_user_id IS NULL THEN
             INSERT INTO tbl_user (
                 user_id,
@@ -2756,8 +2777,7 @@ BEGIN
         -- Track president (rank 1)
         IF v_rank_number = 1 THEN
             IF v_president_id IS NOT NULL THEN
-                SIGNAL SQLSTATE '45000'
-                  SET MESSAGE_TEXT = 'Multiple presidents detected';
+                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Multiple presidents detected';
             END IF;
             SET v_president_id = v_exec_user_id;
         END IF;
@@ -2767,11 +2787,10 @@ BEGIN
 
     -- Verify president exists
     IF v_president_id IS NULL THEN
-        SIGNAL SQLSTATE '45000'
-          SET MESSAGE_TEXT = 'Organization must have a president (rank 1)';
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Organization must have a president (rank 1)';
     END IF;
 
-    -- CRITICAL FIX: Create renewal cycle BEFORE executive roles
+    -- Create renewal cycle BEFORE creating roles (critical)
     INSERT INTO tbl_renewal_cycle (
         organization_id,
         cycle_number,
@@ -2781,7 +2800,7 @@ BEGIN
         1,
         v_president_id
     );
-
+    -- set v_cycle_number (should be 1, but kept robust)
     SELECT cycle_number INTO v_cycle_number
     FROM tbl_renewal_cycle
     WHERE organization_id = v_organization_id
@@ -2791,17 +2810,9 @@ BEGIN
     -- SECOND PASS: Create executive roles and members
     SET i = 0;
     WHILE i < v_exec_count DO
-        -- Reset variables
-        SET v_fname = NULL;
-        SET v_lname = NULL;
-        SET v_role = NULL;
-        SET v_email = NULL;
-        SET v_rank_number = NULL;
-        SET v_exec_user_id = NULL;
-        SET v_rank_id = NULL;
-        SET v_exec_role_id = NULL;
-        
-        -- Extract executive data
+        SET v_fname = NULL; SET v_lname = NULL; SET v_role = NULL; SET v_email = NULL;
+        SET v_rank_number = NULL; SET v_exec_user_id = NULL; SET v_rank_id = NULL; SET v_exec_role_id = NULL;
+
         SET @executive = JSON_EXTRACT(p_executives, CONCAT('$[', i, ']'));
         SET v_fname = JSON_UNQUOTE(JSON_EXTRACT(@executive, '$.f_name'));
         SET v_lname = JSON_UNQUOTE(JSON_EXTRACT(@executive, '$.l_name'));
@@ -2809,12 +2820,10 @@ BEGIN
         SET v_email = JSON_UNQUOTE(JSON_EXTRACT(@executive, '$.nu_email'));
         SET v_rank_number = CAST(JSON_UNQUOTE(JSON_EXTRACT(@executive, '$.rank_number')) AS UNSIGNED);
 
-        -- Get rank_id
         SELECT rank_id INTO v_rank_id
         FROM tbl_executive_rank
         WHERE rank_level = v_rank_number;
 
-        -- Create executive role (now safe due to renewal cycle existing)
         INSERT INTO tbl_executive_role (
             organization_id,
             cycle_number,
@@ -2822,19 +2831,17 @@ BEGIN
             rank_id
         ) VALUES (
             v_organization_id,
-            1,
+            v_cycle_number,
             v_role,
             v_rank_id
         );
         SET v_exec_role_id = LAST_INSERT_ID();
 
-        -- Get user ID
         SELECT user_id INTO v_exec_user_id
         FROM tbl_user
         WHERE email = v_email
         LIMIT 1;
 
-        -- Add to organization members
         INSERT INTO tbl_organization_members (
             organization_id,
             cycle_number,
@@ -2843,7 +2850,7 @@ BEGIN
             executive_role_id
         ) VALUES (
             v_organization_id,
-            1,
+            v_cycle_number,
             v_exec_user_id,
             'Executive',
             v_exec_role_id
@@ -2858,10 +2865,8 @@ BEGIN
     WHERE is_active = TRUE
     ORDER BY created_at DESC
     LIMIT 1;
-
     IF v_period_id IS NULL THEN
-        SIGNAL SQLSTATE '45000'
-          SET MESSAGE_TEXT = 'No active application period';
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'No active application period';
     END IF;
 
     -- Create application
@@ -2874,7 +2879,7 @@ BEGIN
         status
     ) VALUES (
         v_organization_id,
-        1,
+        v_cycle_number,
         'new',
         v_period_id,
         p_user_id,
@@ -2885,16 +2890,15 @@ BEGIN
     -- Initiate approval and add default question
     CALL InitiateApprovalProcess(v_application_id, p_user_id);
     INSERT INTO tbl_membership_question(organization_id, cycle_number, question_text, question_type)
-    VALUES (v_organization_id, 1, "What is your reason for joining?", "text");
+    VALUES (v_organization_id, v_cycle_number, 'What is your reason for joining?', 'text');
 
     -- Process requirements
-    SET v_requirement_count = JSON_LENGTH(p_requirements);
+    SET v_requirement_count = COALESCE(JSON_LENGTH(p_requirements), 0);
     SET i = 0;
     WHILE i < v_requirement_count DO
         SET @requirement = JSON_EXTRACT(p_requirements, CONCAT('$[', i, ']'));
         SET v_req_id = CAST(JSON_UNQUOTE(JSON_EXTRACT(@requirement, '$.requirement_id')) AS UNSIGNED);
         SET v_file_path = JSON_UNQUOTE(JSON_EXTRACT(@requirement, '$.requirement_path'));
-
         INSERT INTO tbl_organization_requirement_submission (
             application_id,
             requirement_id,
@@ -2905,7 +2909,7 @@ BEGIN
         ) VALUES (
             v_application_id,
             v_req_id,
-            1,
+            v_cycle_number,
             v_organization_id,
             v_file_path,
             p_user_id
@@ -2914,16 +2918,173 @@ BEGIN
     END WHILE;
 
     COMMIT;
-
     -- Return results
     SELECT
         v_organization_id AS organization_id,
         v_application_id AS application_id,
-        v_org_name as directory_name,
+        v_org_name AS directory_name,
         CONCAT(v_org_name, '/logo/', v_logo_filename) AS logo_path,
         CONCAT(v_org_name, '/requirements/') AS requirements_dir,
         v_cycle_number AS cycle_number;
-END$$
+END $$
+DELIMITER ;
+
+
+DELIMITER $$
+CREATE DEFINER=`admin`@`%` PROCEDURE ResubmitOrganizationApplication(
+    IN p_organization   JSON,
+    IN p_executives     JSON,
+    IN p_requirements   JSON,
+    IN p_user_id        VARCHAR(200)
+)
+BEGIN
+    -- Local declarations (all declarations before any statements)
+    DECLARE v_organization_id INT;
+    DECLARE v_program_id INT;
+    DECLARE v_period_id INT;
+    DECLARE v_application_id INT;
+    DECLARE v_org_name VARCHAR(100);
+    DECLARE v_logo_filename VARCHAR(255);
+    DECLARE i INT DEFAULT 0;
+    DECLARE v_requirement_count INT DEFAULT 0;
+    DECLARE v_req_id INT;
+    DECLARE v_file_path VARCHAR(255);
+    DECLARE v_cycle_number INT DEFAULT 1;
+    DECLARE v_fee_type VARCHAR(50) DEFAULT 'Free';
+    DECLARE v_fee_amount DECIMAL(10,2) DEFAULT NULL;
+    DECLARE v_tmp_fee_text VARCHAR(255);
+
+    -- Error handler: rollback and re-raise
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        RESIGNAL;
+    END;
+
+    -- Safely parse fee type from JSON
+    SET v_tmp_fee_text = JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.fee_duration'));
+    IF v_tmp_fee_text IS NOT NULL AND v_tmp_fee_text != '' AND v_tmp_fee_text IN ('Per Term', 'Whole Academic Year', 'Free') THEN
+        SET v_fee_type = v_tmp_fee_text;
+    ELSE
+        SET v_fee_type = 'Free';
+    END IF;
+
+    -- Safely parse fee amount (nullable, treat 0 as NULL)
+    SET v_tmp_fee_text = JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.fee_amount'));
+    IF v_tmp_fee_text IS NULL OR v_tmp_fee_text = '' THEN
+        SET v_fee_amount = NULL;
+    ELSE
+        SET v_fee_amount = NULLIF(CAST(v_tmp_fee_text AS DECIMAL(10,2)), 0);
+    END IF;
+
+    -- Defensive counts
+    SET v_requirement_count = COALESCE(JSON_LENGTH(p_requirements), 0);
+
+    START TRANSACTION;
+
+    -- Get user's program (ensure it exists)
+    SELECT program_id INTO v_program_id
+    FROM tbl_user
+    WHERE user_id = p_user_id
+    LIMIT 1;
+    IF v_program_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'User program not found';
+    END IF;
+
+    -- Get organization id by name (ensure exists)
+    SET v_org_name = JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.organization_name'));
+    SELECT organization_id INTO v_organization_id
+    FROM tbl_organization
+    WHERE name = v_org_name
+    LIMIT 1;
+    IF v_organization_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Organization not found for resubmission';
+    END IF;
+
+    -- Update organization info and set status to Pending
+    UPDATE tbl_organization
+    SET
+        description = JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.organization_description')),
+        logo = JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.organization_logo')),
+        base_program_id = v_program_id,
+        status = 'Pending',
+        membership_fee_type = v_fee_type,
+        membership_fee_amount = v_fee_amount,
+        is_recruiting = TRUE,
+        is_open_to_all_courses = FALSE,
+        category = JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.category'))
+    WHERE organization_id = v_organization_id;
+
+    SET v_logo_filename = JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.organization_logo'));
+
+    -- Find active application period
+    SELECT period_id INTO v_period_id
+    FROM tbl_application_period
+    WHERE is_active = TRUE
+    ORDER BY created_at DESC
+    LIMIT 1;
+    IF v_period_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'No active application period';
+    END IF;
+
+    -- Create new application (resubmission treated as 'new' application per original)
+    INSERT INTO tbl_application (
+        organization_id,
+        cycle_number,
+        application_type,
+        period_id,
+        applicant_user_id,
+        status
+    ) VALUES (
+        v_organization_id,
+        v_cycle_number,
+        'new',
+        v_period_id,
+        p_user_id,
+        'pending'
+    );
+    SET v_application_id = LAST_INSERT_ID();
+
+    -- Initiate approval and add default membership question
+    CALL InitiateApprovalProcess(v_application_id);
+    INSERT INTO tbl_membership_question(organization_id, cycle_number, question_text, question_type)
+    VALUES (v_organization_id, v_cycle_number, 'What is your reason for joining?', 'text');
+
+    -- Process requirement submissions (if any)
+    SET i = 0;
+    WHILE i < v_requirement_count DO
+        SET @requirement = JSON_EXTRACT(p_requirements, CONCAT('$[', i, ']'));
+        SET v_req_id = CAST(JSON_UNQUOTE(JSON_EXTRACT(@requirement, '$.requirement_id')) AS UNSIGNED);
+        SET v_file_path = JSON_UNQUOTE(JSON_EXTRACT(@requirement, '$.requirement_path'));
+        INSERT INTO tbl_organization_requirement_submission (
+            application_id,
+            requirement_id,
+            cycle_number,
+            organization_id,
+            file_path,
+            submitted_by
+        ) VALUES (
+            v_application_id,
+            v_req_id,
+            v_cycle_number,
+            v_organization_id,
+            v_file_path,
+            p_user_id
+        );
+        SET i = i + 1;
+    END WHILE;
+
+    COMMIT;
+    
+    -- Return results
+    SELECT
+        v_organization_id AS organization_id,
+        v_application_id AS application_id,
+        v_org_name AS directory_name,
+        CONCAT(v_org_name, '/logo/', v_logo_filename) AS logo_path,
+        CONCAT(v_org_name, '/requirements/') AS requirements_dir,
+        v_cycle_number AS cycle_number;
+END $$
 DELIMITER ;
 
 DELIMITER $$
@@ -3321,25 +3482,10 @@ DELIMITER ;
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetApprovalTimeline(
-    IN p_organization_name VARCHAR(100)
+    IN p_organization_name VARCHAR(100),
+    IN p_application_id INT
 )
 BEGIN
-DECLARE v_organization_id INT;
-
-    -- Security First: Validate User Access
-    SELECT o.organization_id
-    INTO v_organization_id
-    FROM tbl_organization o
-    JOIN tbl_application a ON o.organization_id = a.organization_id
-    WHERE o.name = p_organization_name
-    LIMIT 1;
-
-    -- Error Handling: No Access or Not Found
-    IF v_organization_id IS NULL THEN
-        SIGNAL SQLSTATE '45000' 
-        SET MESSAGE_TEXT = 'Organization not found or access denied';
-    END IF;
-
             SELECT 
                 ap.approval_id as id,
                 ap.step,
@@ -3356,7 +3502,7 @@ DECLARE v_organization_id INT;
                 ON ap.approval_role_id = r.role_id
             LEFT JOIN tbl_user u 
                 ON ap.approver_id = u.user_id
-            WHERE ap.organization_id = v_organization_id
+            WHERE ap.application_id = p_application_id
             ORDER BY ap.step;
 END $$
 DELIMITER ;
@@ -3551,7 +3697,7 @@ BEGIN
     END IF;
 
     -- Log the approval
-    INSERT INTO tbl_logs (user_id, action, redirect_url, type)
+    INSERT INTO tbl_logs (user_id, action_type, redirect_url, type)
     VALUES (
         p_approver_id, 
         CONCAT('Approved registration for event ', p_event_id), 
@@ -3610,7 +3756,7 @@ BEGIN
     END IF;
 
     -- Log the rejection
-    INSERT INTO tbl_logs (user_id, action, meta_data, type)
+    INSERT INTO tbl_logs (user_id, action_type, meta_data, type)
     VALUES (
         p_approver_id, 
         CONCAT('Rejected registration for event ', p_event_id), 
@@ -4471,15 +4617,15 @@ BEGIN
 
     COMMIT;
 
-    -- Create notification and log for new event proposal
-    CALL NotifyNewEventProposal(
-        v_event_id,
-        v_event_application_id,
-        JSON_UNQUOTE(JSON_EXTRACT(p_event, '$.title')),
-        p_organization_id,
-        v_organization_name,
-        p_applicant_user_id
-    );
+    -- -- Create notification and log for new event proposal
+    -- CALL NotifyNewEventProposal(
+    --     v_event_id,
+    --     v_event_application_id,
+    --     JSON_UNQUOTE(JSON_EXTRACT(p_event, '$.title')),
+    --     p_organization_id,
+    --     v_organization_name,
+    --     p_applicant_user_id
+    -- );
 
     -- Return success information
     SELECT 
@@ -4489,7 +4635,7 @@ BEGIN
         p_organization_id AS organization_id,
         v_organization_name AS organization_name,
         v_cycle_number AS cycle_number;
-        
+
 END$$
 DELIMITER ;
 
@@ -5319,7 +5465,7 @@ BEGIN
             );
 
             -- Log add
-            INSERT INTO tbl_logs (user_id, action, type, meta_data)
+            INSERT INTO tbl_logs (user_id, action_type, type, meta_data)
             VALUES (
                 p_user_id,
                 CONCAT('Added event requirement: ', v_req_name),
@@ -5336,7 +5482,7 @@ BEGIN
             WHERE requirement_id = v_req_id;
 
             -- Log update
-            INSERT INTO tbl_logs (user_id, action, type, meta_data)
+            INSERT INTO tbl_logs (user_id, action_type, type, meta_data)
             VALUES (
                 p_user_id,
                 CONCAT('Updated event requirement: ', v_req_name),
@@ -5367,7 +5513,7 @@ BEGIN
         DELETE FROM tbl_event_application_requirement WHERE requirement_id = del_req_id;
 
         -- Log deletion
-        INSERT INTO tbl_logs (user_id, action, type, meta_data)
+        INSERT INTO tbl_logs (user_id, action_type, type, meta_data)
         VALUES (
             p_user_id,
             CONCAT('Deleted event requirement: ', del_req_name),

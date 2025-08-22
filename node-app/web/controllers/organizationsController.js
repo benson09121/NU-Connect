@@ -941,10 +941,10 @@ async function archiveOrganizationMember(req, res) {
 
 async function GetApprovalTimeline(req, res){
     try{
-        const { sessionId, org_name} = req.query;
-        const result = await organizationsModel.GetApprovalTimeline(org_name);
+        const { sessionId, org_name, app_id} = req.query;
+        const result = await organizationsModel.GetApprovalTimeline(org_name, app_id);
         if (sessionId) {
-            subscribeToChannel(sessionId, `application_approval_timeline_${org_name}`);
+            subscribeToChannel(sessionId, `application_approval_timeline_${org_name}_${app_id}`);
         }
         res.status(201).json(result);
     } catch (error) {
