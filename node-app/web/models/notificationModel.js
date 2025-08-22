@@ -13,115 +13,196 @@ async function getUserIdByEmail(email) {
   }
 }
 
-async function getNotificationsByEmail({ email, is_read = null, limit = 50, offset = 0 }) {
-  if (!email) throw new Error('email required');
-  // Normalize is_read (null means no filter)
-  let readFilter = null;
-  if (is_read === true || is_read === false) readFilter = is_read;
-  const conn = await pool.getConnection();
-  try {
-    const [rows] = await conn.query(
-      'CALL GetNotificationsByEmail(?, ?, ?, ?);',
-      [email, readFilter, limit, offset]
-    );
-    return rows[0];
-  } finally {
-    conn.release();
-  }
+async function getNotificationsByEmail(email, isRead = null, limit = 50, offset = 0) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetNotificationsByEmail(?, ?, ?, ?)', [
+            email,
+            isRead,
+            limit,
+            offset
+        ]);
+        return rows[0];
+    } catch (error) {
+        console.error('Error fetching notifications:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
 }
 
-async function markNotificationRead({ notification_id, user_id, email }) {
-  if (!notification_id) throw new Error('notification_id required');
-  if (!user_id) {
-    if (!email) throw new Error('user_id or email required');
-    user_id = await getUserIdByEmail(email);
-    if (!user_id) throw new Error('User not found for provided email');
-  }
-  const conn = await pool.getConnection();
-  try {
-    const [rows] = await conn.query(
-      'CALL MarkNotificationRead(?, ?);',
-      [notification_id, user_id]
-    );
-    return rows[0][0];
-  } finally {
-    conn.release();
-  }
+async function markNotificationRead(notificationId, userId) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL MarkNotificationRead(?, ?)', [
+            notificationId,
+            userId
+        ]);
+        return rows[0];
+    } catch (error) {
+        console.error('Error marking notification as read:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
 }
 
-async function createNotification({
-  title,
-  message,
-  entity_type,
-  entity_id,
-  sender_id,
-  recipient_emails,
-  action
-}) {
-  if (!title || !message || !entity_type || !sender_id || !recipient_emails) {
-    throw new Error('Missing required notification parameters');
-  }
-  
-  if (!Array.isArray(recipient_emails)) {
-    throw new Error('recipient_emails must be an array');
-  }
-  
-  const conn = await pool.getConnection();
-  try {
-    const [rows] = await conn.query(
-      'CALL CreateNotification(?, ?, ?, ?, ?, ?, ?);',
-      [title, message, entity_type, entity_id, sender_id, JSON.stringify(recipient_emails), action]
-    );
-    return rows[0][0];
-  } finally {
-    conn.release();
-  }
+async function createNotification(title, message, entityType, entityId, senderId, recipientEmails, action) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL CreateNotification(?, ?, ?, ?, ?, ?, ?)', [
+            title,
+            message,
+            entityType,
+            entityId,
+            senderId,
+            JSON.stringify(recipientEmails),
+            action
+        ]);
+        return rows[0];
+    } catch (error) {
+        console.error('Error creating notification:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
 }
 
-async function notifyNewOrganizationApplication({
-  organization_id,
-  application_id,
-  organization_name,
-  applicant_user_id,
-  program_id
-}) {
-  const conn = await pool.getConnection();
-  try {
-    const [rows] = await conn.query(
-      'CALL NotifyNewOrganizationApplication(?, ?, ?, ?, ?);',
-      [organization_id, application_id, organization_name, applicant_user_id, program_id]
-    );
-    return rows[0];
-  } finally {
-    conn.release();
-  }
+async function notifyApplicationPeriodCreated(periodId, createdBy, startDate, endDate) {
+    const connection = await pool.getConnection();
+    try {
+        // Get admin emails
+        const [adminUsers] = await connection.query(
+            'SELECT JSON_ARRAYAGG(email) as emails FROM tbl_user WHERE role_id IN (3, 4) AND status = "Active"'
+        );
+        const adminEmails = adminUsers[0]?.emails ? JSON.parse(adminUsers[0].emails) : [];
+        
+        if (adminEmails.length > 0) {
+            return await createNotification(
+                'New Application Period Created',
+                `A new application period has been created from ${startDate} to ${endDate}. Organizations can now submit applications during this period.`,
+                'system',
+                periodId,
+                createdBy,
+                adminEmails,
+                'application_period_created'
+            );
+        }
+    } catch (error) {
+        console.error('Error notifying application period creation:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
 }
 
-async function notifyNewEventProposal({
-  event_id,
-  event_application_id,
-  event_title,
-  organization_id,
-  organization_name,
-  applicant_user_id
-}) {
-  const conn = await pool.getConnection();
-  try {
-    const [rows] = await conn.query(
-      'CALL NotifyNewEventProposal(?, ?, ?, ?, ?, ?);',
-      [event_id, event_application_id, event_title, organization_id, organization_name, applicant_user_id]
-    );
-    return rows[0];
-  } finally {
-    conn.release();
-  }
+async function notifyApplicationPeriodUpdated(periodId, updatedBy, startDate, endDate) {
+    const connection = await pool.getConnection();
+    try {
+        // Get admin emails
+        const [adminUsers] = await connection.query(
+            'SELECT JSON_ARRAYAGG(email) as emails FROM tbl_user WHERE role_id IN (3, 4) AND status = "Active"'
+        );
+        const adminEmails = adminUsers[0]?.emails ? JSON.parse(adminUsers[0].emails) : [];
+        
+        if (adminEmails.length > 0) {
+            return await createNotification(
+                'Application Period Updated',
+                `Application period has been updated. New dates: ${startDate} to ${endDate}.`,
+                'system',
+                periodId,
+                updatedBy,
+                adminEmails,
+                'application_period_updated'
+            );
+        }
+    } catch (error) {
+        console.error('Error notifying application period update:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function notifyApprovalProcessInitiated(applicationId, organizationId, organizationName, initiatedBy) {
+    const connection = await pool.getConnection();
+    try {
+        // Get pending approver emails for this application
+        const [approvers] = await connection.query(`
+            SELECT JSON_ARRAYAGG(u.email) as emails
+            FROM tbl_approval_process ap
+            JOIN tbl_user u ON ap.approver_id = u.user_id
+            WHERE ap.organization_id = ? AND ap.status = 'Pending'
+        `, [organizationId]);
+        
+        const approverEmails = approvers[0]?.emails ? JSON.parse(approvers[0].emails) : [];
+        
+        if (approverEmails.length > 0) {
+            return await createNotification(
+                'New Application Requires Approval',
+                `Organization application for "${organizationName}" is pending your approval. Please review the application in the approval workflow.`,
+                'organization',
+                organizationId,
+                initiatedBy,
+                approverEmails,
+                'approval_process_initiated'
+            );
+        }
+    } catch (error) {
+        console.error('Error notifying approval process initiation:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function notifyNewOrganizationApplication(organizationId, applicationId, organizationName, applicantUserId, programId) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL NotifyNewOrganizationApplication(?, ?, ?, ?, ?)', [
+            organizationId,
+            applicationId,
+            organizationName,
+            applicantUserId,
+            programId
+        ]);
+        return rows[0];
+    } catch (error) {
+        console.error('Error notifying new organization application:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function notifyNewEventProposal(eventId, eventApplicationId, eventTitle, organizationId, organizationName, applicantUserId) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL NotifyNewEventProposal(?, ?, ?, ?, ?, ?)', [
+            eventId,
+            eventApplicationId,
+            eventTitle,
+            organizationId,
+            organizationName,
+            applicantUserId
+        ]);
+        return rows[0];
+    } catch (error) {
+        console.error('Error notifying new event proposal:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
 }
 
 module.exports = {
-  getNotificationsByEmail,
-  markNotificationRead,
-  getUserIdByEmail,
-  createNotification,
-  notifyNewOrganizationApplication,
-  notifyNewEventProposal
+    getUserIdByEmail,
+    createNotification,
+    getNotificationsByEmail,
+    markNotificationRead,
+    notifyApplicationPeriodCreated,
+    notifyApplicationPeriodUpdated,
+    notifyApprovalProcessInitiated,
+    notifyNewOrganizationApplication,
+    notifyNewEventProposal
 };

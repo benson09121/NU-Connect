@@ -1,17 +1,17 @@
 const pool = require('../../config/db');
 
-
 async function createOrganizationApplication(organizations, executives, requirements, user_id) {
     const connection = await pool.getConnection();
     try {
-        const [rows] = await connection.query('CALL CreateOrganizationApplication(?,?,?,?);', [JSON.stringify(organizations), JSON.stringify(executives), JSON.stringify(requirements), user_id]);
+        const [rows] = await connection.query(
+            'CALL CreateOrganizationApplication(?,?,?,?);',
+            [JSON.stringify(organizations), JSON.stringify(executives), JSON.stringify(requirements), user_id]
+        );
         return rows[0];
-    }
-    catch (error) {
-        console.error('Error adding requirement period:', error);
+    } catch (error) {
+        console.error('Error creating organization application:', error);
         throw error;
-    }
-    finally {
+    } finally {
         connection.release();
     }
 }
@@ -808,7 +808,83 @@ async function getSingleOrganizationMember(member_id, org_name) {
     }
 }
 
-      
+// Enhanced application period and approval process functions
+async function addApplicationPeriod(startDate, endDate, startTime, endTime, createdByEmail) {
+    const connection = await pool.getConnection();
+    try {
+        // Get user_id from email
+        const [userRows] = await connection.query('SELECT user_id FROM tbl_user WHERE email = ? LIMIT 1', [createdByEmail]);
+        if (!userRows[0]) {
+            throw new Error('User not found');
+        }
+        const createdBy = userRows[0].user_id;
+
+        const [rows] = await connection.query('CALL AddApplicationPeriod(?, ?, ?, ?, ?)', [
+            startDate,
+            endDate,
+            startTime,
+            endTime,
+            createdBy
+        ]);
+        return rows[0];
+    } catch (error) {
+        console.error('Error adding application period:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function updateApplicationPeriod(startDate, endDate, startTime, endTime, periodId, updatedByEmail) {
+    const connection = await pool.getConnection();
+    try {
+        // Get user_id from email
+        const [userRows] = await connection.query('SELECT user_id FROM tbl_user WHERE email = ? LIMIT 1', [updatedByEmail]);
+        if (!userRows[0]) {
+            throw new Error('User not found');
+        }
+        const updatedBy = userRows[0].user_id;
+
+        const [rows] = await connection.query('CALL UpdateApplicationPeriod(?, ?, ?, ?, ?, ?)', [
+            startDate,
+            endDate,
+            startTime,
+            endTime,
+            periodId,
+            updatedBy
+        ]);
+        return rows[0];
+    } catch (error) {
+        console.error('Error updating application period:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function initiateApprovalProcess(applicationId, initiatedByEmail) {
+    const connection = await pool.getConnection();
+    try {
+        // Get user_id from email
+        const [userRows] = await connection.query('SELECT user_id FROM tbl_user WHERE email = ? LIMIT 1', [initiatedByEmail]);
+        if (!userRows[0]) {
+            throw new Error('User not found');
+        }
+        const initiatedBy = userRows[0].user_id;
+
+        const [rows] = await connection.query('CALL InitiateApprovalProcess(?, ?)', [
+            applicationId,
+            initiatedBy
+        ]);
+        return rows[0];
+    } catch (error) {
+        console.error('Error initiating approval process:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
 module.exports = {
     createOrganizationApplication,
     getSpecificApplication,
@@ -857,5 +933,9 @@ module.exports = {
     getAllExecutiveRanks,
     getSingleUser,
     GetSingleOrganizationUser,
-    getSingleOrganizationMember
+    getSingleOrganizationMember,
+    // Enhanced functions
+    addApplicationPeriod,
+    updateApplicationPeriod,
+    initiateApprovalProcess
 };

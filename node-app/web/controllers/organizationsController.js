@@ -89,7 +89,6 @@ async function getOrganizationMembers(req, res) {
 
 async function createOrganizationApplication(req, res) {
     try {
-
         const organization = JSON.parse(req.body.organization);
         const executives = JSON.parse(req.body.executives);
         const requirements = JSON.parse(req.body.requirements);
@@ -126,56 +125,75 @@ async function createOrganizationApplication(req, res) {
         });
 
         const dbResult = await organizationsModel.createOrganizationApplication(
-            { 
-                ...organization,
-                organization_logo: logoFile.name
-            },
+            { ...organization, organization_logo: logoFile.name },
             executives,
             requirementFilePaths,
             req.user.user_id
         );
 
         const orgDir = path.join('/app/organizations', dbResult[0].directory_name, String(dbResult[0].cycle_number));
-        if(!fs.existsSync(orgDir)) {
+        const logoDir = path.join(orgDir, 'logo');
+        const requirementsDir = path.join(orgDir, 'requirements');
+
+        // Only create each directory once
+        if (!fs.existsSync(orgDir)) {
             fs.mkdirSync(orgDir, { recursive: true });
         }
-        
-        const logoDir = path.join(orgDir, 'logo');
-        if(!fs.existsSync(logoDir)) {
+        if (!fs.existsSync(logoDir)) {
             fs.mkdirSync(logoDir, { recursive: true });
         }
-
-        const requirementsDir = path.join(orgDir, 'requirements');
-        fs.mkdirSync(logoDir, { recursive: true });
-        fs.mkdirSync(requirementsDir, { recursive: true });
+        if (!fs.existsSync(requirementsDir)) {
+            fs.mkdirSync(requirementsDir, { recursive: true });
+        }
 
         const logoFilename = path.basename(dbResult[0].logo_path);
 
-        fs.writeFileSync(
-            path.join(logoDir, logoFilename),
-            logoFile.data
-        );
-        
-        requirements.forEach(req => {
+        // File write logic with error handling
+        try {
+            fs.writeFileSync(
+                path.join(logoDir, logoFilename),
+                logoFile.data
+            );
+        } catch (fileErr) {
+            console.error('Failed to write logo file:', fileErr);
+            return res.status(500).json({ error: 'Failed to save organization logo.' });
+        }
+
+        for (const req of requirements) {
             const file = requirementFiles[req.requirement_id];
             if (file) {
                 const filename = requirementFilePaths.find(r => r.requirement_id === req.requirement_id)?.requirement_path;
-                fs.writeFileSync(
-                    path.join(requirementsDir, filename),
-                    file.data
-                );
+                try {
+                    fs.writeFileSync(
+                        path.join(requirementsDir, filename),
+                        file.data
+                    );
+                } catch (fileErr) {
+                    console.error(`Failed to write requirement file (${filename}):`, fileErr);
+                    return res.status(500).json({ error: `Failed to save requirement file: ${filename}` });
+                }
             }
-        });
+        }
+
         const result = await organizationsModel.getApplication(dbResult[0].application_id);
+
         publishToChannel('organization-applications', {
             operation: 'CREATE',
             data: result
         });
-        console.log(result);
+
+        // Initiate approval process with enhanced logging
+        try {
+            await organizationsModel.initiateApprovalProcess(dbResult[0].application_id, req.user.email);
+        } catch (approvalError) {
+            console.error('Failed to initiate approval process:', approvalError);
+            // Don't fail the application creation if approval process fails
+        }
+
         res.status(201).json({
             message: 'Organization application submitted successfully',
             data: {
-                ...dbResult,
+                ...dbResult[0],
                 logo_url: `/organizations/${dbResult[0].directory_name}/logo/${logoFilename}`
             }
         });
@@ -960,6 +978,98 @@ async function getAllExecutiveRanks(req, res) {
     }
 }
 
+// Enhanced application period management functions
+async function addApplicationPeriod(req, res) {
+    try {
+        const { start_date, end_date, start_time, end_time } = req.body;
+        
+        if (!start_date || !end_date || !start_time || !end_time) {
+            return res.status(400).json({ 
+                error: "All fields (start_date, end_date, start_time, end_time) are required." 
+            });
+        }
+
+        const result = await organizationsModel.addApplicationPeriod(
+            start_date,
+            end_date,
+            start_time,
+            end_time,
+            req.user.email
+        );
+
+        res.status(201).json({
+            success: true,
+            message: "Application period created successfully.",
+            data: result
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message || "An error occurred while creating the application period."
+        });
+    }
+}
+
+async function updateApplicationPeriod(req, res) {
+    try {
+        const { start_date, end_date, start_time, end_time, period_id } = req.body;
+        
+        if (!start_date || !end_date || !start_time || !end_time || !period_id) {
+            return res.status(400).json({ 
+                error: "All fields (start_date, end_date, start_time, end_time, period_id) are required." 
+            });
+        }
+
+        const result = await organizationsModel.updateApplicationPeriod(
+            start_date,
+            end_date,
+            start_time,
+            end_time,
+            period_id,
+            req.user.email
+        );
+
+        res.status(200).json({
+            success: true,
+            message: "Application period updated successfully.",
+            data: result
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message || "An error occurred while updating the application period."
+        });
+    }
+}
+
+async function initiateApprovalProcess(req, res) {
+    try {
+        const { application_id } = req.body;
+        
+        if (!application_id) {
+            return res.status(400).json({ 
+                error: "application_id is required." 
+            });
+        }
+
+        const result = await organizationsModel.initiateApprovalProcess(
+            application_id,
+            req.user.email
+        );
+
+        res.status(200).json({
+            success: true,
+            message: "Approval process initiated successfully.",
+            data: result
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message || "An error occurred while initiating the approval process."
+        });
+    }
+}
+
 
 
 module.exports = {
@@ -1003,4 +1113,8 @@ module.exports = {
     getOrganizationMembers,
     getProgram,
     getAllExecutiveRanks,
+    // Enhanced functions
+    addApplicationPeriod,
+    updateApplicationPeriod,
+    initiateApprovalProcess
 };

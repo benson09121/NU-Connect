@@ -205,23 +205,32 @@ async function updateRequirement(req, res) {
 }
 
 async function addApplicationPeriod(req, res) {
-    const { startDate, endDate, startTime, endTime } = req.body;
     try {
-
-        if (!startDate || !endDate) {
-            return res.status(400).json({ message: 'Missing required fields' });
+        const { start_date, end_date, start_time, end_time } = req.body;
+        
+        if (!start_date || !end_date || !start_time || !end_time) {
+            return res.status(400).json({ 
+                error: "All fields (start_date, end_date, start_time, end_time) are required." 
+            });
         }
 
-        const result = await requirementModel.addApplicationPeriod(startDate, endDate, startTime, endTime, req.user.user_id);
-        res.status(201).json({ message: result });
-        publishToChannel('application_periods', {
-            operation: 'CREATE',
+        const result = await requirementModel.addApplicationPeriod(
+            start_date,
+            end_date,
+            start_time,
+            end_time,
+            req.user.email
+        );
+
+        res.status(201).json({
+            success: true,
+            message: "Application period created successfully.",
             data: result
         });
-
     } catch (error) {
         res.status(500).json({
-            error: error.message || "An error occurred while adding the requirement period.",
+            success: false,
+            error: error.message || "An error occurred while creating the application period."
         });
     }
 }
@@ -267,18 +276,61 @@ async function getActiveApplicationPeriod(req, res) {
 }
 
 async function updateApplicationPeriod(req, res) {
-    const { startDate, endDate, startTime, endTime, periodId } = req.body;
     try {
-        const result = await requirementModel.updateApplicationPeriod(startDate, endDate, startTime, endTime, periodId);
-        console.log('Updated application period:', result);
-        publishToChannel('application_periods', {
-            operation: 'UPDATE',
+        const { start_date, end_date, start_time, end_time, period_id } = req.body;
+        
+        if (!start_date || !end_date || !start_time || !end_time || !period_id) {
+            return res.status(400).json({ 
+                error: "All fields (start_date, end_date, start_time, end_time, period_id) are required." 
+            });
+        }
+
+        const result = await requirementModel.updateApplicationPeriod(
+            start_date,
+            end_date,
+            start_time,
+            end_time,
+            period_id,
+            req.user.email
+        );
+
+        res.status(200).json({
+            success: true,
+            message: "Application period updated successfully.",
             data: result
         });
-        res.status(200).json({ message: 'Requirement period updated successfully' });
     } catch (error) {
         res.status(500).json({
-            error: error.message || "An error occurred while updating the requirement period.",
+            success: false,
+            error: error.message || "An error occurred while updating the application period."
+        });
+    }
+}
+
+async function initiateApprovalProcess(req, res) {
+    try {
+        const { application_id } = req.body;
+        
+        if (!application_id) {
+            return res.status(400).json({ 
+                error: "application_id is required." 
+            });
+        }
+
+        const result = await requirementModel.initiateApprovalProcess(
+            application_id,
+            req.user.email
+        );
+
+        res.status(200).json({
+            success: true,
+            message: "Approval process initiated successfully.",
+            data: result
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message || "An error occurred while initiating the approval process."
         });
     }
 }
@@ -542,4 +594,5 @@ module.exports = {
     getEventRequirementTemplate,
     addEventRequirement,
     batchUpdateEventRequirements,
+    initiateApprovalProcess
 };

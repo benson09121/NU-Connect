@@ -156,4 +156,26 @@ router.get(
     organizationsController.getAllExecutiveRanks
 );
 
+// Enhanced application period management routes
+router.post(
+    '/application-period',
+    middleware.validateAzureJWT,
+    middleware.hasPermission("MANAGE_REQUIREMENTS"),
+    organizationsController.addApplicationPeriod
+);
+
+router.put(
+    '/application-period',
+    middleware.validateAzureJWT,
+    middleware.hasPermission("MANAGE_REQUIREMENTS"),
+    organizationsController.updateApplicationPeriod
+);
+
+router.post(
+    '/initiate-approval',
+    middleware.validateAzureJWT,
+    middleware.hasPermission("MANAGE_APPLICATIONS"),
+    organizationsController.initiateApprovalProcess
+);
+
 module.exports = router

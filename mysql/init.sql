@@ -656,19 +656,19 @@ CREATE TABLE tbl_organization_requirement_submission (
 CREATE TABLE tbl_notification (
     notification_id INT AUTO_INCREMENT PRIMARY KEY,
     sender_id VARCHAR(200) DEFAULT NULL,  
-    entity_type ENUM('event', 'approval', 'organization', 'transaction', 'general') NOT NULL,
+    entity_type ENUM('user', 'organization', 'event', 'transaction', 'system', 'approval', 'general') NOT NULL,
     entity_id INT DEFAULT NULL,      
     title VARCHAR(255) NOT NULL,          
     message TEXT NOT NULL,              
-    url VARCHAR(255) DEFAULT NULL,     
+    url VARCHAR(255) DEFAULT NULL,
+    action VARCHAR(100) DEFAULT NULL,     
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE tbl_notification_recipient (
     notification_recipient_id INT AUTO_INCREMENT PRIMARY KEY,
     notification_id INT NOT NULL,        
-    recipient_type ENUM('user', 'organization', 'program') NOT NULL,
-    recipient_id VARCHAR(200) NOT NULL,    
+    recipient_email VARCHAR(100) NOT NULL,   
     is_read BOOLEAN DEFAULT FALSE,         
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (notification_id) REFERENCES tbl_notification(notification_id) ON DELETE CASCADE
@@ -776,6 +776,77 @@ BEGIN
     END IF;
     INSERT INTO tbl_logs(user_id, action, type, meta_data, redirect_url, file_path)
     VALUES (v_user_id, p_action, p_type, p_meta_data, p_redirect_url, p_file_path);
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE CreateNotification(
+    IN p_title VARCHAR(255),
+    IN p_message TEXT,
+    IN p_entity_type ENUM('user', 'organization', 'event', 'transaction', 'system'),
+    IN p_entity_id INT,
+    IN p_sender_id VARCHAR(200),
+    IN p_recipient_emails JSON,
+    IN p_action VARCHAR(100)
+)
+BEGIN
+    DECLARE v_notification_id INT;
+    DECLARE v_recipient_count INT;
+    DECLARE v_email VARCHAR(100);
+    DECLARE i INT DEFAULT 0;
+    
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        RESIGNAL;
+    END;
+    
+    START TRANSACTION;
+    
+    -- Create notification record
+    INSERT INTO tbl_notification (
+        title,
+        message,
+        entity_type,
+        entity_id,
+        sender_id,
+        action,
+        created_at
+    ) VALUES (
+        p_title,
+        p_message,
+        p_entity_type,
+        p_entity_id,
+        p_sender_id,
+        p_action,
+        NOW()
+    );
+    
+    SET v_notification_id = LAST_INSERT_ID();
+    
+    -- Add recipients
+    SET v_recipient_count = JSON_LENGTH(p_recipient_emails);
+    WHILE i < v_recipient_count DO
+        SET v_email = JSON_UNQUOTE(JSON_EXTRACT(p_recipient_emails, CONCAT('$[', i, ']')));
+        
+        INSERT INTO tbl_notification_recipient (
+            notification_id,
+            recipient_email,
+            is_read,
+            created_at
+        ) VALUES (
+            v_notification_id,
+            v_email,
+            FALSE,
+            NOW()
+        );
+        
+        SET i = i + 1;
+    END WHILE;
+    
+    COMMIT;
+    
+    SELECT v_notification_id AS notification_id;
 END$$
 DELIMITER ;
 
@@ -2154,7 +2225,7 @@ END $$
 DELIMITER ;
 
 DELIMITER $$
-CREATE DEFINER=`admin`@`%` PROCEDURE AddApplicationPeriod(
+CREATE DEFINER='admin'@'%' PROCEDURE AddApplicationPeriod(
     IN p_start_date DATE,
     IN p_end_date DATE,
     IN p_start_time TIME,
@@ -2163,7 +2234,12 @@ CREATE DEFINER=`admin`@`%` PROCEDURE AddApplicationPeriod(
 )
 BEGIN
     DECLARE v_period_id INT;
+    DECLARE v_creator_email VARCHAR(100);
+    DECLARE v_admin_emails JSON;
 
+    -- Get creator email for logging
+    SELECT email INTO v_creator_email FROM tbl_user WHERE user_id = p_created_by LIMIT 1;
+    
     INSERT INTO tbl_application_period (
         start_date, 
         end_date, 
@@ -2179,6 +2255,39 @@ BEGIN
     );
 
     SET v_period_id = LAST_INSERT_ID();
+
+    -- Get all admin emails for notification
+    SELECT JSON_ARRAYAGG(email) INTO v_admin_emails
+    FROM tbl_user
+    WHERE role_id IN (2, 3, 4) AND status = 'Active'; 
+
+    -- Create user-friendly notification
+    CALL CreateNotification(
+        'New Application Period Available',
+        CONCAT('Organizations can now submit applications from ', DATE_FORMAT(p_start_date, '%M %d, %Y at %h:%i %p'), ' until ', DATE_FORMAT(p_end_date, '%M %d, %Y at %h:%i %p'), '. Please inform your organizations about this opportunity.'),
+        'system',
+        v_period_id,
+        p_created_by,
+        v_admin_emails,
+        'application_period_opened'
+    );
+
+    -- Log with user-friendly message
+    CALL LogAction(
+        v_creator_email,
+        CONCAT('Created new application period: ', DATE_FORMAT(p_start_date, '%M %d, %Y'), ' - ', DATE_FORMAT(p_end_date, '%M %d, %Y')),
+        'Application Period Management',
+        JSON_OBJECT(
+            'period_id', v_period_id,
+            'start_date', p_start_date,
+            'end_date', p_end_date,
+            'start_time', p_start_time,
+            'end_time', p_end_time,
+            'action', 'Created application period for organization applications'
+        ),
+        CONCAT('/admin/application-periods/', v_period_id),
+        NULL
+    );
 
     SELECT
         period_id as id,
@@ -2217,15 +2326,60 @@ CREATE DEFINER='admin'@'%' PROCEDURE UpdateApplicationPeriod(
     IN p_end_date DATE,
     IN p_start_time TIME,
     IN p_end_time TIME,
-    IN p_period_id INT
+    IN p_period_id INT,
+    IN p_updated_by VARCHAR(200)
 )
 BEGIN
+    DECLARE v_updater_email VARCHAR(100);
+    DECLARE v_admin_emails JSON;
+    DECLARE v_old_start_date DATE;
+    DECLARE v_old_end_date DATE;
+
+    -- Get old values for comparison
+    SELECT start_date, end_date INTO v_old_start_date, v_old_end_date
+    FROM tbl_application_period WHERE period_id = p_period_id;
+
+    -- Get updater email for logging
+    SELECT email INTO v_updater_email FROM tbl_user WHERE user_id = p_updated_by LIMIT 1;
+
     UPDATE tbl_application_period
     SET start_date = p_start_date,
         end_date = p_end_date,
         start_time = p_start_time,
-        end_time = p_end_time
+        end_time = p_end_time,
+        updated_at = CURRENT_TIMESTAMP
     WHERE period_id = p_period_id;
+
+    -- Get all admin emails for notification
+    SELECT JSON_ARRAYAGG(email) INTO v_admin_emails
+    FROM tbl_user
+    WHERE role_id IN (2, 3, 4) AND status = 'Active';
+
+    -- Create user-friendly notification
+    CALL CreateNotification(
+        'Application Period Schedule Updated',
+        CONCAT('The application period has been rescheduled. New dates: ', DATE_FORMAT(p_start_date, '%M %d, %Y at %h:%i %p'), ' until ', DATE_FORMAT(p_end_date, '%M %d, %Y at %h:%i %p'), '. Please notify organizations of this change.'),
+        'system',
+        p_period_id,
+        p_updated_by,
+        v_admin_emails,
+        'application_period_modified'
+    );
+
+    -- Log with user-friendly message
+    CALL LogAction(
+        v_updater_email,
+        CONCAT('Updated application period schedule from ', DATE_FORMAT(v_old_start_date, '%M %d'), '-', DATE_FORMAT(v_old_end_date, '%M %d'), ' to ', DATE_FORMAT(p_start_date, '%M %d'), '-', DATE_FORMAT(p_end_date, '%M %d')),
+        'Application Period Management',
+        JSON_OBJECT(
+            'period_id', p_period_id,
+            'previous_dates', CONCAT(DATE_FORMAT(v_old_start_date, '%M %d, %Y'), ' - ', DATE_FORMAT(v_old_end_date, '%M %d, %Y')),
+            'new_dates', CONCAT(DATE_FORMAT(p_start_date, '%M %d, %Y'), ' - ', DATE_FORMAT(p_end_date, '%M %d, %Y')),
+            'action', 'Modified application period schedule'
+        ),
+        CONCAT('/admin/application-periods/', p_period_id),
+        NULL
+    );
 
     SELECT  
         period_id as id,
@@ -2239,7 +2393,10 @@ END $$
 DELIMITER ;
 
 DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE InitiateApprovalProcess(IN p_application_id INT)
+CREATE DEFINER='admin'@'%' PROCEDURE InitiateApprovalProcess(
+    IN p_application_id INT,
+    IN p_initiated_by VARCHAR(200)
+)
 BEGIN
     -- Declare all variables first
     DECLARE v_org_id INT;
@@ -2253,6 +2410,9 @@ BEGIN
     DECLARE v_adviser_role_id INT;
     DECLARE v_done BOOLEAN DEFAULT FALSE;
     DECLARE v_first_step BOOLEAN DEFAULT TRUE;
+    DECLARE v_org_name VARCHAR(100);
+    DECLARE v_initiator_email VARCHAR(100);
+    DECLARE v_approver_emails JSON;
 
     -- Declare cursor and handler next
     DECLARE role_cursor CURSOR FOR
@@ -2264,17 +2424,22 @@ BEGIN
 
     DECLARE CONTINUE HANDLER FOR NOT FOUND SET v_done = TRUE;
 
+    -- Get initiator email for logging
+    SELECT email INTO v_initiator_email FROM tbl_user WHERE user_id = p_initiated_by LIMIT 1;
+
     -- Now executable statements
     SELECT 
         a.organization_id, 
         o.base_program_id,
         o.adviser_id,
+        o.name,
         a.period_id,
         a.application_type
     INTO 
         v_org_id, 
         v_program_id, 
         v_adviser_id, 
+        v_org_name,
         v_period_id,
         v_application_type
     FROM tbl_application a
@@ -2371,6 +2536,44 @@ BEGIN
     WHERE organization_id = v_org_id
     AND period_id = v_period_id
     AND approver_id IS NOT NULL;
+
+    -- Get all approver emails for notification
+    SELECT JSON_ARRAYAGG(u.email) INTO v_approver_emails
+    FROM tbl_approval_process ap
+    JOIN tbl_user u ON ap.approver_id = u.user_id
+    WHERE ap.organization_id = v_org_id 
+    AND ap.period_id = v_period_id
+    AND ap.status = 'Pending';
+
+    -- Create user-friendly notification for approvers
+    IF v_approver_emails IS NOT NULL THEN
+        CALL CreateNotification(
+            CONCAT('Approval Needed: "', v_org_name, '"'),
+            CONCAT('The ', v_application_type, ' application for "', v_org_name, '" is ready for your review. Please check the application documents and provide your approval decision.'),
+            'organization',
+            v_org_id,
+            p_initiated_by,
+            v_approver_emails,
+            'approval_required'
+        );
+    END IF;
+
+    -- Log with user-friendly message
+    CALL LogAction(
+        v_initiator_email,
+        CONCAT('Started approval process for "', v_org_name, '" (', v_application_type, ' application)'),
+        'Approval Workflow',
+        JSON_OBJECT(
+            'application_id', p_application_id,
+            'organization_id', v_org_id,
+            'organization_name', v_org_name,
+            'application_type', v_application_type,
+            'period_id', v_period_id,
+            'action', 'Initiated multi-step approval workflow'
+        ),
+        CONCAT('/organizations/app-details/', v_org_name),
+        NULL
+    );
 
     -- Update application status
     IF EXISTS (SELECT 1 FROM tbl_approval_process 
@@ -2680,7 +2883,7 @@ BEGIN
     SET v_application_id = LAST_INSERT_ID();
 
     -- Initiate approval and add default question
-    CALL InitiateApprovalProcess(v_application_id);
+    CALL InitiateApprovalProcess(v_application_id, p_user_id);
     INSERT INTO tbl_membership_question(organization_id, cycle_number, question_text, question_type)
     VALUES (v_organization_id, 1, "What is your reason for joining?", "text");
 
@@ -2711,15 +2914,6 @@ BEGIN
     END WHILE;
 
     COMMIT;
-
-    -- Create notification and log for new organization application
-    CALL NotifyNewOrganizationApplication(
-        v_organization_id,
-        v_application_id,
-        v_org_name,
-        p_user_id,
-        v_program_id
-    );
 
     -- Return results
     SELECT
@@ -4971,40 +5165,69 @@ DELIMITER ;
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE TerminateActiveApplicationPeriod(
-    IN p_user_id VARCHAR(200)
+    IN p_terminated_by VARCHAR(200)
 )
 BEGIN
-    DECLARE v_affected_rows INT DEFAULT 0;
+    DECLARE v_period_id INT;
+    DECLARE v_terminator_email VARCHAR(100);
+    DECLARE v_admin_emails JSON;
+    DECLARE v_start_date DATE;
+    DECLARE v_end_date DATE;
+    DECLARE v_start_time TIME;
+    DECLARE v_end_time TIME;
 
-    -- Terminate all currently active periods
+    -- Find the current active period
+    SELECT period_id, start_date, end_date, start_time, end_time
+      INTO v_period_id, v_start_date, v_end_date, v_start_time, v_end_time
+      FROM tbl_application_period
+      WHERE is_active = 1
+      ORDER BY created_at DESC
+      LIMIT 1;
 
-    SELECT period_id as id, 
-    start_date,
-    end_date,
-    start_time,
-    end_time
-    FROM tbl_application_period WHERE is_active = 1;
-
-    UPDATE tbl_application_period
-    SET is_active = 0
-    WHERE is_active = 1;
-
-    SET v_affected_rows = ROW_COUNT();
-
-    -- Log the action if any period was terminated
-    IF v_affected_rows > 0 THEN
-        INSERT INTO tbl_logs (
-            user_id,
-            action,
-            type,
-            meta_data
-        ) VALUES (
-            p_user_id,
-            'Terminated active application period(s)',
-            'application_period',
-            JSON_OBJECT('terminated_count', v_affected_rows, 'terminated_at', NOW())
-        );
+    IF v_period_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'No active application period found';
     END IF;
+
+    -- Get terminator's email
+    SELECT email INTO v_terminator_email FROM tbl_user WHERE user_id = p_terminated_by LIMIT 1;
+
+    -- Mark as inactive
+    UPDATE tbl_application_period SET is_active = 0 WHERE period_id = v_period_id;
+
+    -- Get all admin/adviser emails
+    SELECT JSON_ARRAYAGG(email) INTO v_admin_emails
+    FROM tbl_user
+    WHERE role_id IN (2, 3, 4) AND status = 'Active';
+
+    -- Notify
+    CALL CreateNotification(
+        'Application Period Closed',
+        CONCAT('The application period from ', DATE_FORMAT(v_start_date, '%M %d, %Y at %h:%i %p'), ' to ', DATE_FORMAT(v_end_date, '%M %d, %Y at %h:%i %p'), ' has been closed. No further applications will be accepted.'),
+        'system',
+        v_period_id,
+        p_terminated_by,
+        v_admin_emails,
+        'application_period_terminated'
+    );
+
+    -- Log
+    CALL LogAction(
+        v_terminator_email,
+        CONCAT('Terminated application period: ', DATE_FORMAT(v_start_date, '%M %d, %Y'), ' - ', DATE_FORMAT(v_end_date, '%M %d, %Y')),
+        'Application Period Management',
+        JSON_OBJECT(
+            'period_id', v_period_id,
+            'start_date', v_start_date,
+            'end_date', v_end_date,
+            'start_time', v_start_time,
+            'end_time', v_end_time,
+            'action', 'Terminated active application period'
+        ),
+        CONCAT('/admin/application-periods/', v_period_id),
+        NULL
+    );
+
+    SELECT v_period_id AS terminated_period_id;
 END $$
 DELIMITER ;
 
@@ -8045,48 +8268,32 @@ DELIMITER ;
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetNotificationsByEmail(
-    IN p_email VARCHAR(200),
-    IN p_is_read BOOLEAN,     -- pass NULL to ignore filter, 0 for unread, 1 for read
+    IN p_email VARCHAR(100),
+    IN p_is_read BOOLEAN,
     IN p_limit INT,
     IN p_offset INT
 )
 BEGIN
-    DECLARE v_user_id VARCHAR(200);
-
-    IF p_email IS NULL OR p_email = '' THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Email required';
-    END IF;
-
-    SELECT user_id INTO v_user_id
-    FROM tbl_user
-    WHERE email = p_email
-    LIMIT 1;
-
-    IF v_user_id IS NULL THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'User not found for provided email';
-    END IF;
-
-    IF p_limit IS NULL OR p_limit <= 0 THEN SET p_limit = 50; END IF;
-    IF p_offset IS NULL OR p_offset < 0 THEN SET p_offset = 0; END IF;
-
     SELECT 
         n.notification_id,
-        n.sender_id,
-        n.entity_type,
-        n.entity_id,
         n.title,
         n.message,
-        n.url,
+        n.entity_type,
+        n.entity_id,
+        n.sender_id,
+        n.action,
         n.created_at,
-        nr.is_read
+        nr.is_read,
+        sender.f_name AS sender_first_name,
+        sender.l_name AS sender_last_name
     FROM tbl_notification n
-    JOIN tbl_notification_recipient nr ON nr.notification_id = n.notification_id
-    WHERE nr.recipient_type = 'user'
-      AND nr.recipient_id = v_user_id
-      AND (p_is_read IS NULL OR nr.is_read = p_is_read)
+    JOIN tbl_notification_recipient nr ON n.notification_id = nr.notification_id
+    LEFT JOIN tbl_user sender ON n.sender_id = sender.user_id
+    WHERE nr.recipient_email = p_email
+    AND (p_is_read IS NULL OR nr.is_read = p_is_read)
     ORDER BY n.created_at DESC
     LIMIT p_limit OFFSET p_offset;
-END $$
+END$$
 DELIMITER ;
 
 DELIMITER $$
@@ -8095,13 +8302,23 @@ CREATE DEFINER='admin'@'%' PROCEDURE MarkNotificationRead(
     IN p_user_id VARCHAR(200)
 )
 BEGIN
-    UPDATE tbl_notification_recipient
-    SET is_read = TRUE
-    WHERE notification_id = p_notification_id
-      AND recipient_type = 'user'
-      AND recipient_id = p_user_id;
-    SELECT ROW_COUNT() AS rows_updated;
-END $$
+    DECLARE v_user_email VARCHAR(100);
+    
+    -- Get user email
+    SELECT email INTO v_user_email FROM tbl_user WHERE user_id = p_user_id LIMIT 1;
+    
+    IF v_user_email IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'User not found';
+    END IF;
+    
+    -- Update notification as read
+    UPDATE tbl_notification_recipient 
+    SET is_read = TRUE 
+    WHERE notification_id = p_notification_id 
+    AND recipient_email = v_user_email;
+    
+    SELECT 'Notification marked as read' AS message;
+END$$
 DELIMITER ;
 
 DELIMITER $$
@@ -8591,129 +8808,6 @@ BEGIN
 END $$
 DELIMITER ;
 
--- Notification creation procedures
-DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE CreateNotification(
-    IN p_title VARCHAR(255),
-    IN p_message TEXT,
-    IN p_entity_type ENUM('user', 'organization', 'event', 'transaction', 'system'),
-    IN p_entity_id INT,
-    IN p_sender_id VARCHAR(200),
-    IN p_recipient_emails JSON,
-    IN p_action VARCHAR(100)
-)
-BEGIN
-    DECLARE v_notification_id INT;
-    DECLARE v_recipient_count INT;
-    DECLARE v_email VARCHAR(100);
-    DECLARE i INT DEFAULT 0;
-    
-    DECLARE EXIT HANDLER FOR SQLEXCEPTION
-    BEGIN
-        ROLLBACK;
-        RESIGNAL;
-    END;
-    
-    START TRANSACTION;
-    
-    -- Create notification record
-    INSERT INTO tbl_notification (
-        title,
-        message,
-        entity_type,
-        entity_id,
-        sender_id,
-        action,
-        created_at
-    ) VALUES (
-        p_title,
-        p_message,
-        p_entity_type,
-        p_entity_id,
-        p_sender_id,
-        p_action,
-        NOW()
-    );
-    
-    SET v_notification_id = LAST_INSERT_ID();
-    
-    -- Add recipients
-    SET v_recipient_count = JSON_LENGTH(p_recipient_emails);
-    WHILE i < v_recipient_count DO
-        SET v_email = JSON_UNQUOTE(JSON_EXTRACT(p_recipient_emails, CONCAT('$[', i, ']')));
-        
-        INSERT INTO tbl_notification_recipient (
-            notification_id,
-            recipient_email,
-            is_read,
-            created_at
-        ) VALUES (
-            v_notification_id,
-            v_email,
-            FALSE,
-            NOW()
-        );
-        
-        SET i = i + 1;
-    END WHILE;
-    
-    COMMIT;
-    
-    SELECT v_notification_id AS notification_id;
-END$$
-DELIMITER ;
-
-DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE NotifyNewOrganizationApplication(
-    IN p_organization_id INT,
-    IN p_application_id INT,
-    IN p_organization_name VARCHAR(100),
-    IN p_applicant_user_id VARCHAR(200),
-    IN p_program_id INT
-)
-BEGIN
-    DECLARE v_applicant_name VARCHAR(101);
-    DECLARE v_program_name VARCHAR(100);
-    DECLARE v_admin_emails JSON;
-    
-    -- Get applicant name
-    SELECT CONCAT(f_name, ' ', l_name) INTO v_applicant_name
-    FROM tbl_user
-    WHERE user_id = p_applicant_user_id;
-    
-    -- Get program name
-    SELECT name INTO v_program_name
-    FROM tbl_program
-    WHERE program_id = p_program_id;
-    
-    -- Get admin emails (users with role_id = 3)
-    SELECT JSON_ARRAYAGG(email) INTO v_admin_emails
-    FROM tbl_user
-    WHERE role_id = 3 AND status = 'Active';
-    
-    -- Create notification
-    CALL CreateNotification(
-        'New Organization Application',
-        CONCAT('A new organization application has been submitted for "', p_organization_name, '" by ', v_applicant_name, ' from ', v_program_name, ' program. Please review the application for approval.'),
-        'organization',
-        p_organization_id,
-        p_applicant_user_id,
-        v_admin_emails,
-        'application_submitted'
-    );
-    
-    -- Log the event using LogAction
-    CALL LogAction(
-        (SELECT email FROM tbl_user WHERE user_id = p_applicant_user_id),
-        CONCAT('ORGANIZATION_APPLICATION_SUBMITTED: ', p_organization_name),
-        'APPLICATION',
-        CONCAT('{"organization_name":"', p_organization_name, '","program":"', v_program_name, '","application_id":', p_application_id, '}'),
-        NULL,
-        'organization_application_log'
-    );
-END$$
-DELIMITER ;
-
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE NotifyNewEventProposal(
     IN p_event_id INT,
@@ -8737,25 +8831,31 @@ BEGIN
     FROM tbl_user
     WHERE role_id = 3 AND status = 'Active';
     
-    -- Create notification
+    -- Create user-friendly notification
     CALL CreateNotification(
-        'New Event Proposal',
-        CONCAT('A new event proposal "', p_event_title, '" has been submitted by ', v_applicant_name, ' from ', p_organization_name, '. Please review the proposal for approval.'),
+        CONCAT('Event Proposal: "', p_event_title, '"'),
+        CONCAT(p_organization_name, ' has submitted a proposal for their upcoming event "', p_event_title, '". Submitted by ', v_applicant_name, '. Please review the proposal for approval.'),
         'event',
         p_event_id,
         p_applicant_user_id,
         v_admin_emails,
-        'proposal_submitted'
+        'event_proposal_pending'
     );
     
-    -- Log the event using LogAction
+    -- Log with user-friendly message
     CALL LogAction(
         (SELECT email FROM tbl_user WHERE user_id = p_applicant_user_id),
-        CONCAT('EVENT_PROPOSAL_SUBMITTED: ', p_event_title),
-        'APPLICATION',
-        CONCAT('{"event_title":"', p_event_title, '","organization":"', p_organization_name, '","event_application_id":', p_event_application_id, '}'),
-        NULL,
-        'event_proposal_log'
+        CONCAT('Submitted event proposal: "', p_event_title, '" for ', p_organization_name),
+        'Event Proposals',
+        JSON_OBJECT(
+            'event_title', p_event_title,
+            'organization', p_organization_name,
+            'event_application_id', p_event_application_id,
+            'proposer', v_applicant_name,
+            'action', 'Submitted event proposal for administrative review'
+        ),
+        CONCAT('/events/proposals/', p_event_application_id),
+        'event_proposal_documents'
     );
 END$$
 DELIMITER ;
