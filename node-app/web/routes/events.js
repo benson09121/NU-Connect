@@ -29,12 +29,12 @@ router.post('/events', middleware.validateAzureJWT, middleware.hasPermission("MA
 router.post(
   '/events-SDAO',
   middleware.validateAzureJWT,
-  middleware.hasPermission("CREATE_EVENT"),
+  middleware.hasPermission("CREATE_SDAO_EVENT"),
   eventController.createEvent
 );
 router.get('/events/getEventPublicationImage', middleware.validateAzureJWT, middleware.hasPermission("VIEW_EVENT"), eventController.getEventPublicationImage);
 router.get('/events', middleware.validateAzureJWT, middleware.hasPermission("VIEW_EVENT"), eventController.getEvents);
-router.get('/events/check-event-title', middleware.validateAzureJWT, middleware.hasPermission("CREATE_EVENT"), eventController.checkEventTitle);
+router.get('/events/check-event-title', middleware.validateAzureJWT, middleware.hasPermission(["CREATE_EVENT", "CREATE_SDAO_EVENT"]), eventController.checkEventTitle);
 router.get('/events/evaluation-questions', middleware.validateAzureJWT, middleware.hasPermission("VIEW_EVENT"), eventController.getAllEvaluationQuestions);
 router.get('/events/add-event-status', middleware.validateAzureJWT, eventController.getaddEventStatus);
 router.get('/event-requirements', middleware.validateAzureJWT, middleware.hasPermission(["CREATE_EVENT","CREATE_SDAO_EVENT"]),eventController.getEventRequirements);
