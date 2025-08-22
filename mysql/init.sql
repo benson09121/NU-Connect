@@ -2544,7 +2544,8 @@ BEGIN
     SELECT JSON_ARRAYAGG(u.email) INTO v_approver_emails
     FROM tbl_approval_process ap
     JOIN tbl_user u ON ap.approver_id = u.user_id
-    WHERE ap.organization_id = v_org_id 
+    JOIN tbl_application a ON ap.application_id = a.application_id
+    WHERE a.organization_id = v_org_id
     AND ap.period_id = v_period_id
     AND ap.status = 'Pending';
 
@@ -8483,11 +8484,12 @@ BEGIN
     DECLARE v_title VARCHAR(255);
     DECLARE v_message TEXT;
     DECLARE v_url VARCHAR(255);
-    DECLARE v_notification_id INT;
     DECLARE v_application_type ENUM('new','renewal');
     DECLARE v_total_steps INT DEFAULT 0;
     DECLARE v_completed_steps INT DEFAULT 0;
     DECLARE v_remaining_steps INT DEFAULT 0;
+    DECLARE v_adviser_id VARCHAR(200);
+    DECLARE v_recipient_emails JSON;
 
     /* Context */
     SELECT a.status,
@@ -8509,7 +8511,7 @@ BEGIN
     FROM tbl_approval_process
     WHERE approval_id = p_approval_id;
 
-    /* Step metrics (via mapping table) */
+    /* Step metrics */
     SELECT COUNT(*) INTO v_total_steps
     FROM tbl_application_approval
     WHERE application_id = p_application_id;
@@ -8525,11 +8527,30 @@ BEGIN
     /* Frontend URL (org-name slug) */
     SET v_url = CONCAT('/organizations/app-details/', v_org_name);
 
+    /* Adviser */
+    SELECT adviser_id INTO v_adviser_id FROM tbl_organization WHERE organization_id = v_organization_id;
+
+    /* Recipients: applicant, adviser, all approvers for this application */
+    SELECT JSON_ARRAYAGG(email) INTO v_recipient_emails
+    FROM (
+        SELECT u.email
+        FROM tbl_user u
+        WHERE u.user_id IN (
+            v_applicant_user_id,
+            v_adviser_id
+        )
+        UNION
+        SELECT u.email
+        FROM tbl_approval_process ap
+        JOIN tbl_user u ON ap.approver_id = u.user_id
+        WHERE ap.application_id = p_application_id
+    ) AS recipients;
+
     /* Build notification text */
     IF LOWER(v_application_status) = 'approved' THEN
         SET v_title = CONCAT('Application Fully Approved: ', v_org_name);
         SET v_message = CONCAT(
-            'The ', v_application_type,
+            'Congratulations! The ', v_application_type,
             ' application for ', v_org_name,
             ' has completed all approval steps (', v_total_steps, ').'
         );
@@ -8537,14 +8558,15 @@ BEGIN
         SET v_title = CONCAT('Step ', v_step, ' Approved: ', v_org_name);
         SET v_message = CONCAT(
             'Step ', v_step, ' of ', v_total_steps,
-            ' approved. ', v_remaining_steps,
-            ' step(s) remaining.'
+            ' for ', v_org_name, ' has been approved. ',
+            v_remaining_steps, ' step(s) remaining in the approval process.'
         );
     ELSEIF v_step_status = 'Rejected' OR LOWER(v_application_status) = 'rejected' THEN
         SET v_title = CONCAT('Application Rejected: ', v_org_name);
         SET v_message = CONCAT(
-            'The application was rejected at step ', v_step,
-            ' (', v_application_type, ').'
+            'The application for ', v_org_name,
+            ' was rejected at step ', v_step,
+            ' (', v_application_type, '). Please review the comments for details.'
         );
     ELSE
         SET v_title = CONCAT('Application Update: ', v_org_name);
@@ -8554,38 +8576,35 @@ BEGIN
         );
     END IF;
 
-    /* Insert notification */
-    INSERT INTO tbl_notification (
-        sender_id,
-        entity_type,
-        entity_id,
-        title,
-        message,
-        url
-    ) VALUES (
-        v_approver_id,
-        'approval',
-        p_application_id,
-        v_title,
-        v_message,
-        v_url
-    );
-    SET v_notification_id = LAST_INSERT_ID();
+    /* Send notification */
+    IF v_recipient_emails IS NOT NULL THEN
+        CALL CreateNotification(
+            v_title,
+            v_message,
+            'organization',
+            v_organization_id,
+            v_approver_id,
+            v_recipient_emails,
+            'application_approval_update'
+        );
+    END IF;
 
-    /* Recipients: applicant, adviser, all approvers */
-    INSERT INTO tbl_notification_recipient (notification_id, recipient_type, recipient_id)
-    SELECT v_notification_id, 'user', rid
-    FROM (
-        SELECT v_applicant_user_id AS rid
-        UNION
-        SELECT adviser_id FROM tbl_organization WHERE organization_id = v_organization_id
-        UNION
-        SELECT approver_id
-          FROM tbl_approval_process ap
-          JOIN tbl_application_approval aa ON ap.approval_id = aa.approval_id
-         WHERE aa.application_id = p_application_id
-    ) r
-    WHERE rid IS NOT NULL;
+    /* Log the action */
+    CALL LogAction(
+        (SELECT email FROM tbl_user WHERE user_id = v_approver_id LIMIT 1),
+        CONCAT('Approval step updated for ', v_org_name, ': ', v_title),
+        'Organization Application Approval',
+        JSON_OBJECT(
+            'application_id', p_application_id,
+            'organization_id', v_organization_id,
+            'step', v_step,
+            'status', v_application_status,
+            'step_status', v_step_status,
+            'title', v_title
+        ),
+        v_url,
+        NULL
+    );
 END $$
 DELIMITER ;
 
