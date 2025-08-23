@@ -1,5 +1,15 @@
 const pool = require('../../config/db');
 
+function firstRowFromSP(rows) {
+  if (rows == null) return null;
+  // rows is usually an array where rows[0] is the first result set (an array of rows)
+  if (Array.isArray(rows)) {
+    if (Array.isArray(rows[0])) return rows[0][0] || null; // single-row resultset
+    return rows[0] || null; // defensive fallback
+  }
+  return rows;
+}
+
 async function createTransaction(data){
   const conn = await pool.getConnection();
   try{
@@ -23,13 +33,7 @@ async function createTransaction(data){
       reference_doc
     } = data;
 
-    // ORDER MUST MATCH PROCEDURE (17 args)
-    // CreateTransaction(
-    //  user_email, payer_name, payee_name, transaction_type_code,
-    //  payment_type_code, payment_description, amount, status,
-    //  transaction_date, proof_image, meta, event_id,
-    //  payer_name_override, org_id, cycle_number, expense_category, reference_doc)
-    const [result] = await conn.query(
+    const [rows] = await conn.query(
       'CALL CreateTransaction(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);',
       [
         user_email || null,
@@ -51,8 +55,7 @@ async function createTransaction(data){
         reference_doc || null
       ]
     );
-    // mysql2 CALL returns [ [rows], meta ]
-    return result[0];
+    return firstRowFromSP(rows);
   } finally {
     conn.release();
   }
@@ -95,7 +98,7 @@ async function updateTransaction(data){
         reference_doc ?? null
       ]
     );
-    return rows[0];
+    return firstRowFromSP(rows);
   } finally { conn.release(); }
 }
 
@@ -106,7 +109,7 @@ async function archiveTransaction({ transaction_id, user_email, reason, meta }){
       'CALL ArchiveTransaction(?,?,?,?);',
       [transaction_id, user_email, reason || 'No reason provided', meta ? JSON.stringify(meta) : null]
     );
-    return rows[0];
+    return firstRowFromSP(rows);
   } finally { conn.release(); }
 }
 
@@ -117,7 +120,7 @@ async function unarchiveTransaction({ transaction_id, user_email, meta }){
       'CALL UnarchiveTransaction(?,?,?);',
       [transaction_id, user_email, meta ? JSON.stringify(meta) : null]
     );
-    return rows[0];
+    return firstRowFromSP(rows);
   } finally { conn.release(); }
 }
 
@@ -125,7 +128,7 @@ async function getTransaction(id){
   const conn = await pool.getConnection();
   try{
     const [rows] = await conn.query('CALL GetTransaction(?);',[id]);
-    return rows[0];
+    return firstRowFromSP(rows);
   } finally { conn.release(); }
 }
 
@@ -151,7 +154,8 @@ async function getTransactions(filters){
         transaction_type_code || null
       ]
     );
-    return rows[0];
+    // list API returns array of rows (keep as array)
+    return rows[0] || rows || [];
   } finally { conn.release(); }
 }
 
@@ -159,7 +163,7 @@ async function getTransactionTypes(){
   const conn = await pool.getConnection();
   try{
     const [rows] = await conn.query('CALL GetTransactionTypes();');
-    return rows[0];
+    return rows[0] || rows || [];
   } finally { conn.release(); }
 }
 
@@ -167,7 +171,7 @@ async function getPaymentTypes(){
   const conn = await pool.getConnection();
   try{
     const [rows] = await conn.query('CALL GetPaymentTypes();');
-    return rows[0];
+    return rows[0] || rows || [];
   } finally { conn.release(); }
 }
 

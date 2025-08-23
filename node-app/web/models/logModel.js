@@ -7,7 +7,39 @@ async function getLogs({ user_id = null, type = null, start_date = null, end_dat
             'CALL GetLogs(?, ?, ?, ?);',
             [user_id, type, start_date, end_date]
         );
-        return rows[0]; // Only the first result set contains the logs
+        // rows may be nested arrays from CALL; first resultset is rows[0]
+        return (Array.isArray(rows) && Array.isArray(rows[0])) ? rows[0] : rows[0] || [];
+    } finally {
+        connection.release();
+    }
+}
+
+async function getSystemCounts() {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetSystemCounts();');
+        return (Array.isArray(rows) && Array.isArray(rows[0])) ? rows[0][0] : rows[0] || {};
+    } finally {
+        connection.release();
+    }
+}
+
+// New: wrapper to call LogAction stored procedure
+async function createLog(p_user_email, p_action, p_type, p_meta_data = null, p_redirect_url = null, p_file_path = null) {
+    const connection = await pool.getConnection();
+    try {
+        await connection.query(
+            'CALL LogAction(?, ?, ?, ?, ?, ?);',
+            [
+                p_user_email,
+                p_action,
+                p_type,
+                p_meta_data ? JSON.stringify(p_meta_data) : null,
+                p_redirect_url,
+                p_file_path
+            ]
+        );
+        return true;
     } finally {
         connection.release();
     }
@@ -15,4 +47,6 @@ async function getLogs({ user_id = null, type = null, start_date = null, end_dat
 
 module.exports = {
     getLogs,
+    getSystemCounts,
+    createLog
 };
