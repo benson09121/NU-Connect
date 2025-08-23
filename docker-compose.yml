@@ -28,6 +28,7 @@ services:
       - /opt/certificates/generated:/app/certificates/generated
       - /opt/requirements:/app/requirements
       - /opt/organizations:/app/organizations
+      - /opt/applications:/app/applications
     networks:
       - my-network
     ports:
@@ -53,6 +54,7 @@ services:
       - /opt/certificates/templates:/usr/share/nginx/html/certificates/templates
       - /opt/requirements:/usr/share/nginx/html/requirements
       - /opt/organizations:/usr/share/nginx/html/organizations
+      - /opt/applications:/usr/share/nginx/html/applications
     ports:
       - "8080:80"
     networks:

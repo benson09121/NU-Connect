@@ -131,13 +131,17 @@ async function createOrganizationApplication(req, res) {
             req.user.user_id
         );
 
-        const orgDir = path.join('/app/organizations', dbResult[0].directory_name, String(dbResult[0].cycle_number));
-        const logoDir = path.join(orgDir, 'logo');
-        const requirementsDir = path.join(orgDir, 'requirements');
+        // New folder structure: /apps/applications/{app_id}/
+        console.log('dbResult[0]:', dbResult[0]);
+        const appId = dbResult[0].application_id;
+        console.log(`Creating directories for application ID: ${appId}`);
+        const appDir = path.join('/app/applications', String(appId));
+        const logoDir = path.join(appDir, 'logo');
+        const requirementsDir = path.join(appDir, 'requirements');
 
         // Only create each directory once
-        if (!fs.existsSync(orgDir)) {
-            fs.mkdirSync(orgDir, { recursive: true });
+        if (!fs.existsSync(appDir)) {
+            fs.mkdirSync(appDir, { recursive: true });
         }
         if (!fs.existsSync(logoDir)) {
             fs.mkdirSync(logoDir, { recursive: true });
@@ -145,7 +149,7 @@ async function createOrganizationApplication(req, res) {
         if (!fs.existsSync(requirementsDir)) {
             fs.mkdirSync(requirementsDir, { recursive: true });
         }
-
+        console.log(dbResult[0].logo_path);
         const logoFilename = path.basename(dbResult[0].logo_path);
 
         // File write logic with error handling
@@ -175,7 +179,7 @@ async function createOrganizationApplication(req, res) {
             }
         }
 
-        const result = await organizationsModel.getApplication(dbResult[0].application_id);
+        const result = await organizationsModel.getApplication(appId);
 
         publishToChannel('organization-applications', {
             operation: 'CREATE',
@@ -184,7 +188,7 @@ async function createOrganizationApplication(req, res) {
 
         // Initiate approval process with enhanced logging
         try {
-            await organizationsModel.initiateApprovalProcess(dbResult[0].application_id, req.user.email);
+            await organizationsModel.initiateApprovalProcess(appId, req.user.email);
         } catch (approvalError) {
             console.error('Failed to initiate approval process:', approvalError);
             // Don't fail the application creation if approval process fails
@@ -194,7 +198,7 @@ async function createOrganizationApplication(req, res) {
             message: 'Organization application submitted successfully',
             data: {
                 ...dbResult[0],
-                logo_url: `/organizations/${dbResult[0].directory_name}/logo/${logoFilename}`
+                logo_url: `/apps/applications/${appId}/logo/${logoFilename}`
             }
         });
     } catch (error) {
@@ -206,9 +210,9 @@ async function createOrganizationApplication(req, res) {
 
 async function getSpecificApplication(req, res) {
     try {
-        const { org_name } = req.query;
+        const { org_name, app_id } = req.query;
 
-        const application = await organizationsModel.getSpecificApplication(req.user.user_id, org_name);
+        const application = await organizationsModel.getSpecificApplication(req.user.user_id, org_name, app_id);
         if (application.length === 0) {
             return res.status(404).json({ message: 'No application found' });
         }
@@ -219,25 +223,21 @@ async function getSpecificApplication(req, res) {
         });
     }
 }
-
-async function getSpecificApplicationDetails(req, res) {
-    const { sessionId, org_name} = req.query;
-}
-
 async function approveApplication(req, res) {
     try {
-        const { approval_id, comments, organization_id, application_id, appName } = req.body;
+        const { approval_id, comments, application_id, organization_id, appName } = req.body;
         const approvalRow = await organizationsModel.approveApplication(
             approval_id,
             comments,
             organization_id,
             application_id
         );
+        console.log('Approval Row:', approvalRow);
         publishToChannel(`application_approval_timeline_${appName}`, {
             operation: 'UPDATE',
             data: approvalRow
         });
-        if (approvalRow[0]?.step === 5) {
+        if (approvalRow[0]?.step === approvalRow[0]?.last_step) {
             const update_data = await organizationsModel.getUpdateApplication(application_id);
             publishToChannel('organization-applications', {
                 operation: 'UPDATE',
@@ -1107,7 +1107,6 @@ module.exports = {
     addOrganizationMember,
     editOrganizationMember,
     archiveOrganizationMember,
-    getSpecificApplicationDetails,
     GetApprovalTimeline,
     getOrganizationOfficers,
     getOrganizationMembers,

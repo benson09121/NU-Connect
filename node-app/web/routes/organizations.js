@@ -22,7 +22,6 @@ router.get(
 );
 
 router.get('/getSpecificApplication', middleware.validateAzureJWT, organizationsController.getSpecificApplication);
-router.get('/getSpecificApplication_details', middleware.validateAzureJWT, organizationsController.getSpecificApplicationDetails);
 router.get('/org-applications', middleware.validateAzureJWT, organizationsController.getOrganizationApplications);
 router.post('/approve-application', middleware.validateAzureJWT, organizationsController.approveApplication);
 router.post('/reject-application', middleware.validateAzureJWT, organizationsController.rejectApplication);

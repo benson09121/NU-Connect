@@ -31,5 +31,10 @@ RUN mkdir -p /usr/share/nginx/html/requirements && \
     chown -R nginx:nginx /usr/share/nginx/html/requirements && \
     chmod -R 755 /usr/share/nginx/html/requirements
 
+# Applications directory setup
+RUN mkdir -p /usr/share/nginx/html/applications && \
+    chown -R nginx:nginx /usr/share/nginx/html/applications && \
+    chmod -R 755 /usr/share/nginx/html/applications
+
 # Ensure root directory permissions
 RUN chmod -R 755 /usr/share/nginx/html
