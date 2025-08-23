@@ -3953,7 +3953,7 @@ BEGIN
         CONCAT(u.f_name, ' ', u.l_name) AS full_name,
         u.profile_picture,
         l.timestamp,
-        l.action,
+        l.action_type AS action,       -- updated column name
         l.redirect_url,
         l.file_path,
         l.meta_data,
@@ -3966,7 +3966,7 @@ BEGIN
         AND (p_start_date IS NULL OR l.timestamp >= p_start_date)
         AND (p_end_date IS NULL OR l.timestamp <= p_end_date)
     ORDER BY l.timestamp DESC;
-END $$
+END$$
 DELIMITER ;
 
 DELIMITER $$
@@ -8264,14 +8264,6 @@ BEGIN
     INSERT INTO tbl_program (college_id, name, abbreviation)
     VALUES (p_college_id, p_name, p_abbreviation);
 
-    INSERT INTO tbl_logs (user_id, action, type, meta_data)
-    VALUES (
-        v_user_id,
-        CONCAT('Created program: ', p_name),
-        'program',
-        JSON_OBJECT('program_id', LAST_INSERT_ID(), 'name', p_name)
-    );
-
     SELECT * FROM tbl_program WHERE program_id = LAST_INSERT_ID();
 END$$
 DELIMITER ;
@@ -8304,14 +8296,6 @@ BEGIN
         abbreviation = p_abbreviation
     WHERE program_id = p_program_id;
 
-    INSERT INTO tbl_logs (user_id, action, type, meta_data)
-    VALUES (
-        v_user_id,
-        CONCAT('Updated program: ', p_name),
-        'program',
-        JSON_OBJECT('program_id', p_program_id, 'name', p_name)
-    );
-
     SELECT * FROM tbl_program WHERE program_id = p_program_id;
 END$$
 DELIMITER ;
@@ -8336,14 +8320,6 @@ BEGIN
     END IF;
 
     DELETE FROM tbl_program WHERE program_id = p_program_id;
-
-    INSERT INTO tbl_logs (user_id, action, type, meta_data)
-    VALUES (
-        v_user_id,
-        CONCAT('Deleted program: ', p_program_id),
-        'program',
-        JSON_OBJECT('program_id', p_program_id)
-    );
 END$$
 DELIMITER ;
 
@@ -9022,6 +8998,48 @@ BEGIN
         CONCAT('/events/proposals/', p_event_application_id),
         'event_proposal_documents'
     );
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetSystemCounts()
+BEGIN
+    DECLARE v_total_orgs INT DEFAULT 0;
+    DECLARE v_total_app_org INT DEFAULT 0;
+    DECLARE v_total_app_user INT DEFAULT 0;
+    DECLARE v_total_event_apps INT DEFAULT 0;
+    DECLARE v_total_upcoming_events INT DEFAULT 0;
+
+    -- Total organizations (all rows)
+    SELECT COUNT(*) INTO v_total_orgs
+    FROM tbl_organization;
+
+    -- Total organization applications (tbl_application)
+    SELECT COUNT(*) INTO v_total_app_org
+    FROM tbl_application;
+
+    -- Total user account/applications (tbl_user_application)
+    SELECT COUNT(*) INTO v_total_app_user
+    FROM tbl_user_application;
+
+    -- Total event proposals / applications (tbl_event_application)
+    SELECT COUNT(*) INTO v_total_event_apps
+    FROM tbl_event_application;
+
+    -- Total upcoming events (approved and starting today or later)
+    SELECT COUNT(*) INTO v_total_upcoming_events
+    FROM tbl_event
+    WHERE status = 'Approved'
+      AND start_date >= CURDATE();
+
+    -- Return a single row with all counts
+    SELECT
+        v_total_orgs AS total_organizations,
+        v_total_app_org AS total_organization_applications,
+        v_total_app_user AS total_user_applications,
+        (v_total_app_org + v_total_app_user) AS total_applications,
+        v_total_event_apps AS total_event_proposals,
+        v_total_upcoming_events AS total_upcoming_events;
 END$$
 DELIMITER ;
 

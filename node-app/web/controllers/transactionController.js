@@ -1,4 +1,15 @@
 const transactionModel = require('../models/transactionModel');
+const { publishToChannel, subscribeToChannel } = require('./sseController');
+
+function unwrapSPResult(row) {
+  if (row == null) return null;
+  if (Array.isArray(row)) {
+    // handle nested arrays from older model shapes
+    if (Array.isArray(row[0])) return row[0][0] || null;
+    return row[0] || null;
+  }
+  return row;
+}
 
 async function create(req,res){
   try{
@@ -29,7 +40,7 @@ async function create(req,res){
     if(transaction_type_code === 'EXPENSE' && !expense_category) missing.push('expense_category');
     if(missing.length) return res.status(400).json({ message:'Missing required fields', missing });
 
-    const row = await transactionModel.createTransaction({
+    const raw = await transactionModel.createTransaction({
       user_email: req.user?.email || null,
       payer_name: transaction_type_code === 'INCOME' ? (payer_name || null) : null,
       payee_name: transaction_type_code === 'EXPENSE' ? (payee_name || null) : null,
@@ -48,7 +59,22 @@ async function create(req,res){
       expense_category: transaction_type_code === 'EXPENSE' ? (expense_category || null) : null,
       reference_doc: transaction_type_code === 'EXPENSE' ? (reference_doc || null) : null
     });
-    res.status(201).json(row);
+
+    const payload = unwrapSPResult(raw);
+
+    // Publish real-time event
+    try {
+      publishToChannel('transactions', {
+        operation: 'CREATE',
+        data: payload,
+        user: req.user?.email || null,
+        timestamp: new Date()
+      });
+    } catch (pubErr) {
+      console.warn('[transactions.create] publish error:', pubErr.message);
+    }
+
+    res.status(201).json(payload);
   } catch(e){
     console.error('[transactions.create]', e);
     res.status(500).json({ message: e.sqlMessage || e.message });
@@ -71,7 +97,7 @@ async function update(req,res){
     } = req.body;
     if(!transaction_id) return res.status(400).json({ message:'transaction_id required' });
 
-    const row = await transactionModel.updateTransaction({
+    const raw = await transactionModel.updateTransaction({
       transaction_id,
       user_email: req.user.email,
       payment_description,
@@ -85,7 +111,22 @@ async function update(req,res){
       expense_category,
       reference_doc
     });
-    res.json(row);
+
+    const payload = unwrapSPResult(raw);
+
+    // Publish real-time event
+    try {
+      publishToChannel('transactions', {
+        operation: 'UPDATE',
+        data: payload,
+        user: req.user?.email || null,
+        timestamp: new Date()
+      });
+    } catch (pubErr) {
+      console.warn('[transactions.update] publish error:', pubErr.message);
+    }
+
+    res.json(payload);
   } catch(e){
     console.error('[transactions.update]', e);
     res.status(500).json({ message: e.sqlMessage || e.message });
@@ -96,13 +137,28 @@ async function archive(req,res){
   try{
     const { transaction_id, reason } = req.body;
     if(!transaction_id) return res.status(400).json({ message:'transaction_id required' });
-    const row = await transactionModel.archiveTransaction({
+    const raw = await transactionModel.archiveTransaction({
       transaction_id,
       user_email: req.user.email,
       reason,
       meta:{ origin:'web', action:'archive' }
     });
-    res.json(row);
+
+    const payload = unwrapSPResult(raw);
+
+    // Publish real-time event
+    try {
+      publishToChannel('transactions', {
+        operation: 'ARCHIVE',
+        data: payload,
+        user: req.user?.email || null,
+        timestamp: new Date()
+      });
+    } catch (pubErr) {
+      console.warn('[transactions.archive] publish error:', pubErr.message);
+    }
+
+    res.json(payload);
   } catch(e){
     console.error('[transactions.archive]', e);
     res.status(500).json({ message: e.sqlMessage || e.message });
@@ -113,12 +169,27 @@ async function unarchive(req,res){
   try{
     const { transaction_id } = req.body;
     if(!transaction_id) return res.status(400).json({ message:'transaction_id required' });
-    const row = await transactionModel.unarchiveTransaction({
+    const raw = await transactionModel.unarchiveTransaction({
       transaction_id,
       user_email: req.user.email,
       meta:{ origin:'web', action:'unarchive' }
     });
-    res.json(row);
+
+    const payload = unwrapSPResult(raw);
+
+    // Publish real-time event
+    try {
+      publishToChannel('transactions', {
+        operation: 'UNARCHIVE',
+        data: payload,
+        user: req.user?.email || null,
+        timestamp: new Date()
+      });
+    } catch (pubErr) {
+      console.warn('[transactions.unarchive] publish error:', pubErr.message);
+    }
+
+    res.json(payload);
   } catch(e){
     console.error('[transactions.unarchive]', e);
     res.status(500).json({ message: e.sqlMessage || e.message });
@@ -129,8 +200,15 @@ async function getOne(req,res){
   try{
     const { id } = req.params;
     const row = await transactionModel.getTransaction(id);
-    if(!row || row.length===0) return res.status(404).json({ message:'Not found' });
-    res.json(row[0]);
+    if(!row) return res.status(404).json({ message:'Not found' });
+
+    // Optionally subscribe to updates for this resource
+    const { sessionId } = req.query;
+    if (sessionId) {
+      subscribeToChannel(sessionId, `transactions:${id}`);
+    }
+
+    res.json(row);
   } catch(e){
     console.error('[transactions.getOne]', e);
     res.status(500).json({ message: e.sqlMessage || e.message });
@@ -145,8 +223,15 @@ async function list(req,res){
       include_archived,
       event_id,
       organization_id,
-      transaction_type_code
+      transaction_type_code,
+      sessionId
     } = req.query;
+
+    // Allow client to subscribe to general transactions channel
+    if (sessionId) {
+      subscribeToChannel(sessionId, 'transactions');
+    }
+
     const rows = await transactionModel.getTransactions({
       user_email: email || null,
       status: status || null,

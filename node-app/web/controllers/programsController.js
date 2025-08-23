@@ -1,4 +1,5 @@
 const programsModel = require('../models/programsModel');
+const logModel = require('../models/logModel');
 const { subscribeToChannel, publishToChannel } = require('./sseController');
 
 async function getAllPrograms(req, res) {
@@ -57,6 +58,27 @@ async function createProgram(req, res) {
             user: req.user?.email || email,
             timestamp: new Date()
         });
+
+        // Log the action centrally (uses LogAction SP)
+        try {
+            await logModel.createLog(
+                req.user?.email || email,                     // p_user_email
+                'Created program',                            // p_action (human friendly)
+                'program',                                    // p_type
+                { program_id: program?.program_id || null, name, abbreviation, college_id }, // p_meta_data
+                null,                                         // p_redirect_url
+                null                                          // p_file_path
+            );
+
+            // publish log to SSE channel
+            publishToChannel('logs', {
+                operation: 'CREATE',
+                data: { user: req.user?.email || email, action: 'Created program', meta: { program_id: program?.program_id || null } },
+                timestamp: new Date()
+            });
+        } catch (logErr) {
+            console.warn('[programs.createProgram] log error:', logErr.message);
+        }
         
         res.status(201).json({
             success: true,
@@ -83,6 +105,26 @@ async function updateProgram(req, res) {
             user: req.user?.email || email,
             timestamp: new Date()
         });
+
+        // Log the action centrally
+        try {
+            await logModel.createLog(
+                req.user?.email || email,
+                'Updated program',
+                'program',
+                { program_id, name, abbreviation, college_id },
+                null,
+                null
+            );
+
+            publishToChannel('logs', {
+                operation: 'UPDATE',
+                data: { user: req.user?.email || email, action: 'Updated program', meta: { program_id } },
+                timestamp: new Date()
+            });
+        } catch (logErr) {
+            console.warn('[programs.updateProgram] log error:', logErr.message);
+        }
         
         res.status(200).json({
             success: true,
@@ -109,6 +151,26 @@ async function deleteProgram(req, res) {
             user: req.user?.email || email,
             timestamp: new Date()
         });
+
+        // Log the action centrally
+        try {
+            await logModel.createLog(
+                req.user?.email || email,
+                'Deleted program',
+                'program',
+                { program_id },
+                null,
+                null
+            );
+
+            publishToChannel('logs', {
+                operation: 'DELETE',
+                data: { user: req.user?.email || email, action: 'Deleted program', meta: { program_id } },
+                timestamp: new Date()
+            });
+        } catch (logErr) {
+            console.warn('[programs.deleteProgram] log error:', logErr.message);
+        }
         
         res.status(200).json({
             success: true,
