@@ -16,10 +16,10 @@ async function createOrganizationApplication(organizations, executives, requirem
     }
 }
 
-async function getSpecificApplication(user_id, organization_name) {
+async function getSpecificApplication(user_id, organization_name, app_id) {
     const connection = await pool.getConnection();
     try {
-        const [rows] = await connection.query('CALL GetSpecificApplication(?, ?);', [user_id, organization_name]);
+        const [rows] = await connection.query('CALL GetSpecificApplication(?, ?, ?);', [user_id, organization_name, app_id]);
         return rows[0];
     }
     catch (error) {
@@ -34,6 +34,7 @@ async function getSpecificApplication(user_id, organization_name) {
 async function approveApplication(approval_id, comments, organization_id, application_id) {
     const connection = await pool.getConnection();
     try {
+        
         // returns approval row
         const [rows] = await connection.query(
             'CALL ApproveApplication(?, ?, ?, ?);',
