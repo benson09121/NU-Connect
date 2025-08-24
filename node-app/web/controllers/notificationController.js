@@ -63,7 +63,7 @@ async function markNotificationRead(req, res) {
 
 async function createNotification(req, res) {
     try {
-        const { title, message, entity_type, entity_id, recipient_emails, action } = req.body;
+        const { title, message, url = null, entity_type, entity_id, recipient_emails, action } = req.body;
         
         if (!title || !message || !entity_type || !recipient_emails) {
             return res.status(400).json({ 
@@ -75,6 +75,7 @@ async function createNotification(req, res) {
         const result = await notificationModel.createNotification(
             title,
             message,
+            url || null,                          // pass nullable url
             entity_type,
             entity_id || null,
             req.user.user_id,
@@ -82,22 +83,22 @@ async function createNotification(req, res) {
             action || 'manual'
         );
 
-        // Publish to recipients
-        if (Array.isArray(recipient_emails)) {
-            recipient_emails.forEach(email => {
-                publishToChannel(`notifications_${email}`, {
-                    operation: 'CREATE',
-                    data: { 
-                        title,
-                        message,
-                        entity_type,
-                        entity_id,
-                        action,
-                        created_at: new Date()
-                    }
-                });
+        // Publish to recipients (include url in SSE payload)
+        const recipients = Array.isArray(recipient_emails) ? recipient_emails : [recipient_emails];
+        recipients.forEach(email => {
+            publishToChannel(`notifications_${email}`, {
+                operation: 'CREATE',
+                data: { 
+                    title,
+                    message,
+                    entity_type,
+                    entity_id,
+                    action,
+                    url: url || null,
+                    created_at: new Date()
+                }
             });
-        }
+        });
 
         res.status(201).json({
             success: true,
@@ -105,6 +106,7 @@ async function createNotification(req, res) {
             data: result
         });
     } catch (error) {
+        console.error('[notification.createNotification]', error);
         res.status(500).json({
             success: false,
             error: error.message || "An error occurred while creating notification."
