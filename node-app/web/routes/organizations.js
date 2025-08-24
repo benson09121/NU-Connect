@@ -27,6 +27,7 @@ router.post('/approve-application', middleware.validateAzureJWT, organizationsCo
 router.post('/reject-application', middleware.validateAzureJWT, organizationsController.rejectApplication);
 router.get('/getOrganizationRequirement', middleware.validateAzureJWT, organizationsController.getOrganizationRequirement);
 router.get('/getOrganizationLogo', middleware.validateAzureJWT, organizationsController.getOrganizationLogo);
+router.get('/getOrganizationLogoApplication', middleware.validateAzureJWT, organizationsController.getOrganizationLogoApplication);
 router.get('/check-org-name', middleware.validateAzureJWT, organizationsController.checkOrganizationName);
 router.post('/check-org-emails', middleware.validateAzureJWT, organizationsController.checkOrganizationEmails);
 router.post('/archive-organization', middleware.validateAzureJWT, middleware.hasPermission("ARCHIVE_ORGANIZATION"), organizationsController.archiveOrganization);

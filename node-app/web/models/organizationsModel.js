@@ -49,13 +49,13 @@ async function approveApplication(approval_id, comments, organization_id, applic
     }
 }
 
-async function rejectApplication(approval_id, comments, organization_id, application_id) {
+async function rejectApplication(approval_id, comments, application_id) {
     const connection = await pool.getConnection();
     try {
         // proc signature: (p_application_id, p_approval_id, p_organization_id, p_comment)
         const [rows] = await connection.query(
-            'CALL RejectApplication(?, ?, ?, ?);',
-            [application_id, approval_id, organization_id, comments]
+            'CALL RejectApplication(?, ?, ?);',
+            [application_id, approval_id,comments]
         );
         return rows[0];
     } catch (error) {
