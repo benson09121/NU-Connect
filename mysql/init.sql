@@ -1186,7 +1186,7 @@ DELIMITER ;
 DROP PROCEDURE IF EXISTS GetAffectedUsers;
 
 DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE GetUserEventRegistrations(IN p_user_id VARCHAR(200))
+CREATE DEFINER='admin'@'%' PROCEDURE    EventRegistrations(IN p_user_id VARCHAR(200))
 BEGIN
     SELECT 
         ea.attendance_id,
@@ -1641,7 +1641,7 @@ BEGIN
             )
             FROM tbl_application a
             JOIN tbl_organization_version v ON a.org_version_id = v.org_version_id
-            WHERE a.applicant_user_id = u.user_id AND a.status = 'Pending'
+            WHERE a.applicant_user_id = u.user_id AND (a.status = 'Pending' OR a.status = 'Rejected') 
             ORDER BY a.created_at DESC
             LIMIT 1
         )
@@ -2683,15 +2683,7 @@ BEGIN
         RESIGNAL;
     END;
 
-    -- Safely interpret boolean-ish JSON value for is_resubmission
-    SET @__is_resub = JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.is_resubmission'));
-    SET v_is_resubmission = IF(@__is_resub IN ('1','true','TRUE'), 1, 0);
-
-    -- If this is a resubmission, route to separate procedure and return
-    IF v_is_resubmission = 1 THEN
-        CALL ResubmitOrganizationApplication(p_organization, p_executives, p_requirements, p_user_id);
-        -- assume resubmission procedure handles commit/return; exit early
-    END IF;
+    -- Always create a new organization and application. Do not route to resubmission logic here.
 
     -- Determine fee type safely
     SET @__fee = JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.fee_duration'));
@@ -3040,7 +3032,7 @@ CREATE DEFINER='admin'@'%' PROCEDURE GetApplication(
 )
 BEGIN
 SELECT
-    app.application_id,
+    app.application_id as id,
     app.org_version_id,
     ov.name AS organization_name,
     ov.logo_path AS organization_logo,
@@ -3336,14 +3328,21 @@ BEGIN
                 'programs', COALESCE(
                     (SELECT JSON_ARRAYAGG(
                         JSON_OBJECT(
-                            'id', prog.program_id,
-                            'name', prog.name,
-                            'abbreviation', prog.abbreviation
+                            'id', p.program_id,
+                            'name', p.name,
+                            'abbreviation', p.abbreviation
                         )
                     )
-                    FROM tbl_organization_version_course ovc
-                    JOIN tbl_program prog ON ovc.program_id = prog.program_id
-                    WHERE ovc.org_version_id = v.org_version_id),
+                    FROM (
+                        SELECT prog.program_id, prog.name, prog.abbreviation
+                        FROM tbl_organization_version_course ovc
+                        JOIN tbl_program prog ON ovc.program_id = prog.program_id
+                        WHERE ovc.org_version_id = v.org_version_id
+                        UNION
+                        SELECT bp.program_id, bp.name, bp.abbreviation
+                        FROM tbl_program bp
+                        WHERE bp.program_id = v.base_program_id
+                    ) p),
                     JSON_ARRAY()
                 )
             )
@@ -3698,7 +3697,7 @@ BEGIN
     -- Return a JSON result combining approval info and organization (if final step)
     SELECT JSON_OBJECT(
         'application', JSON_OBJECT(
-            'approval_id', ap.approval_id,
+            'id', ap.approval_id,
             'step', ap.step,
             'role_name', r.role_name,
             'status', ap.status,
@@ -3746,7 +3745,6 @@ DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE RejectApplication(
     IN p_application_id INT,
     IN p_approval_id INT,
-    IN p_organization_id INT,
     IN p_comment TEXT
 )
 BEGIN
@@ -3763,14 +3761,10 @@ BEGIN
         updated_at = CURRENT_TIMESTAMP
     WHERE application_id = p_application_id;
 
-    UPDATE tbl_organization
-    SET status = 'Rejected'
-    WHERE organization_id = p_organization_id;
-
     COMMIT;
 
-    -- NEW: notify stakeholders
-    CALL NotifyApplicationApprovalChange(p_approval_id, p_application_id);
+    -- -- NEW: notify stakeholders
+    -- CALL NotifyApplicationApprovalChange(p_approval_id, p_application_id);
 
     SELECT 
         ap.approval_id as id,

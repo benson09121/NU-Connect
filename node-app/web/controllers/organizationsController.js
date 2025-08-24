@@ -233,16 +233,39 @@ async function approveApplication(req, res) {
             application_id
         );
         console.log('Approval Row:', approvalRow);
-        publishToChannel(`application_approval_timeline_${appName}`, {
+        const result = approvalRow[0]?.result;
+        publishToChannel(`application_approval_timeline_${appName}_${application_id}`, {
             operation: 'UPDATE',
-            data: approvalRow
+            data: result.application
         });
-        if (approvalRow[0]?.step === approvalRow[0]?.last_step) {
+        if (result.application.step === result?.other.last_step) {
             const update_data = await organizationsModel.getUpdateApplication(application_id);
             publishToChannel('organization-applications', {
                 operation: 'UPDATE',
                 data: update_data
             });
+
+            // Copy logo file to organization directory
+            try {
+                const appId = application_id;
+                const orgId = result?.organization?.id || organization_id;
+                const orgVersionId = result?.other?.org_version_id;
+                const logoName = result?.other?.organization_logo || result?.organization?.logo;
+                if (appId && orgId && orgVersionId && logoName) {
+                    const srcLogoPath = path.join('/app/applications', String(appId), 'logo', logoName);
+                    const destLogoDir = path.join('/app/organizations', String(orgId), String(orgVersionId), 'logo');
+                    const destLogoPath = path.join(destLogoDir, logoName);
+                    if (!fs.existsSync(destLogoDir)) {
+                        fs.mkdirSync(destLogoDir, { recursive: true });
+                    }
+                    fs.copyFileSync(srcLogoPath, destLogoPath);
+                    console.log(`Logo copied from ${srcLogoPath} to ${destLogoPath}`);
+                } else {
+                    console.warn('Missing required info for logo copy:', { appId, orgId, orgVersionId, logoName });
+                }
+            } catch (copyErr) {
+                console.error('Error copying logo file:', copyErr);
+            }
         }
         res.json({
             message: 'Application approved successfully',
@@ -257,14 +280,13 @@ async function approveApplication(req, res) {
 
 async function rejectApplication(req, res) {
     try {
-        const { approval_id, comments, organization_id, application_id, appName } = req.body;
+        const { approval_id, comments, application_id, appName } = req.body;
         const approvalRow = await organizationsModel.rejectApplication(
             approval_id,
             comments,
-            organization_id,
             application_id
         );
-        publishToChannel(`application_approval_timeline_${appName}`, {
+        publishToChannel(`application_approval_timeline_${appName}_${application_id}`, {
             operation: 'UPDATE',
             data: approvalRow
         });
@@ -281,13 +303,11 @@ async function rejectApplication(req, res) {
 
 async function getOrganizationRequirement(req, res) {
     const requirement_name  = req.query.requirement_name;
-    const cycle_number = req.query.cycle_number;
-    let org_name = req.query.org_name;
-    org_name = encodeURIComponent(org_name);
-    
+    const app_id = req.query.app_id;
+
     try {
         res.header('Access-Control-Allow-Origin', 'http://localhost:5173');
-        res.setHeader('X-Accel-Redirect', `/protected-organization-requirements/${org_name}/${cycle_number}/requirements/${requirement_name}`);
+        res.setHeader('X-Accel-Redirect', `/protected-applications/${app_id}/requirements/${requirement_name}`);
         const match = requirement_name.match(/requirement-(\d+)-(.+)/);
         const downloadName = match[0];
         res.setHeader('Content-Disposition', `attachment; filename="${downloadName}"`);
@@ -310,6 +330,24 @@ async function getOrganizationLogo(req, res) {
         res.setHeader('Content-Disposition', `inline; filename="${logo_name}"`);
         // X-Accel-Redirect for Nginx internal serving
         res.setHeader('X-Accel-Redirect', `/protected-organization-requirements/${org_name_encoded}/${cycle_number}/logo/${logo_name}`);
+        res.end();
+    } catch (error) {
+        res.status(500).json({
+            error: error.message || "An error occurred while fetching the logo.",
+        });
+    }
+}
+
+async function getOrganizationLogoApplication(req, res){
+    let {app_id, logo_name, org_name } = req.query;
+    const org_name_encoded = encodeURIComponent(org_name);
+    const logo_name_encoded = encodeURIComponent(logo_name);
+    try {
+        res.header('Access-Control-Allow-Origin', 'http://localhost:5173');
+        // Set Content-Disposition so browser handles as image (inline) 
+        res.setHeader('Content-Disposition', `inline; filename="${org_name}_logo"`);
+        // X-Accel-Redirect for Nginx internal serving
+        res.setHeader('X-Accel-Redirect', `/protected-applications/${app_id}/logo/${logo_name}`);
         res.end();
     } catch (error) {
         res.status(500).json({
@@ -1115,5 +1153,6 @@ module.exports = {
     // Enhanced functions
     addApplicationPeriod,
     updateApplicationPeriod,
-    initiateApprovalProcess
+    initiateApprovalProcess,
+    getOrganizationLogoApplication
 };
