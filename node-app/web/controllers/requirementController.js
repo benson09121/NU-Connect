@@ -277,11 +277,21 @@ async function getActiveApplicationPeriod(req, res) {
 
 async function updateApplicationPeriod(req, res) {
     try {
-        const { start_date, end_date, start_time, end_time, period_id } = req.body;
-        
+        // Log body for debugging when frontend sends unexpected payload
+        console.log('[updateApplicationPeriod] req.body:', req.body);
+
+        // Accept either period_id or id from client
+        const period_id = req.body.period_id || req.body.id || req.body.periodId;
+        // Accept multiple possible field names for dates/times
+        const start_date = req.body.start_date || req.body.startDate || req.body.start;
+        const end_date = req.body.end_date || req.body.endDate || req.body.end;
+        const start_time = req.body.start_time || req.body.startTime || req.body.start_time;
+        const end_time = req.body.end_time || req.body.endTime || req.body.end_time;
+
         if (!start_date || !end_date || !start_time || !end_time || !period_id) {
-            return res.status(400).json({ 
-                error: "All fields (start_date, end_date, start_time, end_time, period_id) are required." 
+            return res.status(400).json({
+                error: "All fields (start_date, end_date, start_time, end_time, period_id) are required.",
+                received: { start_date, end_date, start_time, end_time, period_id }
             });
         }
 
@@ -300,6 +310,7 @@ async function updateApplicationPeriod(req, res) {
             data: result
         });
     } catch (error) {
+        console.error('[requirementController.updateApplicationPeriod] error:', error);
         res.status(500).json({
             success: false,
             error: error.message || "An error occurred while updating the application period."
@@ -358,38 +369,38 @@ async function terminateActiveApplicationPeriod(req, res) {
 async function addEventRequirement(req, res) {
     try {
         const { requirement_name, requirement_type } = req.body;
-        if (!req.files || !req.files.template) {
-            return res.status(400).json({ message: 'No file uploaded' });
+
+        // Accept optional file/template
+        let filename = null;
+        if (req.files && req.files.template) {
+            const uploadedFile = req.files.template;
+
+            // Ensure directory
+            const requirementsDir = '/app/requirements';
+            if (!fs.existsSync(requirementsDir)) fs.mkdirSync(requirementsDir, { recursive: true });
+
+            filename = `requirement-${Date.now()}-${uploadedFile.name}`;
+            const savePath = path.join(requirementsDir, filename);
+            try {
+                fs.writeFileSync(savePath, uploadedFile.data);
+            } catch (writeError) {
+                return res.status(500).json({ message: 'Error saving file', error: writeError.message });
+            }
         }
 
-        const uploadedFile = req.files.template;
-
-        // Save file to disk
-        const requirementsDir = '/app/requirements';
-        if (!fs.existsSync(requirementsDir)) {
-            fs.mkdirSync(requirementsDir, { recursive: true });
-        }
-        const filename = `requirement-${Date.now()}-${uploadedFile.name}`;
-        const savePath = path.join(requirementsDir, filename);
-
-        try {
-            fs.writeFileSync(savePath, uploadedFile.data);
-        } catch (writeError) {
-            return res.status(500).json({ message: 'Error saving file', error: writeError.message });
-        }
-
+        // Call model; filename may be null
         await requirementModel.addEventRequirement(requirement_name, requirement_type, filename, req.user.user_id);
-        res.status(201).json({ message: 'Requirement uploaded successfully' });
+        res.status(201).json({ message: 'Requirement created successfully' });
     } catch (err) {
-        console.log(err);
-        return res.status(500).json({ message: "Internal server error" });
+        console.error('[addEventRequirement] error:', err);
+        return res.status(500).json({ message: err.sqlMessage || err.message || "Internal server error" });
     }
 }
 
 async function batchUpdateEventRequirements(req, res) {
     try {
         const { add, update, delete: deleteItems, user_email } = req.body;
-        
+
         // Parse JSON strings if they come as strings
         const addItems = Array.isArray(add) ? add : JSON.parse(add || '[]');
         const updateItems = Array.isArray(update) ? update : JSON.parse(update || '[]');
@@ -407,47 +418,47 @@ async function batchUpdateEventRequirements(req, res) {
             deleted: []
         };
 
+        const requirementsDir = '/app/requirements';
+        if (!fs.existsSync(requirementsDir)) {
+            fs.mkdirSync(requirementsDir, { recursive: true });
+        }
+
         // Handle ADD operations
         for (let i = 0; i < addItems.length; i++) {
             const item = addItems[i];
             const fileKey = `add_file_${i}`;
-            
+            let filename = null;
+
             if (req.files && req.files[fileKey]) {
                 const uploadedFile = req.files[fileKey];
-                
-                // Save file to disk
-                const requirementsDir = '/app/requirements';
-                if (!fs.existsSync(requirementsDir)) {
-                    fs.mkdirSync(requirementsDir, { recursive: true });
-                }
-                
-                const filename = `requirement-${Date.now()}-${uploadedFile.name}`;
+                filename = `requirement-${Date.now()}-${uploadedFile.name}`;
                 const savePath = path.join(requirementsDir, filename);
-                
                 try {
                     fs.writeFileSync(savePath, uploadedFile.data);
                 } catch (writeError) {
-                    console.error('Error saving file:', writeError);
-                    continue; // Skip this item if file save fails
+                    console.error('Error saving file for ADD item:', writeError);
+                    // skip this add item on file save failure
+                    continue;
                 }
-                
-                // Add to database
+            } else if (item.file_path !== undefined && item.file_path !== null && item.file_path !== '') {
+                // client provided an existing file path to use
+                filename = item.file_path;
+            } else {
+                // no file provided; allow NULL
+                filename = null;
+            }
+
+            try {
                 const result = await requirementModel.addEventRequirement(
-                    item.requirement_name, 
-                    item.is_applicable_to, 
-                    filename, 
+                    item.requirement_name,
+                    item.is_applicable_to,
+                    filename,
                     user.user_id
                 );
-                results.added.push(result);
-            } else if (item.file_path) {
-                // Use existing file path (if updating with existing file)
-                const result = await requirementModel.addEventRequirement(
-                    item.requirement_name, 
-                    item.is_applicable_to, 
-                    item.file_path, 
-                    user.user_id
-                );
-                results.added.push(result);
+                results.added.push(Array.isArray(result) ? result[0] : result);
+            } catch (err) {
+                console.error('Error adding requirement item:', err);
+                continue;
             }
         }
 
@@ -455,53 +466,69 @@ async function batchUpdateEventRequirements(req, res) {
         for (let i = 0; i < updateItems.length; i++) {
             const item = updateItems[i];
             const fileKey = `update_file_${i}`;
-            
+
             // Get current requirement to check existing file
-            const [currentRequirement] = await requirementModel.getSpecificEventRequirement(item.requirement_id);
+            const specificArr = await requirementModel.getSpecificEventRequirement(item.requirement_id);
+            const currentRequirement = Array.isArray(specificArr) ? specificArr[0] : specificArr;
             if (!currentRequirement) {
+                console.warn('Update skipped: requirement not found', item.requirement_id);
                 continue; // Skip if requirement not found
             }
-            
-            let newFileName = currentRequirement.file_path;
-            
+
+            let p_file_path = null; // default: NULL => instruct SP to preserve existing file_path
+
             if (req.files && req.files[fileKey]) {
-                // New file uploaded
+                // New file uploaded: delete old and save new
                 const uploadedFile = req.files[fileKey];
-                
-                // Delete old file if it exists
+
                 if (currentRequirement.file_path) {
-                    const oldFilePath = path.join('/app/requirements', currentRequirement.file_path);
+                    const oldFilePath = path.join(requirementsDir, currentRequirement.file_path);
                     try {
-                        if (fs.existsSync(oldFilePath)) {
-                            fs.unlinkSync(oldFilePath);
-                        }
+                        if (fs.existsSync(oldFilePath)) fs.unlinkSync(oldFilePath);
                     } catch (fileErr) {
-                        console.error('Error deleting old file:', fileErr);
+                        console.error('Error deleting old file during update:', fileErr);
+                        // continue — we still attempt to save new file
                     }
                 }
-                
-                // Save new file
+
                 const filename = `requirement-${Date.now()}-${uploadedFile.name}`;
-                const savePath = path.join('/app/requirements', filename);
-                
+                const savePath = path.join(requirementsDir, filename);
                 try {
                     fs.writeFileSync(savePath, uploadedFile.data);
-                    newFileName = filename;
+                    p_file_path = filename; // pass filename so SP will update file_path
                 } catch (writeError) {
-                    console.error('Error saving new file:', writeError);
-                    continue; // Skip this update if file save fails
+                    console.error('Error saving new file for update:', writeError);
+                    continue; // skip this update if file save fails
                 }
+            } else if (Object.prototype.hasOwnProperty.call(item, 'file_path')) {
+                // Client explicitly provided file_path:
+                // - empty string -> explicit clear (SP treats '' => NULL)
+                // - non-empty string -> set to that value
+                if (item.file_path === '') {
+                    p_file_path = ''; // SP will convert '' => NULL
+                } else if (item.file_path === null) {
+                    p_file_path = null; // preserve existing
+                } else {
+                    p_file_path = item.file_path;
+                }
+            } else {
+                // No file info sent: keep existing file (pass NULL so SP preserves)
+                p_file_path = null;
             }
-            
-            // Update in database
-            const result = await requirementModel.updateEventRequirement(
-                item.requirement_id,
-                item.requirement_name,
-                item.is_applicable_to,
-                newFileName,
-                user.user_id
-            );
-            results.updated.push(result);
+
+            try {
+                const result = await requirementModel.updateEventRequirement(
+                    item.requirement_id,
+                    item.requirement_name,
+                    item.is_applicable_to,
+                    p_file_path,
+                    user.user_id
+                );
+                results.updated.push(Array.isArray(result) ? result[0] : result);
+            } catch (err) {
+                console.error('Error updating requirement item:', err);
+                continue;
+            }
         }
 
         // Handle DELETE (Archive) operations
@@ -512,14 +539,14 @@ async function batchUpdateEventRequirements(req, res) {
                     item.requirement_id,
                     user.user_id
                 );
-                results.deleted.push(result);
+                results.deleted.push(Array.isArray(result) ? result[0] : result);
             } catch (error) {
                 console.error('Error archiving requirement:', error);
                 continue; // Continue with other deletions
             }
         }
 
-        // Publish updates to SSE channels
+        // Publish updates to SSE channels (only if there are changes)
         if (results.added.length > 0) {
             publishToChannel('event_requirements', {
                 operation: 'BATCH_ADD',

@@ -47,19 +47,21 @@ async function markNotificationRead(notificationId, userId) {
     }
 }
 
-async function createNotification(title, message, entityType, entityId, senderId, recipientEmails, action) {
+async function createNotification(title, message, url = null, entityType, entityId, senderId, recipientEmails, action) {
     const connection = await pool.getConnection();
     try {
-        const [rows] = await connection.query('CALL CreateNotification(?, ?, ?, ?, ?, ?, ?)', [
+        const [rows] = await connection.query('CALL CreateNotification(?, ?, ?, ?, ?, ?, ?, ?)', [
             title,
             message,
+            url || null,
             entityType,
             entityId,
             senderId,
-            JSON.stringify(recipientEmails),
+            JSON.stringify(Array.isArray(recipientEmails) ? recipientEmails : [recipientEmails]),
             action
         ]);
-        return rows[0];
+        // normalize CALL result
+        return (Array.isArray(rows) && Array.isArray(rows[0])) ? rows[0][0] : rows[0] || {};
     } catch (error) {
         console.error('Error creating notification:', error);
         throw error;
@@ -71,7 +73,6 @@ async function createNotification(title, message, entityType, entityId, senderId
 async function notifyApplicationPeriodCreated(periodId, createdBy, startDate, endDate) {
     const connection = await pool.getConnection();
     try {
-        // Get admin emails
         const [adminUsers] = await connection.query(
             'SELECT JSON_ARRAYAGG(email) as emails FROM tbl_user WHERE role_id IN (3, 4) AND status = "Active"'
         );
@@ -81,6 +82,7 @@ async function notifyApplicationPeriodCreated(periodId, createdBy, startDate, en
             return await createNotification(
                 'New Application Period Created',
                 `A new application period has been created from ${startDate} to ${endDate}. Organizations can now submit applications during this period.`,
+                null,              // url not required here
                 'system',
                 periodId,
                 createdBy,
@@ -99,7 +101,6 @@ async function notifyApplicationPeriodCreated(periodId, createdBy, startDate, en
 async function notifyApplicationPeriodUpdated(periodId, updatedBy, startDate, endDate) {
     const connection = await pool.getConnection();
     try {
-        // Get admin emails
         const [adminUsers] = await connection.query(
             'SELECT JSON_ARRAYAGG(email) as emails FROM tbl_user WHERE role_id IN (3, 4) AND status = "Active"'
         );
@@ -109,6 +110,7 @@ async function notifyApplicationPeriodUpdated(periodId, updatedBy, startDate, en
             return await createNotification(
                 'Application Period Updated',
                 `Application period has been updated. New dates: ${startDate} to ${endDate}.`,
+                null,              // url not required here
                 'system',
                 periodId,
                 updatedBy,
@@ -127,20 +129,22 @@ async function notifyApplicationPeriodUpdated(periodId, updatedBy, startDate, en
 async function notifyApprovalProcessInitiated(applicationId, organizationId, organizationName, initiatedBy) {
     const connection = await pool.getConnection();
     try {
-        // Get pending approver emails for this application
+        // get pending approver emails for this application (use approval_process rows)
         const [approvers] = await connection.query(`
             SELECT JSON_ARRAYAGG(u.email) as emails
             FROM tbl_approval_process ap
             JOIN tbl_user u ON ap.approver_id = u.user_id
-            WHERE ap.organization_id = ? AND ap.status = 'Pending'
-        `, [organizationId]);
+            WHERE ap.application_id = ? AND ap.status = 'Pending'
+        `, [applicationId]);
         
         const approverEmails = approvers[0]?.emails ? JSON.parse(approvers[0].emails) : [];
         
         if (approverEmails.length > 0) {
+            const url = `/organizations/app-details/${applicationId}/${organizationName}`;
             return await createNotification(
-                'New Application Requires Approval',
+                `New Application Requires Approval`,
                 `Organization application for "${organizationName}" is pending your approval. Please review the application in the approval workflow.`,
+                url,                 // include approval URL
                 'organization',
                 organizationId,
                 initiatedBy,

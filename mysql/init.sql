@@ -861,6 +861,7 @@ DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE CreateNotification(
     IN p_title VARCHAR(255),
     IN p_message TEXT,
+    IN p_url VARCHAR(255), -- can be NULL
     IN p_entity_type ENUM('user', 'organization', 'event', 'transaction', 'system', 'approval', 'general'),
     IN p_entity_id INT,
     IN p_sender_id VARCHAR(200),
@@ -868,61 +869,63 @@ CREATE DEFINER='admin'@'%' PROCEDURE CreateNotification(
     IN p_action VARCHAR(100)
 )
 BEGIN
-    DECLARE v_notification_id INT;
-    DECLARE v_recipient_count INT;
+    DECLARE v_notification_id INT DEFAULT 0;
+    DECLARE v_recipient_count INT DEFAULT 0;
     DECLARE v_email VARCHAR(100);
     DECLARE i INT DEFAULT 0;
-    
+
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
         ROLLBACK;
         RESIGNAL;
     END;
-    
+
     START TRANSACTION;
-    
-    -- Create notification record
+
     INSERT INTO tbl_notification (
-        title,
-        message,
+        sender_id,
         entity_type,
         entity_id,
-        sender_id,
+        title,
+        message,
+        url,
         action,
         created_at
     ) VALUES (
-        p_title,
-        p_message,
+        p_sender_id,
         p_entity_type,
         p_entity_id,
-        p_sender_id,
+        p_title,
+        p_message,
+        p_url,
         p_action,
         NOW()
     );
-    
+
     SET v_notification_id = LAST_INSERT_ID();
-    
-    -- Add recipients
+
     SET v_recipient_count = JSON_LENGTH(p_recipient_emails);
     WHILE i < v_recipient_count DO
         SET v_email = JSON_UNQUOTE(JSON_EXTRACT(p_recipient_emails, CONCAT('$[', i, ']')));
-        
-        INSERT INTO tbl_notification_recipient (
-            notification_id,
-            recipient_email,
-            is_read,
-            created_at
-        ) VALUES (
-            v_notification_id,
-            v_email,
-            FALSE,
-            NOW()
-        );
-        
+        IF v_email IS NOT NULL AND v_email <> '' THEN
+            INSERT INTO tbl_notification_recipient (
+                notification_id,
+                recipient_email,
+                is_read,
+                created_at
+            ) VALUES (
+                v_notification_id,
+                v_email,
+                FALSE,
+                NOW()
+            );
+        END IF;
         SET i = i + 1;
     END WHILE;
-    
+
     COMMIT;
+
+    SELECT v_notification_id AS notification_id;
 END$$
 DELIMITER ;
 
@@ -2352,10 +2355,11 @@ BEGIN
     CALL CreateNotification(
         'New Application Period Available',
         CONCAT('Organizations can now submit applications from ', DATE_FORMAT(p_start_date, '%M %d, %Y at %h:%i %p'), ' until ', DATE_FORMAT(p_end_date, '%M %d, %Y at %h:%i %p'), '. Please inform your organizations about this opportunity.'),
-        'system',
-        v_period_id,
-        p_created_by,
-        v_admin_emails,
+        NULL,               -- url (nullable)
+        'system',           -- entity_type
+        v_period_id,        -- entity_id
+        p_created_by,       -- sender_id
+        v_admin_emails,     -- recipient_emails (JSON)
         'application_period_opened'
     );
 
@@ -2383,7 +2387,7 @@ BEGIN
         start_time,
         end_time
     FROM tbl_application_period WHERE period_id = v_period_id;
-END $$
+END$$
 DELIMITER ;
 
 DELIMITER $$
@@ -2446,17 +2450,18 @@ BEGIN
     CALL CreateNotification(
         'Application Period Schedule Updated',
         CONCAT('The application period has been rescheduled. New dates: ', DATE_FORMAT(p_start_date, '%M %d, %Y at %h:%i %p'), ' until ', DATE_FORMAT(p_end_date, '%M %d, %Y at %h:%i %p'), '. Please notify organizations of this change.'),
-        'system',
-        p_period_id,
-        p_updated_by,
-        v_admin_emails,
+        NULL,               -- url (nullable)
+        'system',           -- entity_type
+        p_period_id,        -- entity_id
+        p_updated_by,       -- sender_id
+        v_admin_emails,     -- recipient_emails (JSON)
         'application_period_modified'
     );
 
     -- Log with user-friendly message
     CALL LogAction(
         v_updater_email,
-        CONCAT('Updated application period schedule from ', DATE_FORMAT(v_old_start_date, '%M %d'), '-', DATE_FORMAT(v_old_end_date, '%M %d'), ' to ', DATE_FORMAT(p_start_date, '%M %d'), '-', DATE_FORMAT(p_end_date, '%M %d')),
+        CONCAT('Updated application period schedule from ', DATE_FORMAT(v_old_start_date, '%M %d, %Y'), ' - ', DATE_FORMAT(v_old_end_date, '%M %d, %Y'), ' to ', DATE_FORMAT(p_start_date, '%M %d, %Y'), ' - ', DATE_FORMAT(p_end_date, '%M %d, %Y')),
         'Application Period Management',
         JSON_OBJECT(
             'period_id', p_period_id,
@@ -2475,8 +2480,7 @@ BEGIN
         start_time,
         end_time
     FROM tbl_application_period WHERE period_id = p_period_id;
-
-END $$
+END$$
 DELIMITER ;
 
 DELIMITER $$
@@ -2496,6 +2500,8 @@ BEGIN
     DECLARE v_initiator_email VARCHAR(100);
     DECLARE v_last_approval_id INT;
     DECLARE v_last_approver_email VARCHAR(100);
+    DECLARE v_submitted_org_name VARCHAR(255);
+    DECLARE v_url VARCHAR(512);
 
     -- Cursor and handler declarations
     DECLARE role_cursor CURSOR FOR
@@ -2507,25 +2513,25 @@ BEGIN
     DECLARE CONTINUE HANDLER FOR NOT FOUND SET v_done = TRUE;
 
     -- Get period and application type
-    SELECT a.period_id, a.application_type
-    INTO v_period_id, v_application_type
+    SELECT a.period_id, a.application_type, a.submitted_org_name
+    INTO v_period_id, v_application_type, v_submitted_org_name
     FROM tbl_application a
     WHERE a.application_id = p_application_id
     LIMIT 1;
 
-    -- Get initiator email for logging (optional)
+    SET v_url = CONCAT('/organizations/app-details/', p_application_id, '/', COALESCE(v_submitted_org_name, ''));
+
+    -- Get initiator email for optional logging
     SELECT email INTO v_initiator_email FROM tbl_user WHERE user_id = p_initiated_by LIMIT 1;
 
     OPEN role_cursor;
 
-    -- Standard cursor loop
     approval_loop: LOOP
         FETCH role_cursor INTO v_role_id, v_hierarchy_order;
         IF v_done THEN
             LEAVE approval_loop;
         END IF;
 
-        -- Find one active approver for this role (returns NULL if none)
         SET v_approver_id = (
             SELECT user_id
             FROM tbl_user
@@ -2534,7 +2540,6 @@ BEGIN
             LIMIT 1
         );
 
-        -- If an approver exists, insert approval row if not already present
         IF v_approver_id IS NOT NULL THEN
             IF NOT EXISTS (
                 SELECT 1 FROM tbl_approval_process ap
@@ -2557,7 +2562,7 @@ BEGIN
                         v_approver_id,
                         v_role_id,
                         v_application_type,
-                        'Approved',          -- preserve original behavior for first step
+                        'Approved',
                         v_hierarchy_order
                     );
                     SET v_first_step = FALSE;
@@ -2580,13 +2585,12 @@ BEGIN
                         v_hierarchy_order
                     );
                 END IF;
-            END IF; -- end exists check
-        END IF; -- end approver exists check
+            END IF;
+        END IF;
     END LOOP approval_loop;
 
     CLOSE role_cursor;
 
-    -- Link approvals to application, but only insert mappings that don't already exist
     INSERT INTO tbl_application_approval (application_id, approval_id)
     SELECT p_application_id, ap.approval_id
     FROM tbl_approval_process ap
@@ -2597,7 +2601,6 @@ BEGIN
       AND ap.period_id = v_period_id
       AND aa.approval_id IS NULL;
 
-    -- Notify the next approver: pick the smallest step with status = 'Pending' (earliest pending)
     SELECT approval_id, approver_id
     INTO v_last_approval_id, v_approver_id
     FROM tbl_approval_process
@@ -2610,17 +2613,17 @@ BEGIN
     IF v_approver_id IS NOT NULL THEN
         SELECT email INTO v_last_approver_email FROM tbl_user WHERE user_id = v_approver_id LIMIT 1;
         CALL CreateNotification(
-            'Approval Needed',
+            CONCAT('Approval Needed: ', COALESCE(v_submitted_org_name, 'Application')),
             'A new application is ready for your review. Please check the application documents and provide your approval decision.',
+            v_url,
             'approval',
-            NULL,
+            p_application_id,
             p_initiated_by,
             JSON_ARRAY(v_last_approver_email),
             'approval_required'
         );
     END IF;
 
-    -- Update application status
     IF EXISTS (
         SELECT 1 FROM tbl_approval_process 
         WHERE application_id = p_application_id
@@ -2635,7 +2638,7 @@ BEGIN
         SET status = 'Rejected'
         WHERE application_id = p_application_id;
     END IF;
-END $$
+END$$
 DELIMITER ;
 
 
@@ -5520,18 +5523,19 @@ BEGIN
     FROM tbl_user
     WHERE role_id IN (2, 3, 4) AND status = 'Active';
 
-    -- Notify
+    -- Notify (CreateNotification signature: title, message, url, entity_type, entity_id, sender_id, recipient_emails, action)
     CALL CreateNotification(
         'Application Period Closed',
         CONCAT('The application period from ', DATE_FORMAT(v_start_date, '%M %d, %Y at %h:%i %p'), ' to ', DATE_FORMAT(v_end_date, '%M %d, %Y at %h:%i %p'), ' has been closed. No further applications will be accepted.'),
-        'system',
-        v_period_id,
-        p_terminated_by,
-        v_admin_emails,
+        NULL,               -- url (nullable)
+        'system',           -- entity_type
+        v_period_id,        -- entity_id
+        p_terminated_by,    -- sender_id
+        v_admin_emails,     -- recipient_emails (JSON)
         'application_period_terminated'
     );
 
-    -- Log
+    -- Log (LogAction signature: p_user_email, p_action, p_type, p_meta_data, p_redirect_url, p_file_path)
     CALL LogAction(
         v_terminator_email,
         CONCAT('Terminated application period: ', DATE_FORMAT(v_start_date, '%M %d, %Y'), ' - ', DATE_FORMAT(v_end_date, '%M %d, %Y')),
@@ -5549,7 +5553,7 @@ BEGIN
     );
 
     SELECT v_period_id AS terminated_period_id;
-END $$
+END$$
 DELIMITER ;
 
 DELIMITER $$
@@ -7199,7 +7203,7 @@ BEGIN
     DECLARE v_user_exists INT;
 
     -- Validate requirement name
-    IF TRIM(p_requirement_name) = '' THEN
+    IF TRIM(COALESCE(p_requirement_name, '')) = '' THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'Requirement name cannot be empty';
     END IF;
@@ -7214,7 +7218,7 @@ BEGIN
         SET MESSAGE_TEXT = 'Creating user does not exist';
     END IF;
 
-    -- Insert the new requirement
+    -- Insert the new requirement (allow NULL file_path)
     INSERT INTO tbl_event_application_requirement (
         requirement_name,
         is_applicable_to,
@@ -7226,7 +7230,7 @@ BEGIN
         NULLIF(p_savePath, ''),  -- Convert empty string to NULL
         p_created_by
     );
-    
+
     -- Return success message with new ID
     SELECT CONCAT('Requirement added successfully. ID: ', LAST_INSERT_ID()) AS message;
 END$$
@@ -7261,7 +7265,7 @@ CREATE DEFINER='admin'@'%' PROCEDURE UpdateEventRequirement(
     IN p_requirement_id INT,
     IN p_requirement_name VARCHAR(255),
     IN p_requirement_type ENUM('pre-event', 'post-event'),
-    IN p_file_path VARCHAR(255),
+    IN p_file_path VARCHAR(255), -- NULL => do not change file_path; '' => set NULL
     IN p_updated_by VARCHAR(200)
 )
 BEGIN
@@ -7275,7 +7279,7 @@ BEGIN
     END IF;
 
     -- Validate requirement name
-    IF TRIM(p_requirement_name) = '' THEN
+    IF TRIM(COALESCE(p_requirement_name, '')) = '' THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'Requirement name cannot be empty';
     END IF;
@@ -7290,28 +7294,30 @@ BEGIN
         SET MESSAGE_TEXT = 'Updating user does not exist';
     END IF;
 
-    -- Check if requirement exists and get old file path
+    -- Get old file path (if any) and ensure requirement exists
     SELECT file_path INTO v_old_file_path
     FROM tbl_event_application_requirement
     WHERE requirement_id = p_requirement_id;
 
-    -- Check if we found the requirement
-    IF v_old_file_path IS NULL AND NOT EXISTS(
-        SELECT 1 FROM tbl_event_application_requirement WHERE requirement_id = p_requirement_id
-    ) THEN
+    IF NOT EXISTS (SELECT 1 FROM tbl_event_application_requirement WHERE requirement_id = p_requirement_id) THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'Event requirement not found';
     END IF;
 
     -- Update the requirement
+    -- Only change file_path when p_file_path IS NOT NULL.
     UPDATE tbl_event_application_requirement 
     SET 
         requirement_name = p_requirement_name,
         is_applicable_to = p_requirement_type,
-        file_path = NULLIF(p_file_path, ''),  -- Convert empty string to NULL
-        updated_at = CURRENT_TIMESTAMP
+        updated_at = CURRENT_TIMESTAMP,
+        file_path = CASE 
+                        WHEN p_file_path IS NULL THEN file_path                      -- keep existing
+                        WHEN p_file_path = '' THEN NULL                              -- explicit empty -> NULL
+                        ELSE p_file_path                                              -- new filename
+                    END
     WHERE requirement_id = p_requirement_id;
-    
+
     -- Return the old file path and success message
     SELECT 
         p_requirement_id as requirement_id,
@@ -8579,6 +8585,7 @@ BEGIN
         n.entity_id,
         n.sender_id,
         n.action,
+        n.url,
         n.created_at,
         nr.is_read,
         sender.f_name AS sender_first_name,
@@ -8587,7 +8594,7 @@ BEGIN
     JOIN tbl_notification_recipient nr ON n.notification_id = nr.notification_id
     LEFT JOIN tbl_user sender ON n.sender_id = sender.user_id
     WHERE nr.recipient_email = p_email
-    AND (p_is_read IS NULL OR nr.is_read = p_is_read)
+      AND (p_is_read IS NULL OR nr.is_read = p_is_read)
     ORDER BY n.created_at DESC
     LIMIT p_limit OFFSET p_offset;
 END$$
@@ -8628,12 +8635,12 @@ BEGIN
     DECLARE v_organization_id INT;
     DECLARE v_applicant_user_id VARCHAR(200);
     DECLARE v_approver_id VARCHAR(200);
-    DECLARE v_org_name VARCHAR(100);
+    DECLARE v_org_name VARCHAR(255);
     DECLARE v_step INT;
     DECLARE v_step_status ENUM('Pending','Approved','Rejected');
     DECLARE v_title VARCHAR(255);
     DECLARE v_message TEXT;
-    DECLARE v_url VARCHAR(255);
+    DECLARE v_url VARCHAR(512);
     DECLARE v_application_type ENUM('new','renewal');
     DECLARE v_total_steps INT DEFAULT 0;
     DECLARE v_completed_steps INT DEFAULT 0;
@@ -8641,11 +8648,11 @@ BEGIN
     DECLARE v_adviser_id VARCHAR(200);
     DECLARE v_recipient_emails JSON;
 
-    /* Context */
+    /* Context: application, org name (prefer submitted name if present) */
     SELECT a.status,
            a.organization_id,
            a.applicant_user_id,
-           o.name,
+           COALESCE(NULLIF(a.submitted_org_name,''), o.name),
            a.application_type
       INTO v_application_status,
            v_organization_id,
@@ -8653,13 +8660,21 @@ BEGIN
            v_org_name,
            v_application_type
     FROM tbl_application a
-    JOIN tbl_organization o ON a.organization_id = o.organization_id
-    WHERE a.application_id = p_application_id;
+    LEFT JOIN tbl_organization o ON a.organization_id = o.organization_id
+    WHERE a.application_id = p_application_id
+    LIMIT 1;
 
+    /* If we couldn't resolve org name, fall back to application id string */
+    IF v_org_name IS NULL OR TRIM(v_org_name) = '' THEN
+        SET v_org_name = CONCAT('Application-', p_application_id);
+    END IF;
+
+    /* approver / step context */
     SELECT approver_id, step, status
       INTO v_approver_id, v_step, v_step_status
     FROM tbl_approval_process
-    WHERE approval_id = p_approval_id;
+    WHERE approval_id = p_approval_id
+    LIMIT 1;
 
     /* Step metrics */
     SELECT COUNT(*) INTO v_total_steps
@@ -8672,13 +8687,13 @@ BEGIN
     WHERE aa.application_id = p_application_id
       AND ap.status = 'Approved';
 
-    SET v_remaining_steps = v_total_steps - v_completed_steps;
+    SET v_remaining_steps = GREATEST(0, v_total_steps - v_completed_steps);
 
-    /* Frontend URL (org-name slug) */
-    SET v_url = CONCAT('/organizations/app-details/', v_org_name);
+    /* Frontend URL (use application id + org slug-friendly name) */
+    SET v_url = CONCAT('/organizations/app-details/', p_application_id, '/', REPLACE(v_org_name, ' ', '-'));
 
     /* Adviser */
-    SELECT adviser_id INTO v_adviser_id FROM tbl_organization WHERE organization_id = v_organization_id;
+    SELECT adviser_id INTO v_adviser_id FROM tbl_organization WHERE organization_id = v_organization_id LIMIT 1;
 
     /* Recipients: applicant, adviser, all approvers for this application */
     SELECT JSON_ARRAYAGG(email) INTO v_recipient_emails
@@ -8696,50 +8711,36 @@ BEGIN
         WHERE ap.application_id = p_application_id
     ) AS recipients;
 
-    /* Build notification text */
-    IF LOWER(v_application_status) = 'approved' THEN
-        SET v_title = CONCAT('Application Fully Approved: ', v_org_name);
-        SET v_message = CONCAT(
-            'Congratulations! The ', v_application_type,
-            ' application for ', v_org_name,
-            ' has completed all approval steps (', v_total_steps, ').'
-        );
+    /* Build human-friendly notification title/message */
+    IF v_application_status IS NOT NULL AND LOWER(v_application_status) = 'approved' THEN
+        SET v_title = CONCAT('Application Approved — ', v_org_name);
+        SET v_message = CONCAT('Good news — the ', v_application_type, ' application for "', v_org_name, '" has completed all approval steps.');
     ELSEIF v_step_status = 'Approved' THEN
-        SET v_title = CONCAT('Step ', v_step, ' Approved: ', v_org_name);
-        SET v_message = CONCAT(
-            'Step ', v_step, ' of ', v_total_steps,
-            ' for ', v_org_name, ' has been approved. ',
-            v_remaining_steps, ' step(s) remaining in the approval process.'
-        );
-    ELSEIF v_step_status = 'Rejected' OR LOWER(v_application_status) = 'rejected' THEN
-        SET v_title = CONCAT('Application Rejected: ', v_org_name);
-        SET v_message = CONCAT(
-            'The application for ', v_org_name,
-            ' was rejected at step ', v_step,
-            ' (', v_application_type, '). Please review the comments for details.'
-        );
+        SET v_title = CONCAT('Approval Progress — ', v_org_name);
+        SET v_message = CONCAT('Step ', v_step, ' for "', v_org_name, '" was approved. ', v_remaining_steps, ' step(s) remaining. You can view details here: ', v_url);
+    ELSEIF v_step_status = 'Rejected' OR (v_application_status IS NOT NULL AND LOWER(v_application_status) = 'rejected') THEN
+        SET v_title = CONCAT('Application Rejected — ', v_org_name);
+        SET v_message = CONCAT('The ', v_application_type, ' application for "', v_org_name, '" was rejected at step ', v_step, '. Please review the comments and next steps: ', v_url);
     ELSE
-        SET v_title = CONCAT('Application Update: ', v_org_name);
-        SET v_message = CONCAT(
-            'Status: ', v_application_status,
-            '. Current step ', v_step, ' of ', v_total_steps, '.'
-        );
+        SET v_title = CONCAT('Application Update — ', v_org_name);
+        SET v_message = CONCAT('Status update for "', v_org_name, '": ', COALESCE(v_application_status,'Updated'), '. Current step: ', COALESCE(CAST(v_step AS CHAR), 'N/A'), '. See details: ', v_url);
     END IF;
 
-    /* Send notification */
+    /* Create notification (uses CreateNotification stored procedure signature) */
     IF v_recipient_emails IS NOT NULL THEN
         CALL CreateNotification(
-            v_title,
-            v_message,
-            'organization',
-            v_organization_id,
-            v_approver_id,
-            v_recipient_emails,
-            'application_approval_update'
+            v_title,                 -- p_title
+            v_message,               -- p_message
+            v_url,                   -- p_url (nullable)
+            'organization',          -- p_entity_type
+            v_organization_id,       -- p_entity_id
+            v_approver_id,           -- p_sender_id (approver who triggered change)
+            v_recipient_emails,      -- p_recipient_emails (JSON array)
+            'application_approval_update' -- p_action
         );
     END IF;
 
-    /* Log the action */
+    /* Log action — LogAction(p_user_email, p_action, p_type, p_meta_data, p_redirect_url, p_file_path) */
     CALL LogAction(
         (SELECT email FROM tbl_user WHERE user_id = v_approver_id LIMIT 1),
         CONCAT('Approval step updated for ', v_org_name, ': ', v_title),
@@ -8755,7 +8756,7 @@ BEGIN
         v_url,
         NULL
     );
-END $$
+END$$
 DELIMITER ;
 
 DELIMITER $$
@@ -9188,15 +9189,17 @@ BEGIN
     SELECT COUNT(*) INTO v_total_orgs
     FROM tbl_organization;
 
-    -- Total organization applications (tbl_application)
+    -- Total organization applications (only Pending)
     SELECT COUNT(*) INTO v_total_app_org
-    FROM tbl_application;
+    FROM tbl_application
+    WHERE status = 'Pending';
 
-    -- Total user account/applications (tbl_user_application)
+    -- Total user applications (only Pending)
     SELECT COUNT(*) INTO v_total_app_user
-    FROM tbl_user_application;
+    FROM tbl_user_application
+    WHERE status = 'Pending';
 
-    -- Total event proposals / applications (tbl_event_application)
+    -- Total event proposals / applications
     SELECT COUNT(*) INTO v_total_event_apps
     FROM tbl_event_application;
 

@@ -46,23 +46,25 @@ async function logUserActivation(userId, email, activationMethod = 'first_login'
     try {
         await connection.query(`
             INSERT INTO tbl_logs (
-                user_id, 
-                action, 
-                type, 
-                meta_data, 
+                user_id,
+                action_type,
+                type,
+                meta_data,
+                redirect_url,
                 file_path
-            ) VALUES (?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?)
         `, [
-            userId, 
-            'USER_ACTIVATED', 
-            'ACCOUNT_MANAGEMENT', 
+            userId,
+            'USER_ACTIVATED',
+            'ACCOUNT_MANAGEMENT',
             JSON.stringify({
                 email: email,
                 activation_method: activationMethod,
                 activated_at: new Date().toISOString(),
-                ip_address: 'system', // You can pass this from request
+                ip_address: 'system',
                 user_agent: 'system'
             }),
+            NULL, // no redirect url for activation log
             'user_activation_log'
         ]);
         
@@ -133,15 +135,16 @@ async function manuallyActivateUser(email, activatedBy) {
         `, [email]);
         
         if (userRows.length > 0) {
-            // Log the manual activation
+            // Log the manual activation (match tbl_logs columns)
             await connection.query(`
                 INSERT INTO tbl_logs (
-                    user_id, 
-                    action, 
-                    type, 
-                    meta_data, 
+                    user_id,
+                    action_type,
+                    type,
+                    meta_data,
+                    redirect_url,
                     file_path
-                ) VALUES (?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?)
             `, [
                 userRows[0].user_id, 
                 'USER_MANUALLY_ACTIVATED', 
@@ -152,6 +155,7 @@ async function manuallyActivateUser(email, activatedBy) {
                     activation_method: 'manual_admin',
                     activated_at: new Date().toISOString()
                 }),
+                NULL,
                 'manual_user_activation'
             ]);
         }
