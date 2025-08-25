@@ -35,6 +35,9 @@ RUN mkdir -p /app/organizations && \
     mkdir -p /app/organizations/requirements && \
     chown -R node:node /app/organizations
 
+RUN mkdir -p /app/applications && \
+    chown -R node:node /app/applications
+
 WORKDIR /app
 COPY package*.json ./
 

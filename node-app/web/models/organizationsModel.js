@@ -863,23 +863,32 @@ async function updateApplicationPeriod(startDate, endDate, startTime, endTime, p
     }
 }
 
-async function initiateApprovalProcess(applicationId, initiatedByEmail) {
+async function initiateApprovalProcess(applicationId, userid) {
     const connection = await pool.getConnection();
     try {
-        // Get user_id from email
-        const [userRows] = await connection.query('SELECT user_id FROM tbl_user WHERE email = ? LIMIT 1', [initiatedByEmail]);
-        if (!userRows[0]) {
-            throw new Error('User not found');
-        }
-        const initiatedBy = userRows[0].user_id;
-
         const [rows] = await connection.query('CALL InitiateApprovalProcess(?, ?)', [
             applicationId,
-            initiatedBy
+            userid
         ]);
         return rows[0];
     } catch (error) {
         console.error('Error initiating approval process:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function sendApprovalNotification(approvalId, applicationId) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL NotifyApplicationApprovalChange(?,?)', [
+            approvalId,
+            applicationId
+        ]);
+        return rows[0];
+    } catch (error) {
+        console.error('Error sending approval notification:', error);
         throw error;
     } finally {
         connection.release();
@@ -938,5 +947,6 @@ module.exports = {
     // Enhanced functions
     addApplicationPeriod,
     updateApplicationPeriod,
-    initiateApprovalProcess
+    initiateApprovalProcess,
+    sendApprovalNotification
 };

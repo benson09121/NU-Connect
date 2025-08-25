@@ -37,10 +37,15 @@ async function markNotificationRead(req, res) {
                 error: "Notification ID is required." 
             });
         }
-
+        
+        // Lookup user_id by email (optimized)
+        const user = await notificationModel.getUserByEmail(req.user.email);
+        if (!user || !user.user_id) {
+            return res.status(404).json({ message: 'User not found.' });
+        }
         const result = await notificationModel.markNotificationRead(
             parseInt(id),
-            req.user.user_id
+            user.user_id
         );
 
         publishToChannel(`notifications_${req.user.email}`, {
@@ -72,13 +77,18 @@ async function createNotification(req, res) {
             });
         }
 
+        // Lookup user_id by email (optimized)
+        const user = await notificationModel.getUserByEmail(req.user.email);
+        if (!user || !user.user_id) {
+            return res.status(404).json({ message: 'User not found.' });
+        }
         const result = await notificationModel.createNotification(
             title,
             message,
             url || null,                          // pass nullable url
             entity_type,
             entity_id || null,
-            req.user.user_id,
+            user.user_id,
             Array.isArray(recipient_emails) ? recipient_emails : [recipient_emails],
             action || 'manual'
         );
@@ -126,12 +136,17 @@ async function testNotification(req, res) {
             });
         }
 
+        // Lookup user_id by email (optimized)
+        const user = await notificationModel.getUserByEmail(req.user.email);
+        if (!user || !user.user_id) {
+            return res.status(404).json({ message: 'User not found.' });
+        }
         const result = await notificationModel.createNotification(
             title,
             message,
             'system',
             null,
-            req.user.user_id,
+            user.user_id,
             [recipient_email],
             'test'
         );
@@ -172,9 +187,14 @@ async function notifyApplicationPeriodCreated(req, res) {
             });
         }
 
+        // Lookup user_id by email (optimized)
+        const user = await notificationModel.getUserByEmail(req.user.email);
+        if (!user || !user.user_id) {
+            return res.status(404).json({ message: 'User not found.' });
+        }
         const result = await notificationModel.notifyApplicationPeriodCreated(
             period_id,
-            req.user.user_id,
+            user.user_id,
             start_date,
             end_date
         );
@@ -203,9 +223,14 @@ async function notifyApplicationPeriodUpdated(req, res) {
             });
         }
 
+        // Lookup user_id by email (optimized)
+        const user = await notificationModel.getUserByEmail(req.user.email);
+        if (!user || !user.user_id) {
+            return res.status(404).json({ message: 'User not found.' });
+        }
         const result = await notificationModel.notifyApplicationPeriodUpdated(
             period_id,
-            req.user.user_id,
+            user.user_id,
             start_date,
             end_date
         );
@@ -234,11 +259,16 @@ async function notifyApprovalProcessInitiated(req, res) {
             });
         }
 
+        // Lookup user_id by email (optimized)
+        const user = await notificationModel.getUserByEmail(req.user.email);
+        if (!user || !user.user_id) {
+            return res.status(404).json({ message: 'User not found.' });
+        }
         const result = await notificationModel.notifyApprovalProcessInitiated(
             application_id,
             organization_id,
             organization_name,
-            req.user.user_id
+            user.user_id
         );
 
         res.status(201).json({

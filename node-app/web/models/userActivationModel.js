@@ -64,7 +64,7 @@ async function logUserActivation(userId, email, activationMethod = 'first_login'
                 ip_address: 'system',
                 user_agent: 'system'
             }),
-            NULL, // no redirect url for activation log
+            null, // no redirect url for activation log
             'user_activation_log'
         ]);
         
@@ -155,7 +155,7 @@ async function manuallyActivateUser(email, activatedBy) {
                     activation_method: 'manual_admin',
                     activated_at: new Date().toISOString()
                 }),
-                NULL,
+                null,
                 'manual_user_activation'
             ]);
         }
