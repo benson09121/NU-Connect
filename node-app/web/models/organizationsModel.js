@@ -105,10 +105,10 @@ async function checkOrganizationEmails(org_emails) {
     }
 }
 
-async function getOrganizationDetails(org_name){
+async function getOrganizationDetails(org_id, org_version_id){
     const connection = await pool.getConnection();
     try {
-        const [rows] = await connection.query('CALL GetOrganizationDetails(?);', [org_name]);
+        const [rows] = await connection.query('CALL GetOrganizationDetails(?, ?);', [org_id, org_version_id]);
         return rows[0];
     } catch (error) {
         console.error('Error fetching organization details:', error);
@@ -332,13 +332,10 @@ async function archiveExecutiveMember({
     }
 }
 
-async function getOrganizationCommittees(org_name_with_space) {
+async function getOrganizationCommittees(org_id, org_version_id) {
     const connection = await pool.getConnection();
     try {
-        const [rows] = await connection.query(
-            'CALL GetOrganizationCommittees(?);',
-            [org_name_with_space]
-        );
+        const [rows] = await connection.query('CALL GetOrganizationCommittees(?, ?);', [org_id, org_version_id]);
         return rows[0];
     } catch (error) {
         console.error('Error fetching organization committees:', error);
@@ -425,10 +422,10 @@ async function archiveCommittee({
     }
 }
 
-async function getAllCommitteeMembers(org_name) {
+async function getAllCommitteeMembers(org_id, org_version_id) {
     const connection = await pool.getConnection();
     try {
-        const [rows] = await connection.query('CALL GetAllCommitteeMembers(?)',[org_name]);
+        const [rows] = await connection.query('CALL GetAllCommitteeMembers(?, ?);', [org_id, org_version_id]);
         return rows[0];
     } catch (error) {
         console.error('[getAllCommitteeMembers] SQL/Error:', error.sqlMessage || error.message, error);
@@ -502,13 +499,10 @@ async function archiveCommitteeMember({
     }
 }
 
-async function getPendingOrganizationMembers(org_name) {
+async function getPendingOrganizationMembers(org_id, org_version_id) {
     const connection = await pool.getConnection();
     try {
-        const [rows] = await connection.query(
-            'CALL GetPendingOrganizationMembers(?);',
-            [org_name]
-        );
+        const [rows] = await connection.query('CALL GetPendingOrganizationMembers(?, ?);', [org_id, org_version_id]);
         return rows[0];
     } catch (error) {
         console.error('Error fetching pending organization members:', error);
@@ -678,23 +672,12 @@ async function getOrganizationByName(org_name){
     }
 }
 
-async function getOrganizationMembers(org_name) {
-    const connection = await pool.getConnection();
-    try {
-        const [rows] = await connection.query('CALL GetOrganizationMembers(?);', [org_name]);
-        return rows[0];
-    } catch (error) {
-        console.error('Error fetching organization members:', error);
-        throw error;
-    } finally {
-        connection.release();
-    }
-}
 
-async function getOrganizationOfficers(org_name){
+
+async function getOrganizationOfficers(org_id, org_version_id) {
     const connection = await pool.getConnection();
     try {
-        const [rows] = await connection.query('CALL GetOrganizationOfficers(?);', [org_name]);
+        const [rows] = await connection.query('CALL GetOrganizationOfficers(?, ?);', [org_id, org_version_id]);
         return rows[0];
     } catch (error) {
         console.error('Error fetching organization officers:', error);
@@ -704,12 +687,25 @@ async function getOrganizationOfficers(org_name){
     }
 }
 
-async function getOrganizationUsers(org_name) {
+async function getOrganizationMembers(org_id, org_version_id) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetOrganizationMembers(?, ?);', [org_id, org_version_id]);
+        return rows[0];
+    } catch (error) {
+        console.error('Error fetching organization members:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function getOrganizationUsers(org_id, org_version_id) {
     const connection = await pool.getConnection();
     try {
         const [rows] = await connection.query(
-            'CALL GetOrganizationUsers(?);',
-            [org_name]
+            'CALL GetOrganizationUsers(?, ?);',
+            [org_id, org_version_id]
         );
         return rows[0];
     } catch (error) {
@@ -719,6 +715,7 @@ async function getOrganizationUsers(org_name) {
         connection.release();
     }
 }
+
 
 async function getAllUsers() {
     const connection = await pool.getConnection();
