@@ -124,13 +124,17 @@ async function createOrganizationApplication(req, res) {
             }
         });
 
+        // Lookup user_id by email (optimized)
+        const user = await organizationsModel.getUserByEmail(req.user.email);
+        if (!user || !user.user_id) {
+            return res.status(404).json({ message: 'User not found.' });
+        }
         const dbResult = await organizationsModel.createOrganizationApplication(
             { ...organization, organization_logo: logoFile.name },
             executives,
             requirementFilePaths,
-            req.user.user_id
+            user.user_id
         );
-
         // New folder structure: /apps/applications/{app_id}/
         console.log('dbResult[0]:', dbResult[0]);
         const appId = dbResult[0].application_id;
@@ -188,7 +192,7 @@ async function createOrganizationApplication(req, res) {
 
         // Initiate approval process with enhanced logging
         try {
-            await organizationsModel.initiateApprovalProcess(appId, req.user.email);
+            await organizationsModel.initiateApprovalProcess(appId, user.user_id);
         } catch (approvalError) {
             console.error('Failed to initiate approval process:', approvalError);
             // Don't fail the application creation if approval process fails
@@ -212,7 +216,12 @@ async function getSpecificApplication(req, res) {
     try {
         const { org_name, app_id } = req.query;
 
-        const application = await organizationsModel.getSpecificApplication(req.user.user_id, org_name, app_id);
+        // Lookup user_id by email (optimized)
+        const user = await organizationsModel.getUserByEmail(req.user.email);
+        if (!user || !user.user_id) {
+            return res.status(404).json({ message: 'User not found.' });
+        }
+        const application = await organizationsModel.getSpecificApplication(user.user_id, org_name, app_id);
         if (application.length === 0) {
             return res.status(404).json({ message: 'No application found' });
         }
@@ -234,6 +243,7 @@ async function approveApplication(req, res) {
         );
         console.log('Approval Row:', approvalRow);
         const result = approvalRow[0]?.result;
+        const notification = await organizationsModel.sendApprovalNotification(result?.application?.id, application_id);
         publishToChannel(`application_approval_timeline_${appName}_${application_id}`, {
             operation: 'UPDATE',
             data: result.application

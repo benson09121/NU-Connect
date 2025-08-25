@@ -54,24 +54,31 @@ async function login(req, res) {
         // Check user status before login
         const userStatusBefore = await userActivationModel.getUserActivationStatus(req.user.email);
         const wasActiveBefore = userStatusBefore?.status === 'Active';
-        
         const permissionResult = await userModel.handleLogin(req.user);
-        
+        console.log(userStatusBefore);
         // Check if user was activated during this login
         if (!wasActiveBefore && userStatusBefore?.status === 'Pending') {
             console.log(`🎉 User ${req.user.email} activated on first login!`);
             // Log the activation event
+            // Lookup user_id by email (optimized)
+            const user = await userModel.getUserByEmail(req.user.email);
+            if (!user || !user.user_id) {
+                return res.status(404).json({ message: 'User not found.' });
+            }
             await userActivationModel.logUserActivation(
-                req.user.user_id, 
-                req.user.email, 
+                user.user_id,
+                req.user.email,
                 'first_login'
             );
         }
         
         console.log(permissionResult);
-        // Extract permissions array from the nested user_info object
-        const permissions = permissionResult[0]?.user_info?.permissions || [];
-        
+        // Extract permissions array from the nested user_info object and flatten it
+        const permissionsRaw = permissionResult[0]?.user_info?.permissions;
+        const permissions = Array.isArray(permissionsRaw)
+            ? permissionsRaw.flat()
+            : [];
+
         if (permissions.includes("WEB_ACCESS")) {
             // Add activation status to response
             const userInfo = {

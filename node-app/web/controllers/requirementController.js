@@ -23,11 +23,16 @@ async function addRequirement(req, res) {
             fs.writeFileSync(path.join(requirementsDir, filename), uploadedFile.data);
         }
 
+        // Lookup user_id by email (optimized)
+        const user = await requirementModel.getUserByEmail(req.user.email);
+        if (!user || !user.user_id) {
+            return res.status(404).json({ message: 'User not found.' });
+        }
         let data = await requirementModel.addRequirement(
             requirement_name.trim(),
             is_applicable_to,
             filename,
-            req.user.user_id
+            user.user_id
         );
         data = Array.isArray(data) ? data[0] : data;
 
@@ -389,7 +394,12 @@ async function addEventRequirement(req, res) {
         }
 
         // Call model; filename may be null
-        await requirementModel.addEventRequirement(requirement_name, requirement_type, filename, req.user.user_id);
+        // Lookup user_id by email (optimized)
+        const user = await requirementModel.getUserByEmail(req.user.email);
+        if (!user || !user.user_id) {
+            return res.status(404).json({ message: 'User not found.' });
+        }
+        await requirementModel.addEventRequirement(requirement_name, requirement_type, filename, user.user_id);
         res.status(201).json({ message: 'Requirement created successfully' });
     } catch (err) {
         console.error('[addEventRequirement] error:', err);

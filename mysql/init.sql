@@ -1567,7 +1567,7 @@ END $$
 DELIMITER ;
 
 DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE GetUserPermissions(IN p_user_id VARCHAR(200))
+CREATE DEFINER='admin'@'%' PROCEDURE GetUserPermissions(IN p_user_email VARCHAR(200))
 BEGIN
     SELECT JSON_OBJECT(
         'f_name', u.f_name,
@@ -1652,13 +1652,12 @@ BEGIN
     FROM tbl_user u
     JOIN tbl_role r ON u.role_id = r.role_id
     LEFT JOIN tbl_program p ON u.program_id = p.program_id
-    WHERE u.user_id = p_user_id;
+    WHERE u.email = p_user_email;
 END $$
 DELIMITER ;
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE HandleLogin(
-    IN p_azure_sub VARCHAR(200),
     IN p_email VARCHAR(50),
     IN p_f_name VARCHAR(50),
     IN p_l_name VARCHAR(50)
@@ -1689,36 +1688,16 @@ BEGIN
 
     -- Scenario 1: Existing user found by email
     IF v_existing_user_id IS NOT NULL THEN
-        -- Handle user_id mismatch
-        IF v_existing_user_id != p_azure_sub THEN
-            -- Check if new azure_sub is already used by another account
-            SELECT email INTO v_conflict_user_email
-            FROM tbl_user
-            WHERE user_id = p_azure_sub;
-            
-            IF v_conflict_user_email IS NOT NULL THEN
-                SIGNAL SQLSTATE '45000'
-                SET MESSAGE_TEXT = 'Account conflict detected: Azure account already in use';
-            END IF;
-            
-            -- Safe to update user_id to new azure_sub
-            UPDATE tbl_user 
-            SET user_id = p_azure_sub
-            WHERE email = p_email;
-            
-            SET v_existing_user_id = p_azure_sub;  -- Update local variable
-        END IF;
-
-        -- For non-students in pending status: activate and update names
-        IF NOT v_is_student AND v_current_status = 'Pending' THEN
+        -- For any user in pending status: activate and update names
+        IF v_current_status = 'Pending' THEN
             UPDATE tbl_user 
             SET 
                 f_name = p_f_name,
                 l_name = p_l_name,
                 status = 'Active'
             WHERE user_id = v_existing_user_id;
-        -- For students: only update names if changed
         ELSE
+            -- Only update names if changed
             UPDATE tbl_user 
             SET 
                 f_name = p_f_name,
@@ -1727,17 +1706,8 @@ BEGIN
             AND (f_name != p_f_name OR l_name != p_l_name);
         END IF;
     ELSE
-        -- Check if azure_sub already exists with different email
-        SELECT email INTO v_conflict_user_email
-        FROM tbl_user
-        WHERE user_id = p_azure_sub;
-        
-        IF v_conflict_user_email IS NOT NULL THEN
-            SIGNAL SQLSTATE '45000'
-            SET MESSAGE_TEXT = 'Account conflict detected: Azure account already in use';
-        END IF;
-        
-        -- New user: create as active student
+        -- New user: create as active student with UUID as user_id
+        SET @new_uuid = UUID();
         INSERT INTO tbl_user (
             user_id,
             f_name,
@@ -1746,16 +1716,17 @@ BEGIN
             role_id,
             status
         ) VALUES (
-            p_azure_sub,
+            @new_uuid,
             p_f_name,
             p_l_name,
             p_email,
             v_student_role_id,
             'Active'
         );
+        SET v_existing_user_id = @new_uuid;
     END IF;
 
-    CALL GetUserPermissions(p_azure_sub);
+    CALL GetUserPermissions(p_email);
 END $$
 DELIMITER ;
 
@@ -1863,7 +1834,7 @@ BEGIN
             program_id,
             status
         ) VALUES (
-            CONCAT('pending-', UUID()),
+            UUID(),
             p_email,
             v_role_id,
             p_program_id,
@@ -2610,19 +2581,19 @@ BEGIN
     ORDER BY step ASC
     LIMIT 1;
 
-    IF v_approver_id IS NOT NULL THEN
-        SELECT email INTO v_last_approver_email FROM tbl_user WHERE user_id = v_approver_id LIMIT 1;
-        CALL CreateNotification(
-            CONCAT('Approval Needed: ', COALESCE(v_submitted_org_name, 'Application')),
-            'A new application is ready for your review. Please check the application documents and provide your approval decision.',
-            v_url,
-            'approval',
-            p_application_id,
-            p_initiated_by,
-            JSON_ARRAY(v_last_approver_email),
-            'approval_required'
-        );
-    END IF;
+    -- IF v_approver_id IS NOT NULL THEN
+    --     SELECT email INTO v_last_approver_email FROM tbl_user WHERE user_id = v_approver_id LIMIT 1;
+    --     CALL CreateNotification(
+    --         CONCAT('Approval Needed: ', COALESCE(v_submitted_org_name, 'Application')),
+    --         'A new application is ready for your review. Please check the application documents and provide your approval decision.',
+    --         v_url,
+    --         'approval',
+    --         p_application_id,
+    --         p_initiated_by,
+    --         JSON_ARRAY(v_last_approver_email),
+    --         'approval_required'
+    --     );
+    -- END IF;
 
     IF EXISTS (
         SELECT 1 FROM tbl_approval_process 
@@ -2640,6 +2611,33 @@ BEGIN
     END IF;
 END$$
 DELIMITER ;
+
+-- CREATE DEFINER='admin'@'%' PROCEDURE NotiftyApprover(
+--     IN p_application_id INT
+-- )
+-- BEGIN
+--  SELECT approval_id, approver_id
+--     INTO v_approver_id
+--     FROM tbl_approval_process
+--     WHERE application_id = p_application_id
+--       AND status = 'Pending'
+--     ORDER BY step ASC
+--     LIMIT 1;
+
+
+--         SELECT email INTO v_last_approver_email FROM tbl_user WHERE user_id = v_approver_id LIMIT 1;
+--         CALL CreateNotification(
+--             CONCAT('Approval Needed: ', COALESCE(v_submitted_org_name, 'Application')),
+--             'A new application is ready for your review. Please check the application documents and provide your approval decision.',
+--             v_url,
+--             'approval',
+--             p_application_id,
+--             p_initiated_by,
+--             JSON_ARRAY(v_last_approver_email),
+--             'approval_required'
+--         );
+-- END $$
+-- DELIMITER ;
 
 
 DELIMITER $$
@@ -2799,9 +2797,6 @@ BEGIN
         'pending'
     );
     SET v_application_id = LAST_INSERT_ID();
-
-        -- Initiate approval process for the new application
-        CALL InitiateApprovalProcess(v_application_id, p_user_id);
 
     -- Insert proposed executives
     SET i = 0;
@@ -3423,7 +3418,6 @@ BEGIN
             ORDER BY ap.step;
 END $$
 DELIMITER ;
-
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE ApproveApplication(
     IN p_approval_id INT,
@@ -3512,6 +3506,9 @@ BEGIN
             SET v_existing_org_id = p_organization_id;
         END IF;
 
+        -- Ensure base program id variable has sensible value (may be NULL)
+        SET v_base_program_id = COALESCE(v_base_program_id, NULL);
+
         -- Insert or update tbl_organization first to satisfy foreign key constraint for tbl_renewal_cycle
         IF v_existing_org_id IS NOT NULL THEN
             UPDATE tbl_organization
@@ -3597,9 +3594,9 @@ BEGIN
                 CURRENT_TIMESTAMP
             );
         ELSE
+            -- update fields that exist (no updated_at column per schema)
             UPDATE tbl_renewal_cycle
-                SET updated_at = CURRENT_TIMESTAMP,
-                    org_version_id = v_org_version_id,
+                SET org_version_id = v_org_version_id,
                     president_id = v_created_by
                 WHERE organization_id = v_new_org_id AND cycle_number = 1;
         END IF;
@@ -3612,39 +3609,99 @@ BEGIN
             DECLARE exec_email VARCHAR(255);
             DECLARE exec_user_id VARCHAR(255);
             DECLARE exec_cycle_number INT;
+            DECLARE exec_title VARCHAR(100);
+            DECLARE exec_name VARCHAR(255);
             DECLARE v_student_role_id INT;
+            DECLARE v_rank_id INT;
+            DECLARE v_executive_role_id INT;
+            DECLARE v_fname VARCHAR(100);
+            DECLARE v_lname VARCHAR(100);
+            DECLARE v_new_uuid VARCHAR(36);
             DECLARE exec_cursor CURSOR FOR
-                SELECT ae.proposed_email, COALESCE(a.cycle_number, 1)
+                SELECT ae.proposed_email, COALESCE(a.cycle_number, 1), ae.proposed_title, ae.proposed_name
                 FROM tbl_application_executives ae
                 JOIN tbl_application a ON ae.application_id = a.application_id
                 WHERE ae.application_id = p_application_id;
             DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = TRUE;
 
-            -- Now it's safe to run statements (SELECT into variables, etc.)
-            SELECT role_id INTO v_student_role_id FROM tbl_role WHERE LOWER(role_name) = 'student' LIMIT 1;
+            -- Use scalar subquery for student role id (won't trigger NOT FOUND)
+            SET v_student_role_id = (
+                SELECT role_id FROM tbl_role WHERE LOWER(role_name) = 'student' LIMIT 1
+            );
+            IF v_student_role_id IS NULL THEN
+                SET v_student_role_id = (
+                    SELECT role_id FROM tbl_role LIMIT 1
+                );
+            END IF;
 
             OPEN exec_cursor;
             exec_loop: LOOP
-                FETCH exec_cursor INTO exec_email, exec_cycle_number;
+                FETCH exec_cursor INTO exec_email, exec_cycle_number, exec_title, exec_name;
                 IF done THEN
                     LEAVE exec_loop;
                 END IF;
 
-                -- find user by email (returns NULL if not found)
-                SET exec_user_id = (
-                    SELECT user_id FROM tbl_user WHERE email = exec_email LIMIT 1
+                -- normalize exec_email and ensure uniqueness if empty
+                IF exec_email IS NULL OR TRIM(exec_email) = '' THEN
+                    SET exec_email = CONCAT('pending+', REPLACE(UUID(), '-', ''), '@pending.local');
+                END IF;
+
+                -- Try to find an existing user by email using scalar subquery (returns NULL if not found)
+                SET exec_user_id = (SELECT user_id FROM tbl_user WHERE email = exec_email LIMIT 1);
+
+                -- If no user found, create a new pending user (generate UUID per insert)
+                IF exec_user_id IS NULL THEN
+                    SET v_new_uuid = REPLACE(UUID(), '-', '');
+
+                    -- parse provided name into f_name / l_name (exec_name may be NULL)
+                    IF exec_name IS NULL OR TRIM(exec_name) = '' THEN
+                        SET v_fname = NULL;
+                        SET v_lname = NULL;
+                    ELSE
+                        SET v_fname = SUBSTRING_INDEX(TRIM(exec_name), ' ', 1);
+                        SET v_lname = TRIM(SUBSTRING(TRIM(exec_name), CHAR_LENGTH(v_fname) + 2));
+                        IF v_lname = '' THEN
+                            SET v_lname = NULL;
+                        END IF;
+                    END IF;
+
+                    INSERT INTO tbl_user (user_id, f_name, l_name, email, program_id, role_id, status, created_at)
+                    VALUES (v_new_uuid, v_fname, v_lname, exec_email, v_base_program_id, v_student_role_id, 'Pending', CURRENT_TIMESTAMP);
+
+                    SET exec_user_id = v_new_uuid;
+                END IF;
+
+                -- Find rank_id by exec_title (fallback to first rank if not found) using scalar subquery
+                SET v_rank_id = (SELECT rank_id FROM tbl_executive_rank WHERE default_title = exec_title LIMIT 1);
+                IF v_rank_id IS NULL THEN
+                    SET v_rank_id = (SELECT rank_id FROM tbl_executive_rank LIMIT 1);
+                END IF;
+
+                -- Find or insert executive_role row (use scalar subquery to fetch existing id)
+                SET v_executive_role_id = (
+                    SELECT executive_role_id FROM tbl_executive_role
+                    WHERE organization_id = v_new_org_id
+                      AND cycle_number = exec_cycle_number
+                      AND role_title = exec_title
+                      AND rank_id = v_rank_id
+                    LIMIT 1
                 );
 
-                IF exec_user_id IS NULL THEN
-                    -- create a placeholder user (email used as user_id) with student role (if found)
-                    IF v_student_role_id IS NOT NULL THEN
-                        INSERT INTO tbl_user (user_id, email, status, role_id, created_at)
-                        VALUES (exec_email, exec_email, 'Pending', v_student_role_id, CURRENT_TIMESTAMP);
-                    ELSE
-                        INSERT INTO tbl_user (user_id, email, status, created_at)
-                        VALUES (exec_email, exec_email, 'Pending', CURRENT_TIMESTAMP);
-                    END IF;
-                    SET exec_user_id = exec_email;
+                IF v_executive_role_id IS NULL THEN
+                    INSERT INTO tbl_executive_role (
+                        organization_id,
+                        cycle_number,
+                        role_title,
+                        rank_id,
+                        created_at
+                    ) VALUES (
+                        v_new_org_id,
+                        exec_cycle_number,
+                        exec_title,
+                        v_rank_id,
+                        CURRENT_TIMESTAMP
+                    );
+                    SET v_executive_role_id = LAST_INSERT_ID();
                 END IF;
 
                 -- Insert into organization_members (avoid duplicates)
@@ -3668,7 +3725,7 @@ BEGIN
                         exec_cycle_number,
                         exec_user_id,
                         'Executive',
-                        NULL,
+                        v_executive_role_id,
                         'Active',
                         CURRENT_TIMESTAMP,
                         v_org_version_id
@@ -3690,9 +3747,6 @@ BEGIN
             organization_id = v_new_org_id
         WHERE application_id = p_application_id;
     END IF; -- end final-step branch
-
-    -- Notify stakeholders about approval change (procedure assumed to exist)
-    CALL NotifyApplicationApprovalChange(p_approval_id, p_application_id);
 
     -- Commit transaction
     COMMIT;
@@ -4176,6 +4230,7 @@ BEGIN
             o.name AS organization_name,
             o.logo AS organization_logo,
             o.status AS organization_status,
+            o.current_org_version_id,
             MAX(c.cycle_number) AS cycle_number,
             o.category,
             p.name AS program_name,

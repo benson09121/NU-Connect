@@ -1,9 +1,9 @@
 const pool = require('../../config/db');
 
-async function getPermissions(user_id){
-    const connection = await pool.getConnection();
+async function getPermissions(email){
+            const connection = await pool.getConnection();
     try {
-        const [rows] = await connection.query('CALL GetUserPermissions(?)', [user_id]);
+        const [rows] = await connection.query('CALL GetUserPermissions(?)', [email]);
 
         return rows[0];
     }   
@@ -46,7 +46,7 @@ async function checkUserExists(email) {
 async function handleLogin(user) {
     const connection = await pool.getConnection();
     try {
-        const [rows] = await connection.query('CALL HandleLogin(?, ?, ?, ?)', [user.user_id, user.email, user.f_name, user.l_name]);
+        const [rows] = await connection.query('CALL HandleLogin(?, ?, ?)', [user.email, user.f_name, user.l_name]);
         return rows[0];
     } catch (error) {
         console.error('Error handling login:', error);
