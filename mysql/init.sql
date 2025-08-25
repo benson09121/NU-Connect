@@ -9387,8 +9387,9 @@ BEGIN
         WHERE p_start_date <= end_date AND p_end_date >= start_date
     ) THEN
         -- Only SDAO can create events in blocked periods (already checked above)
-        -- If you want to block even SDAO, uncomment below:
         -- SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Events cannot be created during blocked periods';
+        -- Add a dummy statement to avoid empty block
+        SET @dummy := 1;
     END IF;
 
     INSERT INTO tbl_event (
