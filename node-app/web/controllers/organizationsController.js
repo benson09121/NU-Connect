@@ -41,8 +41,8 @@ async function getOrganizations(req, res) {
 
 async function getOrganizationDetails(req, res) {
     try {
-        const { org_name } = req.query;
-        const organizationDetails = await organizationsModel.getOrganizationDetails(org_name);
+        const { org_id, org_version_id } = req.query;
+        const organizationDetails = await organizationsModel.getOrganizationDetails(org_id, org_version_id);
         if (organizationDetails.length === 0) {
             return res.status(404).json({ message: 'Organization not found' });
         }
@@ -55,31 +55,29 @@ async function getOrganizationDetails(req, res) {
 }
 
 async function getOrganizationOfficers(req,res){
-    try{
-        const { org_name, sessionId } = req.query;
-        const officers = await organizationsModel.getOrganizationOfficers(org_name);
-        if( sessionId ) {
-            subscribeToChannel(sessionId, `organization_officers_${org_name}`);
+    try {
+        const { org_id, org_version_id, sessionId } = req.query;
+        const officers = await organizationsModel.getOrganizationOfficers(org_id, org_version_id);
+        if (sessionId) {
+            subscribeToChannel(sessionId, `organization_officers_${org_id}_${org_version_id}`);
         }
         res.status(200).json(officers);
     } catch (error) {
         res.status(500).json({
             error: error.message || "An error occurred while fetching the organization officers.",
         });
-
     }
 }
 
 async function getOrganizationMembers(req, res) {
-    try{
-        const { org_name, sessionId } = req.query;
-        const members = await organizationsModel.getOrganizationMembers(org_name);
-        if( sessionId ) {
-            subscribeToChannel(sessionId, `organizations_members_${org_name}`);
+    try {
+        const { org_id, org_version_id, sessionId } = req.query;
+        const members = await organizationsModel.getOrganizationMembers(org_id, org_version_id);
+        if (sessionId) {
+            subscribeToChannel(sessionId, `organization_members_${org_id}_${org_version_id}`);
         }
         res.status(200).json(members);
-    }
-    catch (error) {
+    } catch (error) {
         res.status(500).json({
             error: error.message || "An error occurred while fetching the organization members.",
         });
@@ -662,10 +660,10 @@ async function archiveExecutiveMember(req, res) {
 
 async function getOrganizationCommittees(req, res) {
     try {
-        const { org_name, sessionId } = req.query;
-        const committees = await organizationsModel.getOrganizationCommittees(org_name);
-        if( sessionId ) {
-        subscribeToChannel(sessionId,`organization_committees_${org_name}`);
+        const { org_id, org_version_id, sessionId } = req.query;
+        const committees = await organizationsModel.getOrganizationCommittees(org_id, org_version_id);
+        if (sessionId) {
+            subscribeToChannel(sessionId, `organization_committees_${org_id}_${org_version_id}`);
         }
         res.json(committees);
     } catch (error) {
@@ -772,11 +770,11 @@ async function archiveCommittee(req, res) {
 }
 
 async function getAllCommitteeMembers(req, res) {
-       try {
-        const { org_name, sessionId } = req.query;
-        const committees = await organizationsModel.getAllCommitteeMembers(org_name);
+    try {
+        const { org_id, org_version_id, sessionId } = req.query;
+        const committees = await organizationsModel.getAllCommitteeMembers(org_id, org_version_id);
         if (sessionId) {
-            subscribeToChannel(sessionId, `organizations_committeesMembers_${org_name}`);
+            subscribeToChannel(sessionId, `all_committees_members_${org_id}_${org_version_id}`);
         }
         res.status(200).json(committees);
     } catch (error) {
@@ -874,10 +872,10 @@ async function archiveCommitteeMember(req, res) {
 
 async function getPendingOrganizationMembers(req, res) {
     try {
-        const {sessionId, org_name } = req.query;
-        const members = await organizationsModel.getPendingOrganizationMembers(org_name);
-        if( sessionId ) {
-         subscribeToChannel(sessionId, `organizations_members_pending_${org_name}`);
+        const { org_id, org_version_id, sessionId } = req.query;
+        const members = await organizationsModel.getPendingOrganizationMembers(org_id, org_version_id);
+        if (sessionId) {
+            subscribeToChannel(sessionId, `pending_organization_members_${org_id}_${org_version_id}`);
         }
         res.json(members);
     } catch (error) {

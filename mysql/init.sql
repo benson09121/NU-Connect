@@ -1618,16 +1618,20 @@ BEGIN
                 SELECT JSON_ARRAYAGG(JSON_OBJECT(
                     'name', orgs.name,
                     'logo', orgs.logo,
-                    'status', orgs.status
+                    'status', orgs.status,
+                    'organization_id', orgs.organization_id,
+                    'current_org_version_id', orgs.current_org_version_id
                 ))
                 FROM (
-                    SELECT o.name, o.logo, o.status
+
+
+                    SELECT o.name, o.logo, o.status, o.organization_id, o.current_org_version_id
                     FROM tbl_organization o
                     WHERE o.adviser_id = u.user_id
 
                     UNION
 
-                    SELECT o.name, o.logo, o.status
+                    SELECT o.name, o.logo, o.status, o.organization_id, o.current_org_version_id
                     FROM tbl_organization_members om
                     JOIN tbl_renewal_cycle rc ON om.organization_id = rc.organization_id 
                         AND om.cycle_number = rc.cycle_number
@@ -4459,15 +4463,16 @@ END $$
 DELIMITER ;
 
 DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationDetails(IN p_org_name VARCHAR(100))
+CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationDetails(
+    IN p_org_id INT,
+    IN p_org_version_id INT
+)
 BEGIN
-
-    SET @org_id = (SELECT organization_id FROM tbl_organization WHERE name = p_org_name);
-    SET @current_cycle = (
-        SELECT MAX(cycle_number)
-        FROM tbl_renewal_cycle
-        WHERE organization_id = @org_id
-    );
+    DECLARE v_cycle_number INT;
+    -- Get the cycle_number for the given org_version_id
+    SELECT cycle_number INTO v_cycle_number
+    FROM tbl_renewal_cycle
+    WHERE org_version_id = p_org_version_id;
 
     SELECT JSON_OBJECT(
         'organization_detail', JSON_OBJECT(
@@ -4475,43 +4480,13 @@ BEGIN
             'org_name', o.name,
             'category', o.category,
             'logo', o.logo,
-            'cycle_number', @current_cycle,
+            'cycle_number', v_cycle_number,
             'description', o.description,
             'adviser', JSON_OBJECT(
                 'first_name', adv.f_name,
                 'last_name', adv.l_name,
                 'email', adv.email
             )
-        ),
-        'executive_members', (
-            SELECT JSON_ARRAYAGG(JSON_OBJECT(
-                'first_name', u.f_name,
-                'last_name', u.l_name,
-                'email', u.email,
-                'role_title', er.role_title,
-                'program_name', p.name
-            ))
-            FROM tbl_organization_members om
-            JOIN tbl_user u ON om.user_id = u.user_id
-            JOIN tbl_executive_role er ON om.executive_role_id = er.executive_role_id
-            LEFT JOIN tbl_program p ON u.program_id = p.program_id
-            WHERE om.organization_id = @org_id
-                AND om.cycle_number = @current_cycle
-                AND om.member_type = 'Executive'
-        ),
-        'committee_members', (
-            SELECT JSON_ARRAYAGG(JSON_OBJECT(
-                'first_name', u.f_name,
-                'last_name', u.l_name,
-                'email', u.email,
-                'committee_name', c.name,
-                'committee_role', cm.role
-            ))
-            FROM tbl_committee_members cm
-            JOIN tbl_committee c ON cm.committee_id = c.committee_id
-            JOIN tbl_user u ON cm.user_id = u.user_id
-            WHERE c.organization_id = @org_id
-                AND c.cycle_number = @current_cycle
         ),
         'committee_roles', (
             SELECT JSON_ARRAYAGG(JSON_OBJECT(
@@ -4520,75 +4495,80 @@ BEGIN
             ))
             FROM tbl_committee_role cr
             JOIN tbl_committee c ON cr.committee_id = c.committee_id
-            WHERE c.organization_id = @org_id
-                AND c.cycle_number = @current_cycle
+            WHERE c.organization_id = p_org_id
+                AND c.cycle_number = v_cycle_number
         )
     ) AS result
     FROM tbl_organization o
     JOIN tbl_user adv ON o.adviser_id = adv.user_id
-    WHERE o.organization_id = @org_id;
+    WHERE o.organization_id = p_org_id;
 END$$
 DELIMITER ;
 
 DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationMembers(IN p_org_name VARCHAR(100))
+CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationMembers(
+    IN p_org_id INT,
+    IN p_org_version_id INT
+)
 BEGIN
-    SET @org_id = (SELECT organization_id FROM tbl_organization WHERE name = p_org_name);
-    SET @current_cycle = (
-        SELECT MAX(cycle_number)
-        FROM tbl_renewal_cycle
-        WHERE organization_id = @org_id
-    );
-            SELECT 
-                om.member_id as id,
-                u.f_name as first_name,
-                u.l_name as last_name,
-                u.email,
-                om.joined_at
-            FROM tbl_organization_members om
-            JOIN tbl_user u ON om.user_id = u.user_id
-            WHERE om.organization_id = @org_id
-                AND om.cycle_number = @current_cycle
-                -- Only include Active members
-                AND om.status = 'Active'
-                -- Exclude Executive members9
-                AND om.member_type != 'Executive'
-                -- Exclude Committee members
-                AND NOT EXISTS (
-                    SELECT 1
-                    FROM tbl_committee_members cm
-                    JOIN tbl_committee c ON cm.committee_id = c.committee_id
-                    WHERE c.organization_id = @org_id
-                        AND c.cycle_number = @current_cycle
-                        AND cm.user_id = om.user_id
-                );
+    -- Get the cycle_number for the given org_version_id
+    DECLARE v_cycle_number INT;
+    SELECT cycle_number INTO v_cycle_number
+    FROM tbl_renewal_cycle
+    WHERE org_version_id = p_org_version_id;
+
+    SELECT 
+        om.member_id as id,
+        u.f_name as first_name,
+        u.l_name as last_name,
+        u.email,
+        om.joined_at
+    FROM tbl_organization_members om
+    JOIN tbl_user u ON om.user_id = u.user_id
+    WHERE om.organization_id = p_org_id
+        AND om.cycle_number = v_cycle_number
+        -- Only include Active members
+        AND om.status = 'Active'
+        -- Exclude Executive members
+        AND om.member_type != 'Executive'
+        -- Exclude Committee members
+        AND NOT EXISTS (
+            SELECT 1
+            FROM tbl_committee_members cm
+            JOIN tbl_committee c ON cm.committee_id = c.committee_id
+            WHERE c.organization_id = p_org_id
+                AND c.cycle_number = v_cycle_number
+                AND cm.user_id = om.user_id
+        );
 END $$
 DELIMITER ;
 
 DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationOfficers(IN p_org_name VARCHAR(100))
+CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationOfficers(
+    IN p_org_id INT,
+    IN p_org_version_id INT
+)
 BEGIN
-    -- Get organization ID and current cycle
-    SET @org_id = (SELECT organization_id FROM tbl_organization WHERE name = p_org_name);
-    SET @current_cycle = (
-        SELECT MAX(cycle_number)
-        FROM tbl_renewal_cycle
-        WHERE organization_id = @org_id
-    );
-            SELECT 
-            u.user_id id,
-            u.f_name AS first_name,
-            u.l_name AS last_name,
-            u.email,
-            er.role_title,
-            p.name AS program_name
-            FROM tbl_organization_members om
-            JOIN tbl_user u ON om.user_id = u.user_id
-            JOIN tbl_executive_role er ON om.executive_role_id = er.executive_role_id
-            LEFT JOIN tbl_program p ON u.program_id = p.program_id
-            WHERE om.organization_id = @org_id
-                AND om.cycle_number = @current_cycle
-                AND om.member_type = 'Executive';
+    DECLARE v_cycle_number INT;
+    -- Get the cycle_number for the given org_version_id
+    SELECT cycle_number INTO v_cycle_number
+    FROM tbl_renewal_cycle
+    WHERE org_version_id = p_org_version_id;
+
+    SELECT 
+        u.user_id id,
+        u.f_name AS first_name,
+        u.l_name AS last_name,
+        u.email,
+        er.role_title,
+        p.name AS program_name
+    FROM tbl_organization_members om
+    JOIN tbl_user u ON om.user_id = u.user_id
+    JOIN tbl_executive_role er ON om.executive_role_id = er.executive_role_id
+    LEFT JOIN tbl_program p ON u.program_id = p.program_id
+    WHERE om.organization_id = p_org_id
+        AND om.cycle_number = v_cycle_number
+        AND om.member_type = 'Executive';
 END$$
 DELIMITER ;
 
@@ -6960,15 +6940,15 @@ DELIMITER ;
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationCommittees(
-    IN p_org_name VARCHAR(100))
+    IN p_org_id INT,
+    IN p_org_version_id INT)
 BEGIN
-    
-    SET @org_id = (SELECT organization_id FROM tbl_organization WHERE name = p_org_name);
-    SET @current_cycle = (
-        SELECT MAX(cycle_number)
-        FROM tbl_renewal_cycle
-        WHERE organization_id = @org_id
-    );
+
+    DECLARE v_cycle_number INT;
+    -- Get the cycle_number for the given org_version_id
+    SELECT cycle_number INTO v_cycle_number
+    FROM tbl_renewal_cycle
+    WHERE org_version_id = p_org_version_id;
 
     SELECT 
         c.committee_id as id,
@@ -6977,8 +6957,8 @@ BEGIN
         c.created_at
     FROM tbl_committee c
     LEFT JOIN tbl_committee_members cm ON c.committee_id = cm.committee_id
-    WHERE c.organization_id = @org_id
-    AND c.cycle_number = @current_cycle
+    WHERE c.organization_id = p_org_id
+    AND c.cycle_number = v_cycle_number
     GROUP BY c.committee_id, c.name, c.description, c.created_at
     ORDER BY c.name;
 
@@ -6987,15 +6967,15 @@ DELIMITER ;
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetAllCommitteeMembers(
-    IN p_org_name VARCHAR(100)
+    IN p_org_id INT,
+    IN p_org_version_id INT
 )
 BEGIN
-    SET @org_id = (SELECT organization_id FROM tbl_organization WHERE name = p_org_name);
-    SET @current_cycle = (
-        SELECT MAX(cycle_number)
-        FROM tbl_renewal_cycle
-        WHERE organization_id = @org_id
-    );
+    DECLARE v_cycle_number INT;
+    -- Get the cycle_number for the given org_version_id
+    SELECT cycle_number INTO v_cycle_number
+    FROM tbl_renewal_cycle
+    WHERE org_version_id = p_org_version_id;
 
     SELECT 
         c.committee_id,
@@ -7013,8 +6993,8 @@ BEGIN
     JOIN tbl_committee_members cm ON c.committee_id = cm.committee_id
     JOIN tbl_user u ON cm.user_id = u.user_id
     LEFT JOIN tbl_program p ON u.program_id = p.program_id
-    WHERE c.organization_id = @org_id
-        AND c.cycle_number = @current_cycle
+    WHERE c.organization_id = p_org_id
+        AND c.cycle_number = v_cycle_number
     ORDER BY 
         c.organization_id,
         c.cycle_number,
@@ -7630,16 +7610,16 @@ DELIMITER ;
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetPendingOrganizationMembers(
-    IN p_org_name VARCHAR(100)
+    IN p_org_id INT,
+    IN p_org_version_id INT
 )
 BEGIN
+    DECLARE v_cycle_number INT;
+    -- Get the cycle_number for the given org_version_id
+    SELECT cycle_number INTO v_cycle_number
+    FROM tbl_renewal_cycle
+    WHERE org_version_id = p_org_version_id;
 
-    SET @org_id = (SELECT organization_id FROM tbl_organization WHERE name = p_org_name);
-    SET @current_cycle = (
-        SELECT MAX(cycle_number)
-        FROM tbl_renewal_cycle
-        WHERE organization_id = @org_id
-    );
     SELECT
         om.member_id,
         om.organization_id,
@@ -7675,8 +7655,8 @@ BEGIN
         ON tm.transaction_id = t.transaction_id
         AND t.user_id = om.user_id
         AND t.transaction_type = 'Membership Fee'
-    WHERE om.organization_id = @org_id
-      AND om.cycle_number = @current_cycle
+    WHERE om.organization_id = p_org_id
+      AND om.cycle_number = v_cycle_number
       AND om.status = 'Pending'
     ORDER BY om.joined_at DESC;
 END$$
@@ -9290,6 +9270,153 @@ END$$
 DELIMITER ;
 
 
+DELIMITER $$
+CREATE PROCEDURE CheckOrgRenewalStatus(
+    IN p_org_id INT
+)
+BEGIN
+    DECLARE v_org_version_id INT DEFAULT NULL;
+    DECLARE v_latest_approved_period_id INT DEFAULT NULL;
+    DECLARE v_latest_app_id INT DEFAULT NULL;
+    DECLARE v_latest_app_status VARCHAR(20) DEFAULT NULL;
+    DECLARE v_latest_app_period_id INT DEFAULT NULL;
+    DECLARE v_active_period_id INT DEFAULT NULL;
+    DECLARE v_active_start DATETIME DEFAULT NULL;
+    DECLARE v_active_end DATETIME DEFAULT NULL;
+
+    -- Labels so we can exit early
+    renewal_proc: BEGIN
+
+        -- 1) get current_org_version_id from tbl_organization
+        SELECT current_org_version_id
+        INTO v_org_version_id
+        FROM tbl_organization
+        WHERE organization_id = p_org_id
+        LIMIT 1;
+
+        -- If org or current version not found -> return simple result
+        IF v_org_version_id IS NULL THEN
+            SELECT JSON_OBJECT(
+                'organization_id', p_org_id,
+                'current_org_version_id', NULL,
+                'active_period_found', FALSE,
+                'show_renewal', FALSE,
+                'pending_application', FALSE,
+                'already_renewed', FALSE,
+                'reason', 'no_current_version'
+            ) AS result;
+            LEAVE renewal_proc;
+        END IF;
+
+        -- 2) find most recent Approved application period for this org_version (if any)
+        SELECT a.period_id
+        INTO v_latest_approved_period_id
+        FROM tbl_application a
+        WHERE a.org_version_id = v_org_version_id
+          AND a.status = 'Approved'
+        ORDER BY a.created_at DESC
+        LIMIT 1;
+
+        -- 3) find the latest application record for this org_version (most recent submission/resubmission)
+        SELECT a.application_id, a.status, a.period_id
+        INTO v_latest_app_id, v_latest_app_status, v_latest_app_period_id
+        FROM tbl_application a
+        WHERE a.org_version_id = v_org_version_id
+        ORDER BY a.created_at DESC
+        LIMIT 1;
+
+        -- 4) find the currently active application period, if any (single active)
+        SELECT ap.period_id,
+               CONCAT(ap.start_date, ' ', ap.start_time),
+               CONCAT(ap.end_date, ' ', ap.end_time)
+        INTO v_active_period_id, v_active_start, v_active_end
+        FROM tbl_application_period ap
+        WHERE ap.is_active = 1
+          AND NOW() BETWEEN CONCAT(ap.start_date, ' ', ap.start_time)
+                       AND CONCAT(ap.end_date, ' ', ap.end_time)
+        LIMIT 1;
+
+        -- 5) Decision logic
+        IF v_active_period_id IS NULL THEN
+            -- no active application period -> no renewal action
+            SELECT JSON_OBJECT(
+                'organization_id', p_org_id,
+                'current_org_version_id', v_org_version_id,
+                'active_period_found', FALSE,
+                'active_period_id', NULL,
+                'latest_approved_period_id', v_latest_approved_period_id,
+                'latest_application_id', v_latest_app_id,
+                'latest_application_status', v_latest_app_status,
+                'latest_application_period_id', v_latest_app_period_id,
+                'show_renewal', FALSE,
+                'pending_application', FALSE,
+                'already_renewed', (v_latest_approved_period_id IS NOT NULL)
+            ) AS result;
+            LEAVE renewal_proc;
+        END IF;
+
+        -- If active period exists, apply rules in priority order:
+        --  A) If there exists a Pending application for this version in the active period -> pending_application
+        IF v_latest_app_period_id IS NOT NULL AND v_latest_app_period_id = v_active_period_id
+           AND v_latest_app_status = 'Pending' THEN
+            SELECT JSON_OBJECT(
+                'organization_id', p_org_id,
+                'current_org_version_id', v_org_version_id,
+                'active_period_found', TRUE,
+                'active_period_id', v_active_period_id,
+                'active_period_start', v_active_start,
+                'active_period_end', v_active_end,
+                'latest_approved_period_id', v_latest_approved_period_id,
+                'latest_application_id', v_latest_app_id,
+                'latest_application_status', v_latest_app_status,
+                'latest_application_period_id', v_latest_app_period_id,
+                'show_renewal', FALSE,
+                'pending_application', TRUE,
+                'already_renewed', (v_latest_approved_period_id = v_active_period_id)
+            ) AS result;
+            LEAVE renewal_proc;
+        END IF;
+
+        -- B) If the (most recent) Approved application's period matches the active period -> already renewed
+        IF v_latest_approved_period_id IS NOT NULL AND v_latest_approved_period_id = v_active_period_id THEN
+            SELECT JSON_OBJECT(
+                'organization_id', p_org_id,
+                'current_org_version_id', v_org_version_id,
+                'active_period_found', TRUE,
+                'active_period_id', v_active_period_id,
+                'active_period_start', v_active_start,
+                'active_period_end', v_active_end,
+                'latest_approved_period_id', v_latest_approved_period_id,
+                'latest_application_id', v_latest_app_id,
+                'latest_application_status', v_latest_app_status,
+                'latest_application_period_id', v_latest_app_period_id,
+                'show_renewal', FALSE,
+                'pending_application', FALSE,
+                'already_renewed', TRUE
+            ) AS result;
+            LEAVE renewal_proc;
+        END IF;
+
+        -- C) Otherwise there is an active period and it does NOT match the approved period -> show renewal
+        SELECT JSON_OBJECT(
+            'organization_id', p_org_id,
+            'current_org_version_id', v_org_version_id,
+            'active_period_found', TRUE,
+            'active_period_id', v_active_period_id,
+            'active_period_start', v_active_start,
+            'active_period_end', v_active_end,
+            'latest_approved_period_id', v_latest_approved_period_id,
+            'latest_application_id', v_latest_app_id,
+            'latest_application_status', v_latest_app_status,
+            'latest_application_period_id', v_latest_app_period_id,
+            'show_renewal', TRUE,
+            'pending_application', FALSE,
+            'already_renewed', FALSE
+        ) AS result;
+
+    END renewal_proc;
+END$$
+DELIMITER ;
 
 -- INDEXES
 
