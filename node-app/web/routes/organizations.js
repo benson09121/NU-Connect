@@ -3,7 +3,11 @@ const router = express.Router();
 const organizationsController = require('../../web/controllers/organizationsController');
 const middleware = require('../../middlewares/middleWare');
 
-router.get('/organizations', middleware.validateAzureJWT, organizationsController.getOrganizations);
+router.get(
+    '/organizations',
+    middleware.validateAzureJWT,
+    organizationsController.getOrganizations
+);
 router.get('/organizations-by-status', middleware.validateAzureJWT, middleware.hasPermission("VIEW_ORGANIZATION"), organizationsController.getOrganizationsByStatus);
 router.post('/organizations', middleware.validateAzureJWT, organizationsController.createOrganizationApplication);
 router.get('/organizations', middleware.validateAzureJWT, organizationsController.getOrganizations);

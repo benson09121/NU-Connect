@@ -469,6 +469,35 @@ async function checkScheduleConflict(params) {
     }
 }
 
+async function createSDAOEvent(event) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query(
+            'CALL CreateSDAOEvent(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);',
+            [
+                event.user_id,
+                event.title,
+                event.description,
+                event.venue_type,
+                event.venue || null,
+                event.start_date,
+                event.end_date,
+                event.start_time,
+                event.end_time,
+                event.status || 'Approved',
+                event.type,
+                event.is_open_to,
+                event.fee === "" ? null : event.fee,
+                event.capacity === "" ? null : event.capacity,
+                event.image || null
+            ]
+        );
+        return rows[0][0];
+    } finally {
+        connection.release();
+    }
+}
+
 module.exports = {
     addEvent,
     getEventRequirements,
@@ -502,5 +531,6 @@ module.exports = {
     AddCertificateTemplate,
     getCertificateTemplate,
     checkEventTitle,
-    checkScheduleConflict
+    checkScheduleConflict,
+    createSDAOEvent
 };

@@ -199,7 +199,21 @@ async function getAllPeriodsWithApplications() {
     const connection = await pool.getConnection();
     try {
         const [rows] = await connection.query('CALL GetAllPeriodsWithApplications();');
-        return rows[0];
+        const resultRows = rows[0] || [];
+
+        // Parse MySQL JSON text in `applications` column into JS arrays (if needed)
+        return resultRows.map(r => {
+            if (r && r.applications && typeof r.applications === 'string') {
+                try {
+                    r.applications = JSON.parse(r.applications);
+                } catch (e) {
+                    // leave as-is if parsing fails
+                }
+            }
+            // ensure applications is an array (not null)
+            if (!r.applications) r.applications = [];
+            return r;
+        });
     }
     catch (error) {
         console.error('Error fetching periods with applications:', error);
