@@ -93,10 +93,7 @@ CREATE TABLE tbl_role_permission(
     FOREIGN KEY (permission_id) REFERENCES tbl_permission(permission_id) ON DELETE CASCADE
 );
 
-
-
--- Create tbl_organization first, then tbl_organization_version to fix FK error
-CREATE TABLE tbl_organization(
+CREATE TABLE tbl_organization (
     organization_id INT AUTO_INCREMENT PRIMARY KEY,
     adviser_id VARCHAR(200) NOT NULL,
     current_org_version_id INT NOT NULL,
@@ -105,14 +102,25 @@ CREATE TABLE tbl_organization(
     base_program_id INT NULL, -- NULL meaning open to all
     logo VARCHAR(255),
     status ENUM('Pending', 'Approved', 'Rejected', 'Renewal', 'Archived') DEFAULT 'Pending',
-    membership_fee_type ENUM('Per Term', 'Whole Academic Year',"Free") NOT NULL DEFAULT 'Free',
+    membership_fee_type ENUM('Per Term', 'Whole Academic Year', 'Free') NOT NULL DEFAULT 'Free',
     category ENUM('Co-Curricular Organization', 'Extra Curricular Organization') DEFAULT 'Co-Curricular Organization',
     membership_fee_amount DECIMAL(10,2) NULL,
     is_recruiting BOOLEAN DEFAULT TRUE,
     is_open_to_all_courses BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    -- FOREIGN KEY (current_org_version_id) REFERENCES tbl_organization_version(org_version_id) ON UPDATE CASCADE, -- Added after table creation
-    FOREIGN KEY (adviser_id) REFERENCES tbl_user(user_id) ON UPDATE CASCADE
+
+    -- Archive / unarchive audit columns
+    archived_at TIMESTAMP NULL,
+    archived_by VARCHAR(200) NULL,
+    archived_reason VARCHAR(255) NULL,
+    unarchived_at TIMESTAMP NULL,
+    unarchived_by VARCHAR(200) NULL,
+    unarchived_reason VARCHAR(255) NULL,
+
+    -- foreign keys (ensure tbl_user exists before running)
+    FOREIGN KEY (adviser_id) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
+    FOREIGN KEY (archived_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
+    FOREIGN KEY (unarchived_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE
 );
 
 CREATE TABLE tbl_organization_version (
@@ -123,7 +131,7 @@ CREATE TABLE tbl_organization_version (
     logo_path VARCHAR(500) NULL,
     description TEXT NULL,
     base_program_id INT NULL,
-    membership_fee_type ENUM('Per Term','Whole Academic Year','Free') DEFAULT 'Free',
+    membership_fee_type ENUM('Per Term', 'Whole Academic Year', 'Free') DEFAULT 'Free',
     category ENUM('Co-Curricular Organization','Extra Curricular Organization') DEFAULT 'Co-Curricular Organization',
     membership_fee_amount DECIMAL(10,2) NULL,
     is_recruiting BOOLEAN DEFAULT TRUE,
@@ -132,8 +140,19 @@ CREATE TABLE tbl_organization_version (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     valid_from DATE NULL,
     valid_to DATE NULL,
-    -- FOREIGN KEY (organization_id) REFERENCES tbl_organization(organization_id) ON DELETE SET NULL, -- Added after table creation
-    FOREIGN KEY (created_by) REFERENCES tbl_user(user_id)
+
+    -- Archive / unarchive audit columns for version snapshots (optional audit)
+    archived_at TIMESTAMP NULL,
+    archived_by VARCHAR(200) NULL,
+    archived_reason VARCHAR(255) NULL,
+    unarchived_at TIMESTAMP NULL,
+    unarchived_by VARCHAR(200) NULL,
+    unarchived_reason VARCHAR(255) NULL,
+
+    FOREIGN KEY (created_by) REFERENCES tbl_user(user_id),
+    FOREIGN KEY (archived_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
+    FOREIGN KEY (unarchived_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
+    FOREIGN KEY (organization_id) REFERENCES tbl_organization(organization_id) ON DELETE SET NULL
 );
 
 -- Add circular FKs after both tables exist
@@ -399,7 +418,7 @@ CREATE TABLE tbl_event (
     user_id VARCHAR(200) NOT NULL,
     title VARCHAR(300) NOT NULL,
     description TEXT NOT NULL,
-    image TEXT,
+    image TEXT NULL,
     venue_type ENUM('Face to face', 'Online') DEFAULT 'face to face',
     venue VARCHAR(200) NULL,
     start_date DATE NOT NULL,
@@ -497,8 +516,17 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Start time must be before end time for same-day events';
     END IF;
 END$$
-
 DELIMITER ;
+
+CREATE TABLE tbl_blocked_period (
+    blocked_period_id INT AUTO_INCREMENT PRIMARY KEY,
+    start_date DATE NOT NULL,
+    end_date DATE NOT NULL,
+    reason VARCHAR(255) NOT NULL,
+    created_by VARCHAR(200) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (created_by) REFERENCES tbl_user(user_id)
+);
 
 CREATE TABLE tbl_event_application (
     event_application_id INT AUTO_INCREMENT PRIMARY KEY,
@@ -1050,7 +1078,6 @@ END $$
 DELIMITER ;
 
 DELIMITER $$
-
 CREATE DEFINER='admin'@'%' PROCEDURE CreateEvent(IN
     p_user_id VARCHAR(200),
     p_title VARCHAR(300),
@@ -1209,6 +1236,7 @@ BEGIN
     ORDER BY e.start_date DESC, e.start_time DESC;
 END $$
 DELIMITER ;
+
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizations(IN p_user_id VARCHAR(200))
 BEGIN
@@ -1218,6 +1246,7 @@ BEGIN
         o.logo,
         o.description AS organization_description,
         o.category AS organization_type,
+        o.status, -- Include status for filtering (Active, Archived, etc.)
         o.is_recruiting,
         o.membership_fee_amount,
         (
@@ -4225,26 +4254,26 @@ DELIMITER ;
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationByRole(
-    IN p_role VARCHAR(100)
+    IN p_role VARCHAR(100),
+    IN p_status VARCHAR(20) -- 'Approved', 'Archived', or NULL for all
 )
 BEGIN
-
-     SELECT 
-            o.organization_id as id,
-            o.name AS organization_name,
-            o.logo AS organization_logo,
-            o.status AS organization_status,
-            o.current_org_version_id,
-            MAX(c.cycle_number) AS cycle_number,
-            o.category,
-            p.name AS program_name,
-            o.created_at
-        FROM tbl_organization o
-        LEFT JOIN tbl_program p ON o.base_program_id = p.program_id
-        LEFT JOIN tbl_renewal_cycle c ON o.organization_id = c.organization_id
-        WHERE o.status = 'Approved'
-        GROUP BY o.organization_id
-        ORDER BY o.created_at DESC;
+    SELECT 
+        o.organization_id as id,
+        o.name AS organization_name,
+        o.logo AS organization_logo,
+        o.status AS organization_status,
+        o.current_org_version_id,
+        MAX(c.cycle_number) AS cycle_number,
+        o.category,
+        p.name AS program_name,
+        o.created_at
+    FROM tbl_organization o
+    LEFT JOIN tbl_program p ON o.base_program_id = p.program_id
+    LEFT JOIN tbl_renewal_cycle c ON o.organization_id = c.organization_id
+    WHERE (p_status IS NULL OR o.status = p_status)
+    GROUP BY o.organization_id
+    ORDER BY o.created_at DESC;
 END $$
 DELIMITER ;
 
@@ -5472,54 +5501,98 @@ DELIMITER ;
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE ArchiveOrganization(
     IN p_organization_id INT,
-    IN p_user_id VARCHAR(200)
+    IN p_user_id VARCHAR(200),
+    IN p_reason VARCHAR(255)
 )
 BEGIN
-    -- Update organization status to 'Archived'
+    DECLARE v_user_email VARCHAR(100);
+
+    -- Validate inputs
+    IF p_organization_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'organization_id required';
+    END IF;
+    IF p_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'user_id required';
+    END IF;
+    IF p_reason IS NULL OR TRIM(p_reason) = '' THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'archive reason required';
+    END IF;
+
+    -- Update organization status and archive audit fields
     UPDATE tbl_organization
-    SET status = 'Archived'
+    SET status = 'Archived',
+        archived_at = CURRENT_TIMESTAMP,
+        archived_by = p_user_id,
+        archived_reason = p_reason,
+        -- clear any previous unarchive audit
+        unarchived_at = NULL,
+        unarchived_by = NULL,
+        unarchived_reason = NULL
     WHERE organization_id = p_organization_id;
 
-    -- Log the action
-    INSERT INTO tbl_logs (
-        user_id,
-        action,
-        type,
-        meta_data
-    ) VALUES (
-        p_user_id,
+    -- Lookup user email for LogAction and call stored logger
+    SELECT email INTO v_user_email FROM tbl_user WHERE user_id = p_user_id LIMIT 1;
+    IF v_user_email IS NULL THEN
+        SET v_user_email = '';
+    END IF;
+
+    CALL LogAction(
+        v_user_email,
         CONCAT('Archived organization ID ', p_organization_id),
         'organization',
-        JSON_OBJECT('organization_id', p_organization_id, 'archived_at', NOW())
+        JSON_OBJECT('organization_id', p_organization_id, 'archived_at', NOW(), 'reason', p_reason),
+        CONCAT('/admin/organizations/', p_organization_id),
+        NULL
     );
-END $$
+
+    -- Optionally return the updated row for callers
+    SELECT * FROM tbl_organization WHERE organization_id = p_organization_id LIMIT 1;
+END$$
 DELIMITER ;
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE UnarchiveOrganization(
     IN p_organization_id INT,
-    IN p_user_id VARCHAR(200)
+    IN p_user_id VARCHAR(200),
+    IN p_reason VARCHAR(255)
 )
 BEGIN
-    -- Unarchive organization (set status to 'Approved', or change as needed)
+    DECLARE v_user_email VARCHAR(100);
+
+    IF p_organization_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'organization_id required';
+    END IF;
+    IF p_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'user_id required';
+    END IF;
+
+    -- Update organization status and set unarchive audit fields. reason may be NULL.
     UPDATE tbl_organization
-    SET status = 'Approved'
+    SET status = 'Approved',
+        unarchived_at = CURRENT_TIMESTAMP,
+        unarchived_by = p_user_id,
+        unarchived_reason = p_reason
     WHERE organization_id = p_organization_id
       AND status = 'Archived';
 
-    -- Log the action
-    INSERT INTO tbl_logs (
-        user_id,
-        action,
-        type,
-        meta_data
-    ) VALUES (
-        p_user_id,
+    -- Lookup user email for LogAction and call stored logger
+    SELECT email INTO v_user_email FROM tbl_user WHERE user_id = p_user_id LIMIT 1;
+    IF v_user_email IS NULL THEN
+        SET v_user_email = '';
+    END IF;
+
+    CALL LogAction(
+        v_user_email,
         CONCAT('Unarchived organization ID ', p_organization_id),
         'organization',
-        JSON_OBJECT('organization_id', p_organization_id, 'unarchived_at', NOW())
+        JSON_OBJECT('organization_id', p_organization_id, 'unarchived_at', NOW(), 'reason', p_reason),
+        CONCAT('/admin/organizations/', p_organization_id),
+        NULL
     );
-END $$
+
+    -- Return the updated row for callers
+    SELECT * FROM tbl_organization WHERE organization_id = p_organization_id LIMIT 1;
+END$$
 DELIMITER ;
 
 DELIMITER $$
@@ -5610,22 +5683,31 @@ BEGIN
                     'application_id', a.application_id,
                     'organization_id', a.organization_id,
                     'cycle_number', a.cycle_number,
+                    'org_version_id', a.org_version_id,
+                    'submitted_org_name', a.submitted_org_name,
+                    'submitted_org_logo', a.submitted_org_logo,
                     'application_type', a.application_type,
+                    'period_id', a.period_id,
                     'applicant_user_id', a.applicant_user_id,
+                    'applicant_email', u.email,
+                    'applicant_name', CONCAT(COALESCE(u.f_name,''), ' ', COALESCE(u.l_name,'')),
                     'status', a.status,
                     'created_at', a.created_at,
                     'updated_at', a.updated_at,
-                    'organization_name', o.name,
-                    'category', o.category
+                    'organization_name', COALESCE(o.name, v.name, a.submitted_org_name),
+                    'organization_logo', COALESCE(o.logo, v.logo_path, a.submitted_org_logo),
+                    'category', COALESCE(o.category, v.category)
                 )
             )
             FROM tbl_application a
             LEFT JOIN tbl_organization o ON a.organization_id = o.organization_id
+            LEFT JOIN tbl_organization_version v ON a.org_version_id = v.org_version_id
+            LEFT JOIN tbl_user u ON a.applicant_user_id = u.user_id
             WHERE a.period_id = ap.period_id
         ) AS applications
     FROM tbl_application_period ap
     ORDER BY ap.start_date DESC, ap.period_id DESC;
-END $$
+END$$
 DELIMITER ;
 
 DELIMITER $$
@@ -9259,13 +9341,93 @@ DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetApprovedOrganizationLogos()
 BEGIN
     SELECT
+        o.organization_id,
+        o.name AS organization_name,
+        o.logo,
+        o.current_org_version_id,
+        o.category,
+        o.created_at
+    FROM tbl_organization o
+    WHERE o.status = 'Approved'
+      AND o.logo IS NOT NULL
+      AND o.logo != ''
+    ORDER BY o.name;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE CreateSDAOEvent(
+    IN p_user_id VARCHAR(200),
+    IN p_title VARCHAR(300),
+    IN p_description TEXT,
+    IN p_venue_type ENUM('Face to face', 'Online'),
+    IN p_venue VARCHAR(200),
+    IN p_start_date DATE,
+    IN p_end_date DATE,
+    IN p_start_time TIME,
+    IN p_end_time TIME,
+    IN p_status ENUM('Pending', 'Approved', 'Rejected', 'Archived'),
+    IN p_type ENUM('Paid', 'Free'),
+    IN p_is_open_to ENUM('Members only', 'Open to all', 'NU Students only'),
+    IN p_fee INT,
+    IN p_capacity INT,
+    IN p_image TEXT
+)
+BEGIN
+    -- Only allow SDAO (role_id = 4) to use this proc
+    DECLARE v_role_id INT;
+    SELECT role_id INTO v_role_id FROM tbl_user WHERE user_id = p_user_id LIMIT 1;
+    IF v_role_id != 4 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Only SDAO can create SDAO events';
+    END IF;
+
+    -- Check if event is within a blocked period
+    IF EXISTS (
+        SELECT 1 FROM tbl_blocked_period
+        WHERE p_start_date <= end_date AND p_end_date >= start_date
+    ) THEN
+        -- Only SDAO can create events in blocked periods (already checked above)
+        -- If you want to block even SDAO, uncomment below:
+        -- SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Events cannot be created during blocked periods';
+    END IF;
+
+    INSERT INTO tbl_event (
         organization_id,
-        name AS organization_name,
-        COALESCE(logo, '') AS logo,
-        current_org_version_id
-    FROM tbl_organization
-    WHERE status = 'Approved'
-    ORDER BY name;
+        cycle_number,
+        event_type,
+        user_id,
+        title,
+        description,
+        image,
+        venue_type,
+        venue,
+        start_date,
+        end_date,
+        start_time,
+        end_time,
+        status,
+        type,
+        is_open_to,
+        fee,
+        capacity,
+        created_at
+    ) VALUES (
+        NULL, NULL, 'SDAO', p_user_id, p_title, p_description, p_image, p_venue_type, p_venue,
+        p_start_date, p_end_date, p_start_time, p_end_time, 'Approved', p_type, p_is_open_to, p_fee, p_capacity, NOW()
+    );
+
+    SELECT * FROM tbl_event WHERE event_id = LAST_INSERT_ID();
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE IsDateBlocked(
+    IN p_start_date DATE,
+    IN p_end_date DATE
+)
+BEGIN
+    SELECT * FROM tbl_blocked_period
+    WHERE p_start_date <= end_date AND p_end_date >= start_date;
 END$$
 DELIMITER ;
 
@@ -9607,16 +9769,16 @@ INSERT INTO tbl_user (user_id, f_name, l_name, email, program_id, role_id) VALUE
 ('CY4e1GmCXysMRn8VYudhqDy7CDJ8xVidGO1v8RnRj1E', ' Shamiah M', 'Mendoza', 'mendozasm@students.nu-dasma.edu.ph', '13', '3');
 
 
-INSERT INTO tbl_application_requirement (requirement_name, is_applicable_to, file_path, created_by) VALUES
-('Letter of Intent', 'new', 'requirement-1748793177547-Letter-of-Intent.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
-('Student Org Application Form', 'new', 'requirement-1748793205361-ACO-SA-F-002Student-Org-Application-Form.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
-('By Laws of the Organization', 'new', 'requirement-1748793242309-Constitution-and-ByLaws.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
-('List of Officers/Founders', 'new', 'requirement-1748793302932-List-of-Officers-and-Founders.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
-('Letter from the College Dean', 'new', 'requirement-1748793328989-Letter-from-the-College-Dean.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
-('List of Members', 'new', 'requirement-1748793346203-List-of-Members.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
-('Latest Certificate of Grades of Officers', 'new', 'requirement-1748793368006-Latest-Certificate-of-Grades-of-Officers.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
-('Biodata/CV of Officers', 'new', 'requirement-1748793390349-CV-of-Officers.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
-('List of Proposed Projects with Proposed Budget for the AY', 'new', 'requirement-1748793408714-List-of-Proposed-Project-with-Proposed-Budget.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0');
+-- INSERT INTO tbl_application_requirement (requirement_name, is_applicable_to, file_path, created_by) VALUES
+-- ('Letter of Intent', 'new', 'requirement-1748793177547-Letter-of-Intent.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
+-- ('Student Org Application Form', 'new', 'requirement-1748793205361-ACO-SA-F-002Student-Org-Application-Form.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
+-- ('By Laws of the Organization', 'new', 'requirement-1748793242309-Constitution-and-ByLaws.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
+-- ('List of Officers/Founders', 'new', 'requirement-1748793302932-List-of-Officers-and-Founders.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
+-- ('Letter from the College Dean', 'new', 'requirement-1748793328989-Letter-from-the-College-Dean.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
+-- ('List of Members', 'new', 'requirement-1748793346203-List-of-Members.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
+-- ('Latest Certificate of Grades of Officers', 'new', 'requirement-1748793368006-Latest-Certificate-of-Grades-of-Officers.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
+-- ('Biodata/CV of Officers', 'new', 'requirement-1748793390349-CV-of-Officers.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
+-- ('List of Proposed Projects with Proposed Budget for the AY', 'new', 'requirement-1748793408714-List-of-Proposed-Project-with-Proposed-Budget.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0');
 
 
 INSERT INTO tbl_executive_rank (rank_level, default_title, description) VALUES

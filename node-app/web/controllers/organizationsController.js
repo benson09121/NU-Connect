@@ -6,37 +6,34 @@ const organizationsModel = require('../models/organizationsModel');
 const userCacheModel = require('../models/userCacheModel');
 
 async function getOrganizations(req, res) {
-    const { sessionId, user_role, org_name } = req.query;
+    const { sessionId, user_role, org_name, status } = req.query;
     const program_id = req.query.program_id || null;
 
-  try {
-      if(sessionId) {
-            if(user_role === 'SDAO'){
-               const organizations = await organizationsModel.getOrganizationByRole(user_role);
-               subscribeToChannel(sessionId, `organizations_${user_role}`);
-               res.json(organizations);
-               console.log(organizations);
-            } else if (user_role ==='Program Chair'){
+    try {
+        if (sessionId) {
+            if (user_role === 'SDAO') {
+                const organizations = await organizationsModel.getOrganizationByRole(user_role, status || null);
+                subscribeToChannel(sessionId, `organizations_${user_role}`);
+                res.json(organizations);
+            } else if (user_role === 'Program Chair') {
                 const organizations = await organizationsModel.getOrganizationByProgram(program_id);
                 subscribeToChannel(sessionId, `organizations_${user_role}_${program_id}`);
                 res.json(organizations);
-            } else if (user_role === 'Adviser'){
-               const organizations = await organizationsModel.getOrganizationByName(org_name);
+            } else if (user_role === 'Adviser') {
+                const organizations = await organizationsModel.getOrganizationByName(org_name);
                 subscribeToChannel(sessionId, `organizations_${user_role}_${org_name}`);
                 res.json(organizations);
-            } else if (user_role === 'Student'){
+            } else if (user_role === 'Student') {
                 const organizations = await organizationsModel.getOrganizationByName(org_name);
                 subscribeToChannel(sessionId, `organizations_${user_role}_${org_name}`);
                 res.json(organizations);
             }
-        // const getOrganizations = await organizationsModel.getOrganizations(req.user.user_id);
-        //  res.json(getOrganizations);
-      }
-     } catch (error) {
-         res.status(500).json({
-             error: error.message || "An error occurred while fetching the active application period.",
-         });
-     }
+        }
+    } catch (error) {
+        res.status(500).json({
+            error: error.message || "An error occurred while fetching the active application period.",
+        });
+    }
 }
 
 async function getOrganizationDetails(req, res) {
@@ -417,17 +414,44 @@ async function checkOrganizationEmails(req, res) {
 
 async function archiveOrganization(req, res) {
     try {
-        const { organization_id } = req.body;
+        const { organization_id, reason } = req.body;
         if (!organization_id) {
             return res.status(400).json({ message: 'Organization ID is required.' });
         }
-        // Lookup user_id by email (optimized)
+        if (!reason || reason.trim().length < 3) {
+            return res.status(400).json({ message: 'Archive reason is required.' });
+        }
+
+        // Lookup user_id by email
         const user = await organizationsModel.getUserByEmail(req.user.email);
         if (!user || !user.user_id) {
             return res.status(404).json({ message: 'User not found.' });
         }
-        await organizationsModel.archiveOrganization(organization_id, user.user_id);
-        res.status(200).json({ message: 'Organization archived successfully.' });
+
+        const result = await organizationsModel.archiveOrganization(organization_id, user.user_id, reason.trim());
+
+        // Real-time notification: treat archive as a DELETE operation for consumers
+        // Use the same channel as getOrganizations (organizations_SDAO, organizations_Program Chair_X, etc.)
+        // Broadcast to all relevant roles (example: SDAO, Program Chair, Adviser, Student)
+        const channels = [
+            'organizations_SDAO',
+            `organizations_Program Chair_${result?.base_program_id || ''}`,
+            `organizations_Adviser_${result?.name || ''}`,
+            `organizations_Student_${result?.name || ''}`
+        ];
+        channels.forEach(channel => {
+            publishToChannel(channel, {
+                operation: 'DELETE',
+                data: {
+                    organization_id,
+                    archived_by: user.user_id,
+                    archived_reason: reason.trim(),
+                    result
+                }
+            });
+        });
+
+        res.status(200).json({ message: 'Organization archived successfully.', result });
     } catch (error) {
         res.status(500).json({
             error: error.message || "An error occurred while archiving the organization.",
@@ -437,17 +461,40 @@ async function archiveOrganization(req, res) {
 
 async function unarchiveOrganization(req, res) {
     try {
-        const { organization_id } = req.body;
+        const { organization_id, reason } = req.body;
         if (!organization_id) {
             return res.status(400).json({ message: 'Organization ID is required.' });
         }
-        // Lookup user_id by email (optimized)
+
+        // Lookup user_id by email
         const user = await organizationsModel.getUserByEmail(req.user.email);
-        if (!user || !user.user_id) {   
+        if (!user || !user.user_id) {
             return res.status(404).json({ message: 'User not found.' });
         }
-        await organizationsModel.unarchiveOrganization(organization_id, user.user_id);
-        res.status(200).json({ message: 'Organization unarchived successfully.' });
+
+        const result = await organizationsModel.unarchiveOrganization(organization_id, user.user_id, reason ? reason.trim() : null);
+
+        // Real-time notification: notify clients that organization was restored
+        // Use the same channel as getOrganizations
+        const channels = [
+            'organizations_SDAO',
+            `organizations_Program Chair_${result?.base_program_id || ''}`,
+            `organizations_Adviser_${result?.name || ''}`,
+            `organizations_Student_${result?.name || ''}`
+        ];
+        channels.forEach(channel => {
+            publishToChannel(channel, {
+                operation: 'CREATE',
+                data: {
+                    organization_id,
+                    unarchived_by: user.user_id,
+                    unarchived_reason: reason || null,
+                    result
+                }
+            });
+        });
+
+        res.status(200).json({ message: 'Organization unarchived successfully.', result });
     } catch (error) {
         res.status(500).json({
             error: error.message || "An error occurred while unarchiving the organization.",
@@ -1120,20 +1167,19 @@ async function getApprovedOrganizationLogos(req, res) {
     try {
         const logos = await organizationsModel.getApprovedOrganizationLogos();
 
-        // Build dashboard-friendly URLs for each org (adjust Nginx internal path as needed)
+        // Use org_id in the URL instead of orgNameEncoded
         const data = logos.map(row => {
             const logoFilename = row.logo || null;
-            const orgNameEncoded = encodeURIComponent(row.organization_name);
-            const versionId = row.current_org_version_id || 0;
-            const logo_url = logoFilename
-                ? `/protected-organization-requirements/${orgNameEncoded}/${versionId}/logo/${logoFilename}`
-                : null;
+            const orgId = row.organization_id;
+            const cycle_number = row.current_org_version_id || 0;
             return {
-                organization_id: row.organization_id,
+                organization_id: orgId,
                 organization_name: row.organization_name,
                 logo: logoFilename,
-                current_org_version_id: versionId,
-                logo_url
+                current_org_version_id: cycle_number,
+                logo_url: logoFilename
+                    ? `/protected-organization-requirements/${orgId}/${cycle_number}/logo/${logoFilename}`
+                    : null
             };
         });
 

@@ -128,11 +128,15 @@ async function getUserByEmail(email) {
     }
 }
 
-async function archiveOrganization(organization_id, user_id) {
+async function archiveOrganization(organization_id, user_id, reason) {
     const connection = await pool.getConnection();
     try {
-        const [rows] = await connection.query('CALL ArchiveOrganization(?, ?);', [organization_id, user_id]);
-        return rows[0];
+        const [rows] = await connection.query('CALL ArchiveOrganization(?, ?, ?);', [organization_id, user_id, reason]);
+
+        // MySQL CALL returns an array of resultsets. The procedure SELECT * returns first resultset.
+        // Normalize to single row object (or null)
+        const single = Array.isArray(rows) && Array.isArray(rows[0]) ? rows[0][0] : (Array.isArray(rows) ? rows[0] : rows);
+        return single || null;
     } catch (error) {
         console.error('Error archiving organization:', error);
         throw error;
@@ -141,11 +145,13 @@ async function archiveOrganization(organization_id, user_id) {
     }
 }
 
-async function unarchiveOrganization(organization_id, user_id) {
+async function unarchiveOrganization(organization_id, user_id, reason = null) {
     const connection = await pool.getConnection();
     try {
-        const [rows] = await connection.query('CALL UnarchiveOrganization(?, ?);', [organization_id, user_id]);
-        return rows[0];
+        const [rows] = await connection.query('CALL UnarchiveOrganization(?, ?, ?);', [organization_id, user_id, reason]);
+
+        const single = Array.isArray(rows) && Array.isArray(rows[0]) ? rows[0][0] : (Array.isArray(rows) ? rows[0] : rows);
+        return single || null;
     } catch (error) {
         console.error('Error unarchiving organization:', error);
         throw error;
@@ -633,10 +639,10 @@ async function getUpdateApplication(application_id){
     }
 }
 
-async function getOrganizationByRole(user_role){
+async function getOrganizationByRole(user_role, status = null) {
     const connection = await pool.getConnection();
     try {
-        const [rows] = await connection.query('CALL GetOrganizationByRole(?);', [user_role]);
+        const [rows] = await connection.query('CALL GetOrganizationByRole(?, ?);', [user_role, status]);
         return rows[0];
     } catch (error) {
         console.error('Error fetching organization by role:', error);
