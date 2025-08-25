@@ -9256,6 +9256,21 @@ END$$
 DELIMITER ;
 
 DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetApprovedOrganizationLogos()
+BEGIN
+    SELECT
+        organization_id,
+        name AS organization_name,
+        COALESCE(logo, '') AS logo,
+        current_org_version_id
+    FROM tbl_organization
+    WHERE status = 'Approved'
+    ORDER BY name;
+END$$
+DELIMITER ;
+
+
+DELIMITER $$
 CREATE PROCEDURE CheckOrgRenewalStatus(
     IN p_org_id INT
 )
@@ -9401,7 +9416,6 @@ BEGIN
 
     END renewal_proc;
 END$$
-
 DELIMITER ;
 
 -- INDEXES

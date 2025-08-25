@@ -301,6 +301,25 @@ async function terminateActiveApplicationPeriod(terminatedBy) {
     }
 }
 
+async function getRequirementByFilePath(fileName) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query(
+            `SELECT 'requirement' AS src, requirement_id AS id FROM tbl_requirement WHERE file_path = ?
+             UNION
+             SELECT 'event_requirement' AS src, requirement_id AS id FROM tbl_event_application_requirement WHERE file_path = ?
+             LIMIT 1;`,
+            [fileName, fileName]
+        );
+        return rows[0] || null;
+    } catch (error) {
+        console.error('Error checking requirement by file path:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
 module.exports = {
     getUserByEmail,
     addRequirement,
@@ -318,5 +337,6 @@ module.exports = {
     getSpecificEventRequirement,
     updateEventRequirement,
     archiveEventRequirement,
-    initiateApprovalProcess
+    initiateApprovalProcess,
+    getRequirementByFilePath,
 };

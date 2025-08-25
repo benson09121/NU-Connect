@@ -178,4 +178,10 @@ router.post(
     organizationsController.initiateApprovalProcess
 );
 
+router.get(
+    '/organization-logos',
+    middleware.validateAzureJWT,
+    organizationsController.getApprovedOrganizationLogos
+);
+
 module.exports = router
