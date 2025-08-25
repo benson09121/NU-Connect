@@ -9275,6 +9275,22 @@ BEGIN
 END$$
 DELIMITER ;
 
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetApprovedOrganizationLogos()
+BEGIN
+    SELECT
+        organization_id,
+        name AS organization_name,
+        COALESCE(logo, '') AS logo,
+        current_org_version_id
+    FROM tbl_organization
+    WHERE status = 'Approved'
+    ORDER BY name;
+END$$
+DELIMITER ;
+
+
+
 -- INDEXES
 
 CREATE INDEX idx_org_members_user ON tbl_organization_members(user_id);

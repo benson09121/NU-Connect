@@ -97,21 +97,48 @@ async function getRequirements(req, res) {
 }
 
 async function downloadTemplate(req, res) {
-    const template_name = req.query.template_name;
-    try {
-        res.setHeader('X-Accel-Redirect', `/protected-requirements/${template_name}`);
-        const match = template_name.match(/requirement-(\d+)-(.+)/);
-        // Use the original filename if available, fallback to template_name
-        const downloadName = match[0];
-        res.setHeader('Content-Disposition', `attachment; filename="${downloadName}"`);
-        // Optionally, send a short message for debugging (remove in production)
-        // res.end('File download triggered');
-        res.end();
-    } catch (error) {
-        res.status(500).json({
-            error: error.message || "An error occurred while fetching the requirements.",
-        });
+  try {
+    const raw = req.query.template_name;
+    console.log('[downloadTemplate] raw query:', raw);
+    if (!raw) return res.status(400).json({ message: 'template_name is required' });
+
+    const template_name = decodeURIComponent(raw);
+    console.log('[downloadTemplate] decoded template_name:', template_name);
+
+    // basic basename/path traversal guard
+    if (path.basename(template_name) !== template_name) {
+      console.warn('[downloadTemplate] basename mismatch:', template_name);
+      return res.status(400).json({ message: 'Invalid template_name' });
     }
+
+    // Use the same directory as addRequirement (single source of truth)
+    const requirementsDir = '/app/requirements';
+    const filePath = path.join(requirementsDir, template_name);
+    console.log('[downloadTemplate] resolved filePath:', filePath);
+
+    if (!fs.existsSync(filePath)) {
+      console.warn('[downloadTemplate] file NOT found at path:', filePath);
+      return res.status(404).json({ message: 'Template not found', filePath });
+    }
+
+    const userFilename = template_name.replace(/^requirement-\d+-?/, '');
+
+    if (process.env.USE_X_ACCEL === '1') {
+      res.setHeader('Content-Disposition', `attachment; filename="${userFilename}"`);
+      res.setHeader('X-Accel-Redirect', `/protected-requirements/${template_name}`);
+      return res.end();
+    }
+
+    return res.download(filePath, userFilename, (err) => {
+      if (err) {
+        console.error('[downloadTemplate] download error:', err);
+        if (!res.headersSent) res.status(500).json({ message: 'Error sending file' });
+      }
+    });
+  } catch (error) {
+    console.error('[downloadTemplate] error:', error);
+    res.status(500).json({ error: error.message || 'An error occurred while fetching the template.' });
+  }
 }
 
 async function deleteRequirement(req, res) {

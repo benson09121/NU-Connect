@@ -1118,6 +1118,36 @@ async function initiateApprovalProcess(req, res) {
     }
 }
 
+async function getApprovedOrganizationLogos(req, res) {
+    try {
+        const logos = await organizationsModel.getApprovedOrganizationLogos();
+
+        // Build dashboard-friendly URLs for each org (adjust Nginx internal path as needed)
+        const data = logos.map(row => {
+            const logoFilename = row.logo || null;
+            const orgNameEncoded = encodeURIComponent(row.organization_name);
+            const versionId = row.current_org_version_id || 0;
+            const logo_url = logoFilename
+                ? `/protected-organization-requirements/${orgNameEncoded}/${versionId}/logo/${logoFilename}`
+                : null;
+            return {
+                organization_id: row.organization_id,
+                organization_name: row.organization_name,
+                logo: logoFilename,
+                current_org_version_id: versionId,
+                logo_url
+            };
+        });
+
+        res.status(200).json(data);
+    } catch (error) {
+        console.error('[getApprovedOrganizationLogos] error:', error);
+        res.status(500).json({
+            error: error.message || 'An error occurred while fetching organization logos.'
+        });
+    }
+}
+
 
 
 module.exports = {
@@ -1164,5 +1194,6 @@ module.exports = {
     addApplicationPeriod,
     updateApplicationPeriod,
     initiateApprovalProcess,
-    getOrganizationLogoApplication
+    getOrganizationLogoApplication,
+    getApprovedOrganizationLogos,
 };

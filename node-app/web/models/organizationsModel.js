@@ -895,6 +895,19 @@ async function sendApprovalNotification(approvalId, applicationId) {
     }
 }
 
+async function getApprovedOrganizationLogos() {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetApprovedOrganizationLogos();');
+        return rows[0] || [];
+    } catch (error) {
+        console.error('Error fetching approved organization logos:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
 module.exports = {
     createOrganizationApplication,
     getSpecificApplication,
@@ -948,5 +961,6 @@ module.exports = {
     addApplicationPeriod,
     updateApplicationPeriod,
     initiateApprovalProcess,
-    sendApprovalNotification
+    sendApprovalNotification,
+    getApprovedOrganizationLogos,
 };
