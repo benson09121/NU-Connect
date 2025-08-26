@@ -119,7 +119,7 @@ CREATE TABLE tbl_organization_version (
     org_version_id INT AUTO_INCREMENT PRIMARY KEY,
     organization_id INT NULL,            -- null for proposals before org exists
     name VARCHAR(255) NOT NULL,
-    slug VARCHAR(255) NULL,
+    status ENUM('Pending', 'Approved', 'Rejected', 'Archived') DEFAULT 'Pending',
     logo_path VARCHAR(500) NULL,
     description TEXT NULL,
     base_program_id INT NULL,
@@ -264,8 +264,7 @@ CREATE TABLE tbl_application_executives (
     proposed_rank_id INT NULL,          -- map to rank definitions if you want
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (application_id) REFERENCES tbl_application(application_id) ON DELETE CASCADE,
-    FOREIGN KEY (org_version_id) REFERENCES tbl_organization_version(org_version_id),
-    FOREIGN KEY (proposed_user_id) REFERENCES tbl_user(user_id)
+    FOREIGN KEY (org_version_id) REFERENCES tbl_organization_version(org_version_id)
 );
 
 CREATE TABLE tbl_membership_application (
@@ -1644,7 +1643,8 @@ BEGIN
         'pending_application', (
             SELECT JSON_OBJECT(
                 'application_id', a.application_id,
-                'organization_name', v.name
+                'organization_name', v.name,
+                'status', a.status
             )
             FROM tbl_application a
             JOIN tbl_organization_version v ON a.org_version_id = v.org_version_id
@@ -2643,7 +2643,6 @@ DELIMITER ;
 -- END $$
 -- DELIMITER ;
 
-
 DELIMITER $$
 CREATE DEFINER=`admin`@`%` PROCEDURE CreateOrganizationApplication(
     IN p_organization   JSON,
@@ -2653,33 +2652,29 @@ CREATE DEFINER=`admin`@`%` PROCEDURE CreateOrganizationApplication(
 )
 BEGIN
     -- Declarations
-    DECLARE v_is_resubmission    TINYINT(1) DEFAULT 0;
-    DECLARE v_organization_id    INT;
     DECLARE v_program_id         INT;
     DECLARE v_period_id          INT;
     DECLARE v_application_id     INT;
-    DECLARE v_president_id       VARCHAR(200) DEFAULT NULL;
     DECLARE v_org_name           VARCHAR(100);
     DECLARE v_logo_filename      VARCHAR(255);
     DECLARE i                    INT DEFAULT 0;
     DECLARE v_requirement_count  INT DEFAULT 0;
-    DECLARE v_rank_number        INT;
-    DECLARE v_rank_id            INT;
-    DECLARE v_error_msg          VARCHAR(255);
-    DECLARE v_name_exists        TINYINT(1) DEFAULT 0;
-    DECLARE v_fname              VARCHAR(50);
-    DECLARE v_lname              VARCHAR(50);
-    DECLARE v_role               VARCHAR(100);
-    DECLARE v_email              VARCHAR(100);
-    DECLARE v_exec_user_id       VARCHAR(200);
-    DECLARE v_exec_role_id       INT;
     DECLARE v_req_id             INT;
     DECLARE v_file_path          VARCHAR(255);
     DECLARE v_exec_count         INT DEFAULT 0;
     DECLARE v_cycle_number       INT DEFAULT 1;
     DECLARE v_fee_type           VARCHAR(50) DEFAULT 'Free';
-    DECLARE v_fee_amount         DECIMAL(10,2);
+    DECLARE v_fee_amount         DECIMAL(10,2) DEFAULT NULL;
     DECLARE v_dept_count         INT DEFAULT 0;
+    DECLARE v_organization_id    INT DEFAULT NULL;
+    DECLARE v_org_version_id     INT DEFAULT NULL;
+    DECLARE v_application_type   ENUM('new','renewal') DEFAULT 'new';
+    DECLARE v_exec_user_id       VARCHAR(200);
+    DECLARE v_exec_email         VARCHAR(255);
+    DECLARE v_exec_fname         VARCHAR(100);
+    DECLARE v_exec_lname         VARCHAR(100);
+    DECLARE v_exec_full_name     VARCHAR(255);
+    DECLARE v_generated_uuid     VARCHAR(200);
 
     -- Error handler
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
@@ -2688,17 +2683,14 @@ BEGIN
         RESIGNAL;
     END;
 
-    -- Always create a new organization and application. Do not route to resubmission logic here.
-
-    -- Determine fee type safely
+    -- Defensive parsing
+    SET v_org_name = JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.organization_name'));
     SET @__fee = JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.fee_duration'));
     IF @__fee IS NOT NULL AND @__fee != '' AND @__fee IN ('Per Term', 'Whole Academic Year', 'Free') THEN
         SET v_fee_type = @__fee;
     ELSE
         SET v_fee_type = 'Free';
     END IF;
-
-    -- parse fee amount (nullable)
     SET @__fee_amt = JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.fee_amount'));
     IF @__fee_amt IS NULL OR @__fee_amt = '' THEN
         SET v_fee_amount = NULL;
@@ -2706,31 +2698,38 @@ BEGIN
         SET v_fee_amount = NULLIF(CAST(@__fee_amt AS DECIMAL(10,2)), 0);
     END IF;
 
-    -- number of executives and program count (defensive)
     SET v_exec_count = COALESCE(JSON_LENGTH(p_executives), 0);
-    SET v_dept_count  = COALESCE(JSON_LENGTH(p_organization, '$.programs'), 0);
+    SET v_dept_count  = COALESCE(JSON_LENGTH(p_organization, '$.department'), 0);
 
     START TRANSACTION;
 
     -- Get user's program
     SELECT program_id INTO v_program_id
     FROM tbl_user
-    WHERE user_id = p_user_id;
+    WHERE user_id = p_user_id
+    LIMIT 1;
     IF v_program_id IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'User program not found';
     END IF;
 
-    -- Check organization name uniqueness
-    SET v_org_name = JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.organization_name'));
-    SELECT EXISTS(SELECT 1 FROM tbl_organization WHERE name = v_org_name) INTO v_name_exists;
-    IF v_name_exists = 1 THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Organization name already exists';
+    -- Check whether the requesting user is a president (rank_id = 1) of any organization
+    SELECT m.organization_id INTO v_organization_id
+    FROM tbl_organization_members m
+    JOIN tbl_executive_role er ON m.executive_role_id = er.executive_role_id
+    WHERE m.user_id = p_user_id
+      AND er.rank_id = 1
+    LIMIT 1;
+
+    IF v_organization_id IS NOT NULL THEN
+        SET v_application_type = 'renewal';
+    ELSE
+        SET v_application_type = 'new';
     END IF;
 
     -- Create organization version
     INSERT INTO tbl_organization_version (
+        organization_id,
         name,
-        slug,
         logo_path,
         description,
         base_program_id,
@@ -2741,8 +2740,8 @@ BEGIN
         category,
         created_by
     ) VALUES (
+        v_organization_id,
         v_org_name,
-        NULL,
         JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.organization_logo')),
         JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.organization_description')),
         v_program_id,
@@ -2753,19 +2752,38 @@ BEGIN
         JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.category')),
         p_user_id
     );
-    SET @org_version_id = LAST_INSERT_ID();
+    SET v_org_version_id = LAST_INSERT_ID();
 
     -- Insert multiple program associations into tbl_organization_version_course
+    SET @dept_field = CASE 
+        WHEN JSON_LENGTH(p_organization, '$.department') > 0 THEN '$.department'
+        WHEN JSON_LENGTH(p_organization, '$.programs') > 0 THEN '$.programs'
+        ELSE '$.department'
+    END;
+    
+    SET v_dept_count = COALESCE(JSON_LENGTH(p_organization, @dept_field), 0);
     SET i = 0;
+    
     WHILE i < v_dept_count DO
-        SET @program = JSON_EXTRACT(p_organization, CONCAT('$.programs[', i, ']'));
-        SET @program_id = CAST(JSON_UNQUOTE(JSON_EXTRACT(@program, '$.program_id')) AS UNSIGNED);
+        SET @program = JSON_EXTRACT(p_organization, CONCAT(@dept_field, '[', i, ']'));
+        
+        -- Handle both program_id (numeric) and abbreviation (string) formats
+        IF JSON_TYPE(@program) = 'OBJECT' THEN
+            SET @program_id = CAST(JSON_UNQUOTE(JSON_EXTRACT(@program, '$.program_id')) AS UNSIGNED);
+        ELSE
+            SET @program_abbr = JSON_UNQUOTE(@program);
+            SELECT program_id INTO @program_id 
+            FROM tbl_program 
+            WHERE LOWER(abbreviation) = LOWER(@program_abbr)
+            LIMIT 1;
+        END IF;
+        
         IF @program_id IS NOT NULL THEN
-            INSERT INTO tbl_organization_version_course (
+            INSERT IGNORE INTO tbl_organization_version_course (
                 org_version_id,
                 program_id
             ) VALUES (
-                @org_version_id,
+                v_org_version_id,
                 @program_id
             );
         END IF;
@@ -2782,8 +2800,9 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'No active application period';
     END IF;
 
-    -- Create application referencing org_version
+    -- Create application
     INSERT INTO tbl_application (
+        organization_id,
         org_version_id,
         submitted_org_name,
         submitted_org_logo,
@@ -2792,22 +2811,69 @@ BEGIN
         applicant_user_id,
         status
     ) VALUES (
-        @org_version_id,
+        v_organization_id,
+        v_org_version_id,
         v_org_name,
         JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.organization_logo')),
-        'new',
+        v_application_type,
         v_period_id,
         p_user_id,
-        'pending'
+        'Pending'
     );
     SET v_application_id = LAST_INSERT_ID();
 
-    -- Insert proposed executives
+    -- Insert proposed executives with user matching and UUID generation
     SET i = 0;
     WHILE i < v_exec_count DO
         SET @executive = JSON_EXTRACT(p_executives, CONCAT('$[', i, ']'));
-        SET @exec_email = JSON_UNQUOTE(JSON_EXTRACT(@executive, '$.nu_email'));
-        SELECT user_id INTO @exec_user_id FROM tbl_user WHERE email = @exec_email LIMIT 1;
+        
+        -- Extract executive details
+        SET v_exec_fname = TRIM(JSON_UNQUOTE(JSON_EXTRACT(@executive, '$.f_name')));
+        SET v_exec_lname = TRIM(JSON_UNQUOTE(JSON_EXTRACT(@executive, '$.l_name')));
+        SET v_exec_email = LOWER(TRIM(JSON_UNQUOTE(JSON_EXTRACT(@executive, '$.nu_email'))));
+        SET v_exec_full_name = CONCAT(v_exec_fname, ' ', v_exec_lname);
+        
+        -- Initialize exec_user_id
+        SET v_exec_user_id = NULL;
+        
+        -- Try multiple methods to find existing user
+        -- Method 1: Try exact email match (case-insensitive)
+        IF v_exec_user_id IS NULL AND v_exec_email IS NOT NULL AND v_exec_email != '' THEN
+            SELECT user_id INTO v_exec_user_id 
+            FROM tbl_user 
+            WHERE LOWER(email) = v_exec_email 
+            LIMIT 1;
+        END IF;
+        
+        -- Method 2: Try name match if email didn't work
+        IF v_exec_user_id IS NULL AND v_exec_fname IS NOT NULL AND v_exec_lname IS NOT NULL THEN
+            SELECT user_id INTO v_exec_user_id
+            FROM tbl_user
+            WHERE LOWER(TRIM(f_name)) = LOWER(v_exec_fname) 
+              AND LOWER(TRIM(l_name)) = LOWER(v_exec_lname)
+              AND status = 'Active'
+            LIMIT 1;
+        END IF;
+        
+        -- Method 3: Try email username pattern match
+        IF v_exec_user_id IS NULL AND v_exec_email IS NOT NULL AND v_exec_email != '' THEN
+            SET @email_username = SUBSTRING_INDEX(v_exec_email, '@', 1);
+            
+            SELECT user_id INTO v_exec_user_id
+            FROM tbl_user
+            WHERE LOWER(email) LIKE CONCAT(LOWER(@email_username), '%@students.nu-dasma.edu.ph')
+              AND status = 'Active'
+            LIMIT 1;
+        END IF;
+        
+        -- If user not found, generate a clean UUID for them (no prefix)
+        IF v_exec_user_id IS NULL THEN
+            SET v_generated_uuid = REPLACE(UUID(), '-', '');
+        ELSE
+            SET v_generated_uuid = v_exec_user_id;
+        END IF;
+        
+        -- Insert application executive with either found user_id or generated UUID
         INSERT INTO tbl_application_executives (
             application_id,
             org_version_id,
@@ -2818,13 +2884,14 @@ BEGIN
             proposed_rank_id
         ) VALUES (
             v_application_id,
-            @org_version_id,
-            IFNULL(@exec_user_id, NULL),
-            CONCAT(JSON_UNQUOTE(JSON_EXTRACT(@executive, '$.f_name')), ' ', JSON_UNQUOTE(JSON_EXTRACT(@executive, '$.l_name'))),
-            @exec_email,
+            v_org_version_id,
+            v_generated_uuid,  -- Will be existing user_id or new UUID
+            v_exec_full_name,
+            v_exec_email,
             JSON_UNQUOTE(JSON_EXTRACT(@executive, '$.role_name')),
             CAST(JSON_UNQUOTE(JSON_EXTRACT(@executive, '$.rank_number')) AS UNSIGNED)
         );
+        
         SET i = i + 1;
     END WHILE;
 
@@ -2849,9 +2916,9 @@ BEGIN
         ) VALUES (
             v_application_id,
             v_req_id,
-            NULL,
+            v_organization_id,
             v_cycle_number,
-            @org_version_id,
+            v_org_version_id,
             v_file_path,
             p_user_id,
             'Pending',
@@ -2860,16 +2927,15 @@ BEGIN
         );
         SET i = i + 1;
     END WHILE;
-
     COMMIT;
+
     -- Return results
     SELECT
-        @org_version_id AS org_version_id,
+        v_org_version_id AS org_version_id,
         v_application_id AS application_id,
         CONCAT(v_org_name, '/logo/', JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.organization_logo'))) AS logo_path;
 END $$
 DELIMITER ;
-
 
 DELIMITER $$
 CREATE DEFINER=`admin`@`%` PROCEDURE ResubmitOrganizationApplication(
@@ -2894,6 +2960,8 @@ BEGIN
     DECLARE v_fee_type VARCHAR(50) DEFAULT 'Free';
     DECLARE v_fee_amount DECIMAL(10,2) DEFAULT NULL;
     DECLARE v_tmp_fee_text VARCHAR(255);
+    DECLARE v_org_version_id INT; -- will hold new version id if created
+    DECLARE v_is_president INT DEFAULT 0;
 
     -- Error handler: rollback and re-raise
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
@@ -2942,6 +3010,20 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Organization not found for resubmission';
     END IF;
 
+    -- Check if the requesting user is president (rank_id = 1) for this organization
+    SET v_is_president = 0;
+    SELECT 1 INTO v_is_president
+    FROM tbl_organization_members m
+    JOIN tbl_executive_role er ON m.executive_role_id = er.executive_role_id
+    WHERE m.user_id = p_user_id
+      AND m.organization_id = v_organization_id
+      AND er.rank_id = 1
+    LIMIT 1;
+    -- If SELECT found no rows, v_is_president remains 0 (NULL raises error with INTO, so we set default and use LEFT JOIN style safe select)
+    IF v_is_president IS NULL THEN
+        SET v_is_president = 0;
+    END IF;
+
     -- Update organization info and set status to Pending
     UPDATE tbl_organization
     SET
@@ -2968,10 +3050,43 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'No active application period';
     END IF;
 
+    -- If user is president, create a new organization_version linked to the organization (to capture the resubmission changes)
+    IF v_is_president = 1 THEN
+        INSERT INTO tbl_organization_version (
+            organization_id,
+            name,
+            logo_path,
+            description,
+            base_program_id,
+            membership_fee_type,
+            membership_fee_amount,
+            is_recruiting,
+            is_open_to_all_courses,
+            category,
+            created_by
+        ) VALUES (
+            v_organization_id,
+            v_org_name,
+            JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.organization_logo')),
+            JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.organization_description')),
+            v_program_id,
+            v_fee_type,
+            v_fee_amount,
+            TRUE,
+            FALSE,
+            JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.category')),
+            p_user_id
+        );
+        SET v_org_version_id = LAST_INSERT_ID();
+    ELSE
+        SET v_org_version_id = NULL;
+    END IF;
+
     -- Create new application (resubmission treated as 'new' application per original)
     INSERT INTO tbl_application (
         organization_id,
         cycle_number,
+        org_version_id,
         application_type,
         period_id,
         applicant_user_id,
@@ -2979,15 +3094,13 @@ BEGIN
     ) VALUES (
         v_organization_id,
         v_cycle_number,
+        v_org_version_id,
         'new',
         v_period_id,
         p_user_id,
-        'pending'
+        'Pending'
     );
     SET v_application_id = LAST_INSERT_ID();
-
-    -- Initiate approval and add default membership question
-    CALL InitiateApprovalProcess(v_application_id);
     INSERT INTO tbl_membership_question(organization_id, cycle_number, question_text, question_type)
     VALUES (v_organization_id, v_cycle_number, 'What is your reason for joining?', 'text');
 
@@ -3002,6 +3115,7 @@ BEGIN
             requirement_id,
             cycle_number,
             organization_id,
+            org_version_id,
             file_path,
             submitted_by
         ) VALUES (
@@ -3009,6 +3123,7 @@ BEGIN
             v_req_id,
             v_cycle_number,
             v_organization_id,
+            v_org_version_id,
             v_file_path,
             p_user_id
         );
@@ -3025,40 +3140,6 @@ BEGIN
         CONCAT(v_org_name, '/logo/', v_logo_filename) AS logo_path,
         CONCAT(v_org_name, '/requirements/') AS requirements_dir,
         v_cycle_number AS cycle_number;
-END $$
-DELIMITER ;
-
-DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE GetApplication(
-    IN p_application_id INT
-)
-BEGIN
-SELECT
-    app.application_id as id,
-    app.org_version_id,
-    ov.name AS organization_name,
-    ov.logo_path AS organization_logo,
-    ov.description AS organization_description,
-    ov.category,
-    ov.base_program_id,
-    p.name AS program_name,
-    ov.membership_fee_type,
-    ov.membership_fee_amount,
-    ov.is_recruiting,
-    ov.is_open_to_all_courses,
-    ov.created_at AS organization_created,
-    app.submitted_org_name,
-    app.submitted_org_logo,
-    app.application_type,
-    app.period_id,
-    app.applicant_user_id,
-    app.status AS application_status,
-    app.created_at AS application_created,
-    app.updated_at AS application_updated
-FROM tbl_application app
-INNER JOIN tbl_organization_version ov ON app.org_version_id = ov.org_version_id
-LEFT JOIN tbl_program p ON ov.base_program_id = p.program_id
-WHERE app.application_id = p_application_id;
 END $$
 DELIMITER ;
 
@@ -3397,6 +3478,41 @@ END$$
 DELIMITER ;
 
 DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetApplication(
+    IN p_application_id INT
+)
+BEGIN
+SELECT
+    app.application_id as id,
+    app.org_version_id,
+    ov.name AS organization_name,
+    ov.logo_path AS organization_logo,
+    ov.description AS organization_description,
+    ov.category,
+    ov.base_program_id,
+    p.name AS program_name,
+    ov.membership_fee_type,
+    ov.membership_fee_amount,
+    ov.is_recruiting,
+    ov.is_open_to_all_courses,
+    ov.created_at AS organization_created,
+    app.submitted_org_name,
+    app.submitted_org_logo,
+    app.application_type,
+    app.period_id,
+    app.applicant_user_id,
+    app.status AS application_status,
+    app.created_at AS application_created,
+    app.updated_at AS application_updated
+FROM tbl_application app
+INNER JOIN tbl_organization_version ov ON app.org_version_id = ov.org_version_id
+LEFT JOIN tbl_program p ON ov.base_program_id = p.program_id
+WHERE app.application_id = p_application_id;
+END $$
+DELIMITER ;
+
+
+DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetApprovalTimeline(
     IN p_organization_name VARCHAR(100),
     IN p_application_id INT
@@ -3422,19 +3538,21 @@ BEGIN
             ORDER BY ap.step;
 END $$
 DELIMITER ;
+
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE ApproveApplication(
     IN p_approval_id INT,
     IN p_comment TEXT,
-    IN p_organization_id INT,   -- optional override org id
+    IN p_organization_id INT,
     IN p_application_id INT
 )
 BEGIN
-    -- Top-level declarations (no new/changed columns referenced)
+    -- Top-level declarations (all before statements)
     DECLARE v_step INT;
     DECLARE v_last_step INT;
     DECLARE v_org_version_id INT;
     DECLARE v_existing_org_id INT;
+    DECLARE v_version_org_id INT;
     DECLARE v_new_org_id INT;
     DECLARE v_org_name VARCHAR(255);
     DECLARE v_org_logo VARCHAR(500);
@@ -3446,6 +3564,17 @@ BEGIN
     DECLARE v_created_by VARCHAR(200);
     DECLARE v_is_recruiting BOOLEAN;
     DECLARE v_is_open_to_all_courses BOOLEAN;
+    DECLARE v_application_type ENUM('new','renewal');
+    DECLARE v_president_candidate VARCHAR(200);
+    DECLARE v_president_name VARCHAR(255);
+    DECLARE v_president_email VARCHAR(255);
+    DECLARE v_created_by_is_president INT DEFAULT 0;
+    DECLARE v_effective_cycle_number INT DEFAULT 1;
+    DECLARE v_last_cycle INT DEFAULT 0;
+    DECLARE v_next_cycle INT DEFAULT 1;
+    DECLARE v_student_role_id INT;
+    DECLARE v_fname VARCHAR(100);
+    DECLARE v_lname VARCHAR(100);
 
     -- Transaction error handler: rollback and re-raise the error
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
@@ -3454,7 +3583,6 @@ BEGIN
         RESIGNAL;
     END;
 
-    -- Start transaction
     START TRANSACTION;
 
     -- 1) Fetch current step for this approval row
@@ -3475,65 +3603,172 @@ BEGIN
         timestamp = CURRENT_TIMESTAMP
     WHERE approval_id = p_approval_id;
 
-    -- 4) If this is the final approval step, perform promotion
+    -- 4) If this is the final approval step, perform promotion & organization wiring
     IF v_step = v_last_step THEN
 
-        -- Pull application's organization_id (if any) and org_version_id
-        SELECT a.organization_id, a.org_version_id
-        INTO v_existing_org_id, v_org_version_id
+        -- Pull application's organization_id (if any) and org_version_id and application type
+        SELECT a.organization_id, a.org_version_id, a.application_type
+        INTO v_existing_org_id, v_org_version_id, v_application_type
         FROM tbl_application a
         WHERE a.application_id = p_application_id
         LIMIT 1;
 
-        -- Pull the version snapshot fields (the proposed org data) FIRST
-        SELECT v.name, v.logo_path, v.description, v.base_program_id,
+        -- Pull the version snapshot fields (the proposed org data) AND the version's organization_id
+        SELECT v.organization_id, v.name, v.logo_path, v.description, v.base_program_id,
                v.membership_fee_type, v.membership_fee_amount, v.category,
                v.created_by, v.is_recruiting, v.is_open_to_all_courses
-        INTO v_org_name, v_org_logo, v_org_description, v_base_program_id,
+        INTO v_version_org_id, v_org_name, v_org_logo, v_org_description, v_base_program_id,
              v_fee_type, v_fee_amount, v_category,
              v_created_by, v_is_recruiting, v_is_open_to_all_courses
         FROM tbl_organization_version v
         WHERE v.org_version_id = v_org_version_id
         LIMIT 1;
 
-        -- If caller provided p_organization_id and application has no org, use it
-        IF v_existing_org_id IS NULL AND p_organization_id IS NOT NULL THEN
-            -- Check if p_organization_id exists in tbl_organization
-            IF NOT EXISTS (SELECT 1 FROM tbl_organization WHERE organization_id = p_organization_id) THEN
-                -- Insert a minimal row to satisfy FK (adviser_id and name required, others can be NULL/default)
-                INSERT INTO tbl_organization (
-                    organization_id, adviser_id, name, status, created_at, current_org_version_id
-                ) VALUES (
-                    p_organization_id, v_created_by, v_org_name, 'Approved', CURRENT_TIMESTAMP, v_org_version_id
-                );
+        -- Prefer version.organization_id -> application.organization_id -> p_organization_id -> create
+        SET v_new_org_id = NULL;
+
+        IF v_version_org_id IS NOT NULL THEN
+            SET v_new_org_id = v_version_org_id;
+
+            -- Decide whether to replace adviser_id
+            SELECT COUNT(*) INTO v_created_by_is_president
+            FROM tbl_organization_members m
+            JOIN tbl_executive_role er ON m.executive_role_id = er.executive_role_id
+            WHERE m.user_id = v_created_by
+              AND er.rank_id = 1
+              AND m.organization_id = v_new_org_id;
+
+            IF v_created_by_is_president > 0 THEN
+                UPDATE tbl_organization
+                SET name = v_org_name,
+                    logo = v_org_logo,
+                    description = v_org_description,
+                    base_program_id = v_base_program_id,
+                    membership_fee_type = v_fee_type,
+                    membership_fee_amount = v_fee_amount,
+                    category = v_category,
+                    adviser_id = adviser_id,
+                    status = 'Approved',
+                    is_recruiting = v_is_recruiting,
+                    is_open_to_all_courses = v_is_open_to_all_courses,
+                    current_org_version_id = v_org_version_id
+                WHERE organization_id = v_new_org_id;
+            ELSE
+                UPDATE tbl_organization
+                SET name = v_org_name,
+                    logo = v_org_logo,
+                    description = v_org_description,
+                    base_program_id = v_base_program_id,
+                    membership_fee_type = v_fee_type,
+                    membership_fee_amount = v_fee_amount,
+                    category = v_category,
+                    adviser_id = v_created_by,
+                    status = 'Approved',
+                    is_recruiting = v_is_recruiting,
+                    is_open_to_all_courses = v_is_open_to_all_courses,
+                    current_org_version_id = v_org_version_id
+                WHERE organization_id = v_new_org_id;
             END IF;
-            SET v_existing_org_id = p_organization_id;
-        END IF;
 
-        -- Ensure base program id variable has sensible value (may be NULL)
-        SET v_base_program_id = COALESCE(v_base_program_id, NULL);
-
-        -- Insert or update tbl_organization first to satisfy foreign key constraint for tbl_renewal_cycle
-        IF v_existing_org_id IS NOT NULL THEN
-            UPDATE tbl_organization
-            SET name = v_org_name,
-                logo = v_org_logo,
-                description = v_org_description,
-                base_program_id = v_base_program_id,
-                membership_fee_type = v_fee_type,
-                membership_fee_amount = v_fee_amount,
-                category = v_category,
-                adviser_id = v_created_by,
-                status = 'Approved',
-                is_recruiting = v_is_recruiting,
-                is_open_to_all_courses = v_is_open_to_all_courses,
-                current_org_version_id = v_org_version_id
-            WHERE organization_id = v_existing_org_id;
-
+        ELSEIF v_existing_org_id IS NOT NULL THEN
             SET v_new_org_id = v_existing_org_id;
 
-        ELSE
-            -- New organization: insert and set organization_id on version row
+            SELECT COUNT(*) INTO v_created_by_is_president
+            FROM tbl_organization_members m
+            JOIN tbl_executive_role er ON m.executive_role_id = er.executive_role_id
+            WHERE m.user_id = v_created_by
+              AND er.rank_id = 1
+              AND m.organization_id = v_new_org_id;
+
+            IF v_created_by_is_president > 0 THEN
+                UPDATE tbl_organization
+                SET name = v_org_name,
+                    logo = v_org_logo,
+                    description = v_org_description,
+                    base_program_id = v_base_program_id,
+                    membership_fee_type = v_fee_type,
+                    membership_fee_amount = v_fee_amount,
+                    category = v_category,
+                    adviser_id = adviser_id,
+                    status = 'Approved',
+                    is_recruiting = v_is_recruiting,
+                    is_open_to_all_courses = v_is_open_to_all_courses,
+                    current_org_version_id = v_org_version_id
+                WHERE organization_id = v_new_org_id;
+            ELSE
+                UPDATE tbl_organization
+                SET name = v_org_name,
+                    logo = v_org_logo,
+                    description = v_org_description,
+                    base_program_id = v_base_program_id,
+                    membership_fee_type = v_fee_type,
+                    membership_fee_amount = v_fee_amount,
+                    category = v_category,
+                    adviser_id = v_created_by,
+                    status = 'Approved',
+                    is_recruiting = v_is_recruiting,
+                    is_open_to_all_courses = v_is_open_to_all_courses,
+                    current_org_version_id = v_org_version_id
+                WHERE organization_id = v_new_org_id;
+            END IF;
+
+            UPDATE tbl_organization_version
+            SET organization_id = v_new_org_id
+            WHERE org_version_id = v_org_version_id;
+
+        ELSEIF p_organization_id IS NOT NULL THEN
+            IF EXISTS (SELECT 1 FROM tbl_organization WHERE organization_id = p_organization_id) THEN
+                SET v_new_org_id = p_organization_id;
+
+                SELECT COUNT(*) INTO v_created_by_is_president
+                FROM tbl_organization_members m
+                JOIN tbl_executive_role er ON m.executive_role_id = er.executive_role_id
+                WHERE m.user_id = v_created_by
+                  AND er.rank_id = 1
+                  AND m.organization_id = v_new_org_id;
+
+                IF v_created_by_is_president > 0 THEN
+                    UPDATE tbl_organization
+                    SET name = v_org_name,
+                        logo = v_org_logo,
+                        description = v_org_description,
+                        base_program_id = v_base_program_id,
+                        membership_fee_type = v_fee_type,
+                        membership_fee_amount = v_fee_amount,
+                        category = v_category,
+                        adviser_id = adviser_id,
+                        status = 'Approved',
+                        is_recruiting = v_is_recruiting,
+                        is_open_to_all_courses = v_is_open_to_all_courses,
+                        current_org_version_id = v_org_version_id
+                    WHERE organization_id = v_new_org_id;
+                ELSE
+                    UPDATE tbl_organization
+                    SET name = v_org_name,
+                        logo = v_org_logo,
+                        description = v_org_description,
+                        base_program_id = v_base_program_id,
+                        membership_fee_type = v_fee_type,
+                        membership_fee_amount = v_fee_amount,
+                        category = v_category,
+                        adviser_id = v_created_by,
+                        status = 'Approved',
+                        is_recruiting = v_is_recruiting,
+                        is_open_to_all_courses = v_is_open_to_all_courses,
+                        current_org_version_id = v_org_version_id
+                    WHERE organization_id = v_new_org_id;
+                END IF;
+
+                UPDATE tbl_organization_version
+                SET organization_id = v_new_org_id
+                WHERE org_version_id = v_org_version_id;
+            ELSE
+                SET v_new_org_id = NULL;
+            END IF;
+        END IF;
+
+        -- If still no organization ID determined, create a new organization
+        IF v_new_org_id IS NULL THEN
             INSERT INTO tbl_organization (
                 adviser_id,
                 name,
@@ -3566,22 +3801,128 @@ BEGIN
 
             SET v_new_org_id = LAST_INSERT_ID();
 
-            -- update the organization_version to point to the new org (organization_id exists on version table)
             UPDATE tbl_organization_version
             SET organization_id = v_new_org_id
             WHERE org_version_id = v_org_version_id;
         END IF;
 
-        -- Defensive check: organization_id must exist before renewal cycle insert
+        -- Defensive check
         IF v_new_org_id IS NULL THEN
             SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Organization ID is NULL before renewal cycle insert.';
         END IF;
 
-        -- Now ensure tbl_renewal_cycle row exists for this organization and cycle_number 1
-        IF NOT EXISTS (
-            SELECT 1 FROM tbl_renewal_cycle
-            WHERE organization_id = v_new_org_id AND cycle_number = 1
-        ) THEN
+        -- Get default student role
+        SET v_student_role_id = (
+            SELECT role_id FROM tbl_role WHERE LOWER(role_name) = 'student' LIMIT 1
+        );
+        IF v_student_role_id IS NULL THEN
+            SET v_student_role_id = (SELECT role_id FROM tbl_role LIMIT 1);
+        END IF;
+
+        -- STEP 1: Create ALL users from tbl_application_executives FIRST
+        BEGIN
+            DECLARE done INT DEFAULT FALSE;
+            DECLARE v_proposed_user_id VARCHAR(200);
+            DECLARE v_proposed_name VARCHAR(255);
+            DECLARE v_proposed_email VARCHAR(255);
+            
+            DECLARE user_cursor CURSOR FOR
+                SELECT proposed_user_id, proposed_name, proposed_email
+                FROM tbl_application_executives
+                WHERE application_id = p_application_id;
+
+            DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = TRUE;
+
+            OPEN user_cursor;
+            user_loop: LOOP
+                FETCH user_cursor INTO v_proposed_user_id, v_proposed_name, v_proposed_email;
+                IF done THEN
+                    LEAVE user_loop;
+                END IF;
+
+                -- Normalize email
+                SET v_proposed_email = LOWER(TRIM(v_proposed_email));
+
+                -- Check if user exists
+                IF NOT EXISTS (SELECT 1 FROM tbl_user WHERE user_id = v_proposed_user_id) THEN
+                    -- Parse name
+                    IF v_proposed_name IS NULL OR v_proposed_name = '' THEN
+                        SET v_fname = 'Pending';
+                        SET v_lname = 'User';
+                    ELSE
+                        SET v_fname = TRIM(SUBSTRING_INDEX(v_proposed_name, ' ', 1));
+                        SET v_lname = TRIM(SUBSTRING(v_proposed_name, CHAR_LENGTH(v_fname) + 2));
+                        IF v_lname = '' OR v_lname IS NULL THEN
+                            SET v_lname = v_fname;
+                        END IF;
+                    END IF;
+
+                    -- Ensure email is valid
+                    IF v_proposed_email IS NULL OR v_proposed_email = '' THEN
+                        SET v_proposed_email = CONCAT('pending+', v_proposed_user_id, '@students.nu-dasma.edu.ph');
+                    END IF;
+
+                    -- Create the user
+                    INSERT INTO tbl_user (user_id, f_name, l_name, email, program_id, role_id, status, created_at)
+                    VALUES (v_proposed_user_id, v_fname, v_lname, v_proposed_email, v_base_program_id, v_student_role_id, 'Pending', CURRENT_TIMESTAMP);
+                END IF;
+
+            END LOOP user_loop;
+            CLOSE user_cursor;
+        END;
+
+        -- STEP 2: Get president for renewal cycle
+        SET v_president_candidate = NULL;
+        
+        SELECT ae.proposed_user_id 
+        INTO v_president_candidate
+        FROM tbl_application_executives ae
+        WHERE ae.application_id = p_application_id
+          AND ae.proposed_rank_id = 1
+        LIMIT 1;
+
+        -- If no president found in executives, use created_by
+        IF v_president_candidate IS NULL OR v_president_candidate = '' THEN
+            SET v_president_candidate = v_created_by;
+        END IF;
+
+        -- STEP 3: Create renewal cycle
+        IF v_application_type = 'new' THEN
+            SET v_effective_cycle_number = 1;
+            IF NOT EXISTS (
+                SELECT 1 FROM tbl_renewal_cycle
+                WHERE organization_id = v_new_org_id AND cycle_number = 1
+            ) THEN
+                INSERT INTO tbl_renewal_cycle (
+                    organization_id,
+                    cycle_number,
+                    start_date,
+                    president_id,
+                    org_version_id,
+                    created_at
+                ) VALUES (
+                    v_new_org_id,
+                    1,
+                    CURRENT_DATE,
+                    v_president_candidate,
+                    v_org_version_id,
+                    CURRENT_TIMESTAMP
+                );
+            ELSE
+                UPDATE tbl_renewal_cycle
+                SET president_id = v_president_candidate,
+                    org_version_id = v_org_version_id
+                WHERE organization_id = v_new_org_id AND cycle_number = 1;
+            END IF;
+        ELSE
+            -- renewal: create next cycle
+            SELECT COALESCE(MAX(cycle_number), 0) INTO v_last_cycle
+            FROM tbl_renewal_cycle
+            WHERE organization_id = v_new_org_id;
+
+            SET v_next_cycle = v_last_cycle + 1;
+            SET v_effective_cycle_number = v_next_cycle;
+
             INSERT INTO tbl_renewal_cycle (
                 organization_id,
                 cycle_number,
@@ -3591,106 +3932,57 @@ BEGIN
                 created_at
             ) VALUES (
                 v_new_org_id,
-                1,
+                v_effective_cycle_number,
                 CURRENT_DATE,
-                v_created_by,
+                v_president_candidate,
                 v_org_version_id,
                 CURRENT_TIMESTAMP
             );
-        ELSE
-            -- update fields that exist (no updated_at column per schema)
-            UPDATE tbl_renewal_cycle
-                SET org_version_id = v_org_version_id,
-                    president_id = v_created_by
-                WHERE organization_id = v_new_org_id AND cycle_number = 1;
         END IF;
 
-        -- Promote proposed executives from application to organization members.
-        -- Nested block for cursor declarations to avoid scope problems.
+        -- STEP 4: Create executive roles and organization members
         BEGIN
-            -- Declarations must come before any statements in this block
             DECLARE done INT DEFAULT FALSE;
-            DECLARE exec_email VARCHAR(255);
-            DECLARE exec_user_id VARCHAR(255);
-            DECLARE exec_cycle_number INT;
-            DECLARE exec_title VARCHAR(100);
-            DECLARE exec_name VARCHAR(255);
-            DECLARE v_student_role_id INT;
-            DECLARE v_rank_id INT;
+            DECLARE v_proposed_user_id VARCHAR(200);
+            DECLARE v_proposed_title VARCHAR(100);
+            DECLARE v_proposed_rank_id INT;
             DECLARE v_executive_role_id INT;
-            DECLARE v_fname VARCHAR(100);
-            DECLARE v_lname VARCHAR(100);
-            DECLARE v_new_uuid VARCHAR(36);
-            DECLARE exec_cursor CURSOR FOR
-                SELECT ae.proposed_email, COALESCE(a.cycle_number, 1), ae.proposed_title, ae.proposed_name
-                FROM tbl_application_executives ae
-                JOIN tbl_application a ON ae.application_id = a.application_id
-                WHERE ae.application_id = p_application_id;
-            DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = TRUE;
 
-            -- Use scalar subquery for student role id (won't trigger NOT FOUND)
-            SET v_student_role_id = (
-                SELECT role_id FROM tbl_role WHERE LOWER(role_name) = 'student' LIMIT 1
-            );
-            IF v_student_role_id IS NULL THEN
-                SET v_student_role_id = (
-                    SELECT role_id FROM tbl_role LIMIT 1
-                );
-            END IF;
+            DECLARE exec_cursor CURSOR FOR
+                SELECT proposed_user_id, proposed_title, proposed_rank_id
+                FROM tbl_application_executives
+                WHERE application_id = p_application_id;
+
+            DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = TRUE;
 
             OPEN exec_cursor;
             exec_loop: LOOP
-                FETCH exec_cursor INTO exec_email, exec_cycle_number, exec_title, exec_name;
+                FETCH exec_cursor INTO v_proposed_user_id, v_proposed_title, v_proposed_rank_id;
                 IF done THEN
                     LEAVE exec_loop;
                 END IF;
 
-                -- normalize exec_email and ensure uniqueness if empty
-                IF exec_email IS NULL OR TRIM(exec_email) = '' THEN
-                    SET exec_email = CONCAT('pending+', REPLACE(UUID(), '-', ''), '@pending.local');
+                -- Normalize title
+                SET v_proposed_title = TRIM(v_proposed_title);
+
+                -- Determine rank_id
+                IF v_proposed_rank_id IS NULL THEN
+                    SET v_proposed_rank_id = (SELECT rank_id FROM tbl_executive_rank WHERE LOWER(default_title) = LOWER(v_proposed_title) LIMIT 1);
+                END IF;
+                IF v_proposed_rank_id IS NULL THEN
+                    SET v_proposed_rank_id = (SELECT MIN(rank_id) FROM tbl_executive_rank);
                 END IF;
 
-                -- Try to find an existing user by email using scalar subquery (returns NULL if not found)
-                SET exec_user_id = (SELECT user_id FROM tbl_user WHERE email = exec_email LIMIT 1);
-
-                -- If no user found, create a new pending user (generate UUID per insert)
-                IF exec_user_id IS NULL THEN
-                    SET v_new_uuid = REPLACE(UUID(), '-', '');
-
-                    -- parse provided name into f_name / l_name (exec_name may be NULL)
-                    IF exec_name IS NULL OR TRIM(exec_name) = '' THEN
-                        SET v_fname = NULL;
-                        SET v_lname = NULL;
-                    ELSE
-                        SET v_fname = SUBSTRING_INDEX(TRIM(exec_name), ' ', 1);
-                        SET v_lname = TRIM(SUBSTRING(TRIM(exec_name), CHAR_LENGTH(v_fname) + 2));
-                        IF v_lname = '' THEN
-                            SET v_lname = NULL;
-                        END IF;
-                    END IF;
-
-                    INSERT INTO tbl_user (user_id, f_name, l_name, email, program_id, role_id, status, created_at)
-                    VALUES (v_new_uuid, v_fname, v_lname, exec_email, v_base_program_id, v_student_role_id, 'Pending', CURRENT_TIMESTAMP);
-
-                    SET exec_user_id = v_new_uuid;
-                END IF;
-
-                -- Find rank_id by exec_title (fallback to first rank if not found) using scalar subquery
-                SET v_rank_id = (SELECT rank_id FROM tbl_executive_rank WHERE default_title = exec_title LIMIT 1);
-                IF v_rank_id IS NULL THEN
-                    SET v_rank_id = (SELECT rank_id FROM tbl_executive_rank LIMIT 1);
-                END IF;
-
-                -- Find or insert executive_role row (use scalar subquery to fetch existing id)
+                -- Find or insert executive_role
                 SET v_executive_role_id = (
                     SELECT executive_role_id FROM tbl_executive_role
                     WHERE organization_id = v_new_org_id
-                      AND cycle_number = exec_cycle_number
-                      AND role_title = exec_title
-                      AND rank_id = v_rank_id
+                      AND cycle_number = v_effective_cycle_number
+                      AND role_title = v_proposed_title
+                      AND rank_id = v_proposed_rank_id
                     LIMIT 1
                 );
-
+                
                 IF v_executive_role_id IS NULL THEN
                     INSERT INTO tbl_executive_role (
                         organization_id,
@@ -3700,62 +3992,60 @@ BEGIN
                         created_at
                     ) VALUES (
                         v_new_org_id,
-                        exec_cycle_number,
-                        exec_title,
-                        v_rank_id,
+                        v_effective_cycle_number,
+                        v_proposed_title,
+                        v_proposed_rank_id,
                         CURRENT_TIMESTAMP
                     );
                     SET v_executive_role_id = LAST_INSERT_ID();
                 END IF;
 
-                -- Insert into organization_members (avoid duplicates)
-                IF NOT EXISTS (
-                    SELECT 1 FROM tbl_organization_members
-                    WHERE organization_id = v_new_org_id
-                      AND cycle_number = exec_cycle_number
-                      AND user_id = exec_user_id
-                ) THEN
-                    INSERT INTO tbl_organization_members (
-                        organization_id,
-                        cycle_number,
-                        user_id,
-                        member_type,
-                        executive_role_id,
-                        status,
-                        joined_at,
-                        org_version_id
-                    ) VALUES (
-                        v_new_org_id,
-                        exec_cycle_number,
-                        exec_user_id,
-                        'Executive',
-                        v_executive_role_id,
-                        'Active',
-                        CURRENT_TIMESTAMP,
-                        v_org_version_id
-                    );
-                END IF;
+                -- Insert or update organization member
+                INSERT INTO tbl_organization_members (
+                    organization_id,
+                    cycle_number,
+                    user_id,
+                    member_type,
+                    executive_role_id,
+                    status,
+                    joined_at,
+                    org_version_id
+                ) VALUES (
+                    v_new_org_id,
+                    v_effective_cycle_number,
+                    v_proposed_user_id,
+                    'Executive',
+                    v_executive_role_id,
+                    'Active',
+                    CURRENT_TIMESTAMP,
+                    v_org_version_id
+                )
+                ON DUPLICATE KEY UPDATE
+                    executive_role_id = v_executive_role_id,
+                    member_type = 'Executive',
+                    status = 'Active',
+                    org_version_id = v_org_version_id;
 
             END LOOP exec_loop;
             CLOSE exec_cursor;
         END;
 
-        -- Mark requirement submissions as approved for this application (optional)
+        -- Mark requirement submissions as approved
         UPDATE tbl_organization_requirement_submission s
         SET s.status = 'Approved'
         WHERE s.application_id = p_application_id;
 
-        -- Update application: set approved status and ensure organization_id is set
+        -- Update application status
         UPDATE tbl_application
         SET status = 'Approved',
             organization_id = v_new_org_id
         WHERE application_id = p_application_id;
-    END IF; -- end final-step branch
+    END IF;
 
     -- Commit transaction
     COMMIT;
 
-    -- Return a JSON result combining approval info and organization (if final step)
+    -- Return results
     SELECT JSON_OBJECT(
         'application', JSON_OBJECT(
             'id', ap.approval_id,
@@ -3780,10 +4070,11 @@ BEGIN
                     'membership_fee_type', v_fee_type,
                     'membership_fee_amount', v_fee_amount,
                     'category', v_category,
-                    'adviser_id', v_created_by,
+                    'adviser_id', (CASE WHEN v_created_by_is_president > 0 THEN (SELECT adviser_id FROM tbl_organization WHERE organization_id = v_new_org_id) ELSE v_created_by END),
                     'status', 'Approved',
                     'is_recruiting', v_is_recruiting,
-                    'is_open_to_all_courses', v_is_open_to_all_courses
+                    'is_open_to_all_courses', v_is_open_to_all_courses,
+                    'effective_cycle', v_effective_cycle_number
                 )
             ELSE NULL END,
         'other', JSON_OBJECT(
@@ -3799,6 +4090,7 @@ BEGIN
     LIMIT 1;
 END $$
 DELIMITER ;
+
 
 
 
@@ -4402,50 +4694,101 @@ END $$
 DELIMITER ;
 
 DELIMITER $$
+
 CREATE DEFINER='admin'@'%' PROCEDURE CheckOrganizationEmails(
-    IN p_emails JSON
+    IN p_emails JSON,
+    IN p_checker VARCHAR(255)
 )
 BEGIN
     -- Returns { unavailable: [email1, email2, ...] }
     -- unavailable if: not student role OR is executive in any org
-
     DECLARE v_unavailable_emails JSON;
+    DECLARE v_checker_org_id INT;
 
-    -- Create a temporary table to hold the emails
-    CREATE TEMPORARY TABLE IF NOT EXISTS temp_emails (
+    -- Ensure temp table is fresh for each call
+    DROP TEMPORARY TABLE IF EXISTS temp_emails;
+    CREATE TEMPORARY TABLE temp_emails (
         email VARCHAR(255) NOT NULL,
-        PRIMARY KEY (email)  -- Ensures uniqueness
+        PRIMARY KEY (email)
     );
 
-    -- Insert from first condition: non-student roles
-    INSERT IGNORE INTO temp_emails (email)
-    SELECT u.email
-    FROM tbl_user u
-    JOIN tbl_role r ON u.role_id = r.role_id
-    WHERE 
-        JSON_CONTAINS(p_emails, CAST(CONCAT('"', u.email, '"') AS JSON))
-        AND LOWER(r.role_name) != 'student';
+    -- Normalize checker input
+    SET p_checker = TRIM(COALESCE(p_checker, ''));
 
-    -- Insert from second condition: executives
-    INSERT IGNORE INTO temp_emails (email)
-    SELECT u.email
-    FROM tbl_user u
-    JOIN tbl_organization_members om ON u.user_id = om.user_id
-    WHERE 
-        JSON_CONTAINS(p_emails, CAST(CONCAT('"', u.email, '"') AS JSON))
-        AND om.member_type = 'Executive';
+    IF p_checker = '' THEN
+        -- 1) Insert users whose role is NOT student and whose email is in supplied JSON
+        INSERT IGNORE INTO temp_emails (email)
+        SELECT u.email
+        FROM tbl_user u
+        JOIN tbl_role r ON u.role_id = r.role_id
+        WHERE JSON_CONTAINS(p_emails, CAST(CONCAT('"', u.email, '"') AS JSON))
+          AND LOWER(r.role_name) != 'student';
 
-    -- Aggregate distinct emails
-    SELECT COALESCE(JSON_ARRAYAGG(email), JSON_ARRAY())
-    INTO v_unavailable_emails
-    FROM temp_emails;
+        -- 2) Insert emails that are executives in any organization
+        INSERT IGNORE INTO temp_emails (email)
+        SELECT DISTINCT u.email
+        FROM tbl_user u
+        JOIN tbl_organization_members om ON u.user_id = om.user_id
+        WHERE JSON_CONTAINS(p_emails, CAST(CONCAT('"', u.email, '"') AS JSON))
+          AND om.member_type = 'Executive';
 
-    -- Cleanup temporary table
+    ELSE
+        -- Find checker org_id only if checker is an active Executive or has rank_level = 1 (president)
+        SELECT om.organization_id
+        INTO v_checker_org_id
+        FROM tbl_user u
+        JOIN tbl_organization_members om ON u.user_id = om.user_id
+        LEFT JOIN tbl_executive_role er ON om.executive_role_id = er.executive_role_id
+        LEFT JOIN tbl_executive_rank rk ON er.rank_id = rk.rank_id
+        WHERE u.email = p_checker
+          AND om.status = 'Active'
+          AND (
+              om.member_type = 'Executive'
+              OR rk.rank_level = 1
+          )
+        LIMIT 1;
+
+        IF v_checker_org_id IS NULL THEN
+            DROP TEMPORARY TABLE IF EXISTS temp_emails;
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Checker is not an active executive/president of any organization.';
+        END IF;
+
+        -- Only mark as unavailable if role is not student within the same organization
+        INSERT IGNORE INTO temp_emails (email)
+        SELECT DISTINCT u.email
+        FROM tbl_user u
+        JOIN tbl_organization_members om ON u.user_id = om.user_id
+        JOIN tbl_role r ON u.role_id = r.role_id
+        WHERE JSON_CONTAINS(p_emails, CAST(CONCAT('"', u.email, '"') AS JSON))
+          AND om.organization_id = v_checker_org_id
+          AND om.status = 'Active'
+          AND LOWER(r.role_name) != 'student';
+
+        -- If any of the supplied emails are executives in another organization -> error
+        IF EXISTS (
+            SELECT 1
+            FROM tbl_user u
+            JOIN tbl_organization_members om ON u.user_id = om.user_id
+            WHERE JSON_CONTAINS(p_emails, CAST(CONCAT('"', u.email, '"') AS JSON))
+              AND om.member_type = 'Executive'
+              AND om.organization_id != v_checker_org_id
+        ) THEN
+            DROP TEMPORARY TABLE IF EXISTS temp_emails;
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'One or more emails belong to executives of another organization.';
+        END IF;
+    END IF;
+
+    -- Aggregate distinct emails (if none, return empty array)
+    SELECT COALESCE(JSON_ARRAYAGG(email), JSON_ARRAY()) INTO v_unavailable_emails FROM temp_emails;
+
+    -- Cleanup
     DROP TEMPORARY TABLE IF EXISTS temp_emails;
 
     SELECT JSON_OBJECT('unavailable', v_unavailable_emails) AS result;
 END $$
+
 DELIMITER ;
+
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetAllEventCertificates(IN
@@ -4461,7 +4804,6 @@ BEGIN
     ORDER BY ec.issued_at DESC;
 END $$
 DELIMITER ;
-
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationDetails(
     IN p_org_id INT,
@@ -4469,25 +4811,89 @@ CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationDetails(
 )
 BEGIN
     DECLARE v_cycle_number INT;
-    -- Get the cycle_number for the given org_version_id
-    SELECT cycle_number INTO v_cycle_number
-    FROM tbl_renewal_cycle
-    WHERE org_version_id = p_org_version_id;
 
+    -- Determine cycle number for the provided version (if any)
+    SELECT cycle_number
+    INTO v_cycle_number
+    FROM tbl_renewal_cycle
+    WHERE org_version_id = p_org_version_id
+    LIMIT 1;
+
+    -- default cycle to 1 if not found
+    IF v_cycle_number IS NULL THEN
+        SET v_cycle_number = 1;
+    END IF;
+
+    -- Return details sourced from the organization_version row.
+    -- Adviser is taken exclusively from tbl_organization.adviser_id when the version is linked to an org.
     SELECT JSON_OBJECT(
         'organization_detail', JSON_OBJECT(
-            'id', o.organization_id,
-            'org_name', o.name,
-            'category', o.category,
-            'logo', o.logo,
+            'id', COALESCE(v.organization_id, p_org_id),
+            'org_version_id', v.org_version_id,
+            'org_name', v.name,
+            'category', v.category,
+            'logo', v.logo_path,
             'cycle_number', v_cycle_number,
-            'description', o.description,
-            'adviser', JSON_OBJECT(
-                'first_name', adv.f_name,
-                'last_name', adv.l_name,
-                'email', adv.email
+            'description', v.description,
+            'membership_fee_type', v.membership_fee_type,
+            'membership_fee_amount', v.membership_fee_amount,
+            'is_recruiting', v.is_recruiting,
+            'is_open_to_all_courses', v.is_open_to_all_courses,
+            -- Adviser placed back inside organization_detail (ONLY from tbl_organization.adviser_id)
+            'adviser', CASE
+                WHEN v.organization_id IS NOT NULL AND adv.user_id IS NOT NULL THEN JSON_OBJECT(
+                    'user_id', adv.user_id,
+                    'first_name', adv.f_name,
+                    'last_name', adv.l_name,
+                    'email', adv.email
+                )
+                ELSE NULL
+            END,
+            'programs', (
+                SELECT JSON_ARRAYAGG(JSON_OBJECT(
+                    'name', prog.name,
+                    'abbreviation', prog.abbreviation,
+                    'program_id', prog.program_id,
+                    'is_base', CASE WHEN prog.program_id = v.base_program_id THEN 1 ELSE 0 END
+                ))
+                FROM (
+                    SELECT p.program_id, p.name, p.abbreviation
+                    FROM tbl_program p
+                    WHERE p.program_id = v.base_program_id
+                    UNION
+                    SELECT p.program_id, p.name, p.abbreviation
+                    FROM tbl_organization_version_course ovp
+                    JOIN tbl_program p ON ovp.program_id = p.program_id
+                    WHERE ovp.org_version_id = p_org_version_id
+                ) AS prog
             )
         ),
+        -- Who proposed/created this organization version (student or applicant)
+        'proposed_by', JSON_OBJECT(
+            'user_id', proposer.user_id,
+            'first_name', proposer.f_name,
+            'last_name', proposer.l_name,
+            'email', proposer.email
+        ),
+        -- Executives for the effective org & cycle (if any)
+        'executive_members', (
+            SELECT JSON_ARRAYAGG(JSON_OBJECT(
+                'first_name', u.f_name,
+                'last_name', u.l_name,
+                'email', u.email,
+                'role_title', er.role_title,
+                'rank_id', er.rank_id,
+                'program_name', p.name
+            ))
+            FROM tbl_organization_members om
+            JOIN tbl_user u ON om.user_id = u.user_id
+            JOIN tbl_executive_role er ON om.executive_role_id = er.executive_role_id
+            LEFT JOIN tbl_program p ON u.program_id = p.program_id
+            WHERE om.organization_id = COALESCE(v.organization_id, p_org_id)
+                AND om.cycle_number = v_cycle_number
+                AND om.member_type = 'Executive'
+        ),
+        -- Committees and roles for the effective org & cycle (if any)
         'committee_roles', (
             SELECT JSON_ARRAYAGG(JSON_OBJECT(
                 'committee_name', c.name,
@@ -4495,15 +4901,20 @@ BEGIN
             ))
             FROM tbl_committee_role cr
             JOIN tbl_committee c ON cr.committee_id = c.committee_id
-            WHERE c.organization_id = p_org_id
+            WHERE c.organization_id = COALESCE(v.organization_id, p_org_id)
                 AND c.cycle_number = v_cycle_number
         )
     ) AS result
-    FROM tbl_organization o
-    JOIN tbl_user adv ON o.adviser_id = adv.user_id
-    WHERE o.organization_id = p_org_id;
-END$$
+    FROM tbl_organization_version v
+    LEFT JOIN tbl_organization o ON v.organization_id = o.organization_id
+    -- adviser strictly from tbl_organization.adviser_id (no fallback)
+    LEFT JOIN tbl_user adv ON o.adviser_id = adv.user_id
+    LEFT JOIN tbl_user proposer ON v.created_by = proposer.user_id
+    WHERE v.org_version_id = p_org_version_id
+    LIMIT 1;
+END $$
 DELIMITER ;
+
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationMembers(
@@ -7618,7 +8029,7 @@ BEGIN
     -- Get the cycle_number for the given org_version_id
     SELECT cycle_number INTO v_cycle_number
     FROM tbl_renewal_cycle
-    WHERE org_version_id = p_org_version_id;
+    WHERE org_version_id = p_org_version_id AND organization_id = p_org_id;
 
     SELECT
         om.member_id,
@@ -9524,6 +9935,7 @@ VALUES("CREATE_EVENT","Organization"),
 ("VIEW_TRANSACTIONS","Global"),
 ("MANAGE_TRANSACTIONS","Global");
 
+
 INSERT INTO tbl_role_permission (role_id, permission_id) 
 VALUES
 (4,2),
@@ -9602,7 +10014,6 @@ INSERT INTO tbl_user (user_id, f_name, l_name, email, program_id, role_id) VALUE
 ('dumalagim@students.nu-dasma.edu.ph', 'Iver', 'Dumalag', 'dumalagim@students.nu-dasma.edu.ph', '1', '1'),
 ('LBmQ-WzvRhVmb55Ucidrc14aL39ae9Ei-7xfbOrPeEA', ' Samantha Joy', 'Madrunio', 'madruniosm@students.nu-dasma.edu.ph', '13', '2'),
 ('NqBfAZcMXHZF5g9ztwkQ1ykPgtNmZwYRcIPKKK40ROc', ' Alister Dylan Emmanuel', 'Realo', 'realoam@students.nu-dasma.edu.ph', '13', '1'),
-('ochavillorc@students.nu-dasma.edu.ph', 'Red ', 'Ochavillo', 'ochavillorc@students.nu-dasma.edu.ph', '13', '1'),
 ('CyTLmjW4Edhvk2WvWFDNuWLYjW0WJETBPbY2HWk-ZqE', ' Loraine', 'Miraballes', 'miraballesl@students.nu-dasma.edu.ph', NULL, '1'),
 ('CY4e1GmCXysMRn8VYudhqDy7CDJ8xVidGO1v8RnRj1E', ' Shamiah M', 'Mendoza', 'mendozasm@students.nu-dasma.edu.ph', '13', '3');
 
@@ -9683,7 +10094,8 @@ INSERT INTO tbl_rank_permission(rank_id, permission_id) VALUES
 (1,17),
 (1,19),
 (1,20),
-(1,21);
+(1,21),
+(1,29);
 
 INSERT INTO tbl_transaction_type (code, label) VALUES
   ('INCOME','Income'),
