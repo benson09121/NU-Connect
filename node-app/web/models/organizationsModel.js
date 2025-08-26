@@ -92,10 +92,10 @@ async function checkOrganizationName(org_name) {
     }
 
 }
-async function checkOrganizationEmails(org_emails) {
+async function checkOrganizationEmails(org_emails, president_email) {
     const connection = await pool.getConnection();
     try {
-        const [rows] = await connection.query('CALL CheckOrganizationEmails(?);', [org_emails]);
+        const [rows] = await connection.query('CALL CheckOrganizationEmails(?, ?);', [org_emails, president_email]);
         return rows[0];
     } catch (error) {
         console.error('Error checking organization emails:', error);
@@ -911,6 +911,19 @@ async function getApprovedOrganizationLogos() {
     }
 }
 
+async function checkOrgRenewalStatus(org_id){
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL CheckOrgRenewalStatus(?)', [org_id]);
+        return rows[0] || {};
+    } catch (error) {
+        console.error('Error checking organization renewal status:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
 module.exports = {
     createOrganizationApplication,
     getSpecificApplication,
@@ -966,4 +979,5 @@ module.exports = {
     initiateApprovalProcess,
     sendApprovalNotification,
     getApprovedOrganizationLogos,
+    checkOrgRenewalStatus
 };

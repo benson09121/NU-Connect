@@ -184,7 +184,8 @@ async function createOrganizationApplication(req, res) {
             operation: 'CREATE',
             data: result
         });
-
+        console.log('Application created successfully:', result);
+        console.log(appId, user.user_id);
         // Initiate approval process with enhanced logging
         try {
             await organizationsModel.initiateApprovalProcess(appId, user.user_id);
@@ -391,6 +392,7 @@ async function checkOrganizationName(req, res) {
 async function checkOrganizationEmails(req, res) {
     try {
         const { emails } = req.body;
+        const { president_email } = req.body;
         // Fix: flatten if double-wrapped (array in array)
         let emailList = emails;
         if (Array.isArray(emails) && emails.length === 1 && Array.isArray(emails[0])) {
@@ -403,7 +405,7 @@ async function checkOrganizationEmails(req, res) {
         // Pass as a JSON string (not a stringified array string)
         const jsonEmails = JSON.stringify(emailList);
         // Remove any extra escaping (should not be present if JSON.stringify is used on an array)
-        const exists = await organizationsModel.checkOrganizationEmails(jsonEmails);
+        const exists = await organizationsModel.checkOrganizationEmails(jsonEmails, president_email);
         res.json({ exists });
     } catch (error) {
         res.status(500).json({
@@ -411,6 +413,8 @@ async function checkOrganizationEmails(req, res) {
         });
     }   
 }
+
+
 
 async function archiveOrganization(req, res) {
     try {
@@ -1191,6 +1195,26 @@ async function getApprovedOrganizationLogos(req, res) {
         });
     }
 }
+async function checkOrgRenewalStatus(req, res){
+    try{
+        const {org_id, sessionId, org_version_id } = req.query;
+        if (!org_id) {
+            return res.status(400).json({ error: "org_id is required." });
+        }
+        const result = await organizationsModel.checkOrgRenewalStatus(org_id);
+
+        publishToChannel(`organizations_renewal_status_${org_id}_${org_version_id}`, {
+            sessionId,
+            status: result
+        });
+        res.status(200).json(result);
+    } catch (error) {
+        console.error('[checkOrgRenewalStatus] error:', error);
+        res.status(500).json({
+            error: error.message || 'An error occurred while checking organization renewal status.'
+        });
+    }
+}
 
 
 
@@ -1240,4 +1264,5 @@ module.exports = {
     initiateApprovalProcess,
     getOrganizationLogoApplication,
     getApprovedOrganizationLogos,
+    checkOrgRenewalStatus
 };

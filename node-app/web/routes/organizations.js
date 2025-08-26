@@ -24,7 +24,7 @@ router.get(
     middleware.validateAzureJWT,
     organizationsController.getEventRequirementSubmissionsByOrganization
 );
-
+router.get('/checkOrgRenewalStatus', middleware.validateAzureJWT, organizationsController.checkOrgRenewalStatus);
 router.get('/getSpecificApplication', middleware.validateAzureJWT, organizationsController.getSpecificApplication);
 router.get('/org-applications', middleware.validateAzureJWT, organizationsController.getOrganizationApplications);
 router.post('/approve-application', middleware.validateAzureJWT, organizationsController.approveApplication);
