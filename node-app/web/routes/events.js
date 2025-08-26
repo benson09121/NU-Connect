@@ -82,4 +82,52 @@ router.put(
   eventController.rejectPaidEventRegistration
 );
 
+// Create a blocked period
+router.post(
+  '/blocked-periods',
+  middleware.validateAzureJWT,
+  middleware.hasPermission("MANAGE_REQUIREMENTS"),
+  eventController.createBlockedPeriod
+);
+
+// Update a blocked period
+router.put(
+  '/blocked-periods/:id',
+  middleware.validateAzureJWT,
+  middleware.hasPermission("MANAGE_REQUIREMENTS"),
+  eventController.updateBlockedPeriod
+);
+
+// Archive a blocked period
+router.put(
+  '/blocked-periods/:id/archive',
+  middleware.validateAzureJWT,
+  middleware.hasPermission("MANAGE_REQUIREMENTS"),
+  eventController.archiveBlockedPeriod
+);
+
+// Unarchive a blocked period
+router.put(
+  '/blocked-periods/:id/unarchive',
+  middleware.validateAzureJWT,
+  middleware.hasPermission("MANAGE_REQUIREMENTS"),
+  eventController.unarchiveBlockedPeriod
+);
+
+// Delete a blocked period
+router.delete(
+  '/blocked-periods/:id',
+  middleware.validateAzureJWT,
+  middleware.hasPermission("MANAGE_REQUIREMENTS"),
+  eventController.deleteBlockedPeriod
+);
+
+// Get blocked periods by status (archived/unarchived)
+router.get(
+  '/blocked-periods',
+  middleware.validateAzureJWT,
+  middleware.hasPermission("VIEW_EVENT"),
+  eventController.getBlockedPeriodsByStatus
+);
+
 module.exports = router;

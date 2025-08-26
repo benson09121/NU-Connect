@@ -308,8 +308,18 @@ async function createEventApplication(req, res) {
 
     // Lookup user_id from email if not present
     let applicant_user_id = req.user?.user_id;
-    if (!applicant_user_id && req.body.user_email) {
-      const user = await eventModel.getUserByEmail(req.body.user_email);
+
+    // If user_id looks like an Azure AD ID (starts with _ or is long), or is missing, resolve from email
+    if (
+      !applicant_user_id ||
+      applicant_user_id.startsWith('_') ||
+      applicant_user_id.length > 32 // adjust length as needed for your IDs
+    ) {
+      let email = req.body.user_email || req.user?.email;
+      if (!email) {
+        return res.status(400).json({ message: "user_email is required to resolve user_id." });
+      }
+      const user = await eventModel.getUserByEmail(email);
       if (!user) {
         return res.status(404).json({ message: "User not found for the provided email." });
       }
@@ -639,9 +649,19 @@ async function uploadOrUpdatePostEventRequirement(req, res) {
 async function createEvent(req, res) {
     try {
         const event = req.body;
-        // Look up user_id from user_email if needed
+        let imageFile = req.files?.image || null;
+        let imageFilename = null;
+
+        // Always check if user_id is an email and resolve to real user_id
         let user_id = event.user_id;
-        if (!user_id && event.user_email) {
+        // If user_id looks like an email, treat it as user_email
+        if (user_id && user_id.includes('@')) {
+            const user = await eventModel.getUserByEmail(user_id);
+            if (!user) {
+                return res.status(404).json({ message: "User not found for the provided email." });
+            }
+            user_id = user.user_id;
+        } else if (!user_id && event.user_email) {
             const user = await eventModel.getUserByEmail(event.user_email);
             if (!user) {
                 return res.status(404).json({ message: "User not found for the provided email." });
@@ -655,19 +675,42 @@ async function createEvent(req, res) {
 
         // Clean up fields
         event.venue = event.venue || null;
-        event.certificate = event.certificate ? String(event.certificate) : null;
         event.capacity = event.capacity === "" ? null : event.capacity;
         event.fee = event.fee === "" ? null : event.fee;
 
+        // Save image if uploaded
+        if (imageFile) {
+            // Use organization_id or 'SDAO' for directory
+            const orgDir = path.join(
+                '/app/events',
+                event.organization_id ? String(event.organization_id) : 'SDAO'
+            );
+            if (!fs.existsSync(orgDir)) fs.mkdirSync(orgDir, { recursive: true });
+            imageFilename = `event-${Date.now()}-${imageFile.name}`;
+            fs.writeFileSync(path.join(orgDir, imageFilename), imageFile.data);
+            event.image = imageFilename;
+        } else {
+            event.image = null;
+        }
+
+        // Create the event (SDAO or regular)
         const createdEvent = await eventModel.createEvent(event);
+
+        // Real-time publish to the same channel as regular event creation
+        publishToChannel(`events`, {
+            operation: "CREATE",
+            data: createdEvent
+        });
+
         res.status(201).json({ message: 'Event created successfully', event: createdEvent });
     } catch (error) {
-        console.error("Error creating event:", error); // <-- Add this for debugging
+        console.error("Error creating event:", error);
         res.status(500).json({
             error: error.message || "An error occurred while creating the event.",
         });
     }
 }
+
 async function getEventApprovalTimeline(req, res) {
     try {
         const event_id = req.query.event_id;
@@ -943,6 +986,151 @@ async function checkScheduleConflict(req, res) {
     }
 }
 
+async function createBlockedPeriod(req, res) {
+    try {
+        let { start_date, end_date, reason, user_id, user_email } = req.body;
+
+        // Lookup user_id from email if not provided
+        if (!user_id && user_email) {
+            const user = await eventModel.getUserByEmail(user_email);
+            if (!user) {
+                return res.status(404).json({ message: "User not found for the provided email." });
+            }
+            user_id = user.user_id;
+        }
+
+        if (!user_id) {
+            return res.status(400).json({ message: "user_id (or user_email) is required." });
+        }
+
+        await eventModel.createBlockedPeriod({ start_date, end_date, reason, created_by: user_id });
+        // Fetch latest periods for real-time update
+        const periods = await eventModel.getBlockedPeriodsByStatus('unarchived');
+        publishToChannel('blocked_periods', { operation: 'CREATE', data: periods });
+        res.status(201).json({ message: 'Blocked period created.' });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+}
+
+async function updateBlockedPeriod(req, res) {
+    try {
+        const blocked_period_id = req.params.id || req.body.blocked_period_id;
+        let { start_date, end_date, reason, user_id, user_email } = req.body;
+
+        // Lookup user_id from email if not provided
+        if (!user_id && user_email) {
+            const user = await eventModel.getUserByEmail(user_email);
+            if (!user) {
+                return res.status(404).json({ message: "User not found for the provided email." });
+            }
+            user_id = user.user_id;
+        }
+        if (!user_id) {
+            return res.status(400).json({ message: "user_id (or user_email) is required." });
+        }
+
+        await eventModel.updateBlockedPeriod({ blocked_period_id, start_date, end_date, reason, updated_by: user_id });
+        const periods = await eventModel.getBlockedPeriodsByStatus('unarchived');
+        publishToChannel('blocked_periods', { operation: 'UPDATE', data: periods });
+        res.status(200).json({ message: 'Blocked period updated.' });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+}
+
+async function archiveBlockedPeriod(req, res) {
+    try {
+        const blocked_period_id = req.params.id || req.body.blocked_period_id;
+        let { user_id, user_email, archived_reason } = req.body;
+        if (!archived_reason) return res.status(400).json({ message: 'Archive reason required.' });
+
+        // Lookup user_id from email if not provided
+        if (!user_id && user_email) {
+            const user = await eventModel.getUserByEmail(user_email);
+            if (!user) {
+                return res.status(404).json({ message: "User not found for the provided email." });
+            }
+            user_id = user.user_id;
+        }
+        if (!user_id) {
+            return res.status(400).json({ message: "user_id (or user_email) is required." });
+        }
+
+        await eventModel.archiveBlockedPeriod({ blocked_period_id, archived_by: user_id, archived_reason });
+        const periods = await eventModel.getBlockedPeriodsByStatus('archived');
+        publishToChannel('blocked_periods', { operation: 'UPDATE', data: periods });
+        res.status(200).json({ message: 'Blocked period archived.' });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+}
+
+async function unarchiveBlockedPeriod(req, res) {
+    try {
+        const blocked_period_id = req.params.id || req.body.blocked_period_id;
+        let { user_id, user_email, unarchived_reason } = req.body;
+
+        // Lookup user_id from email if not provided
+        if (!user_id && user_email) {
+            const user = await eventModel.getUserByEmail(user_email);
+            if (!user) {
+                return res.status(404).json({ message: "User not found for the provided email." });
+            }
+            user_id = user.user_id;
+        }
+        if (!user_id) {
+            return res.status(400).json({ message: "user_id (or user_email) is required." });
+        }
+
+        await eventModel.unarchiveBlockedPeriod({ blocked_period_id, unarchived_by: user_id, unarchived_reason });
+        const periods = await eventModel.getBlockedPeriodsByStatus('unarchived');
+        publishToChannel('blocked_periods', { operation: 'UPDATE', data: periods });
+        res.status(200).json({ message: 'Blocked period unarchived.' });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+}
+
+async function deleteBlockedPeriod(req, res) {
+    try {
+        const blocked_period_id = req.params.id || req.body.blocked_period_id;
+        let { user_id, user_email } = req.body;
+
+        // Lookup user_id from email if not provided
+        if (!user_id && user_email) {
+            const user = await eventModel.getUserByEmail(user_email);
+            if (!user) {
+                return res.status(404).json({ message: "User not found for the provided email." });
+            }
+            user_id = user.user_id;
+        }
+        if (!user_id) {
+            return res.status(400).json({ message: "user_id (or user_email) is required." });
+        }
+
+        await eventModel.deleteBlockedPeriod({ blocked_period_id, deleted_by: user_id });
+        const periods = await eventModel.getBlockedPeriodsByStatus('unarchived');
+        publishToChannel('blocked_periods', { operation: 'DELETE', data: periods });
+        res.status(200).json({ message: 'Blocked period deleted.' });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+}
+
+async function getBlockedPeriodsByStatus(req, res) {
+    try {
+        const { status, sessionId } = req.query; // 'archived' or 'unarchived'
+        if (sessionId) {
+            subscribeToChannel(sessionId, 'blocked_periods');
+        }
+        const periods = await eventModel.getBlockedPeriodsByStatus(status);
+        res.status(200).json(periods);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+}
+
 module.exports = {
     addEvent,
     getEventRequirements,
@@ -974,5 +1162,11 @@ module.exports = {
     getSampleCertificate,
     getEventPublicationImage,
     checkEventTitle,
-    checkScheduleConflict
+    checkScheduleConflict,
+    createBlockedPeriod,
+    updateBlockedPeriod,
+    archiveBlockedPeriod,
+    unarchiveBlockedPeriod,
+    deleteBlockedPeriod,
+    getBlockedPeriodsByStatus
 };

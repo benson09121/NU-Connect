@@ -524,7 +524,15 @@ CREATE TABLE tbl_blocked_period (
     reason VARCHAR(255) NOT NULL,
     created_by VARCHAR(200) NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (created_by) REFERENCES tbl_user(user_id)
+    archived_at TIMESTAMP NULL,
+    archived_by VARCHAR(200) NULL,
+    archived_reason VARCHAR(255) NULL,
+    unarchived_at TIMESTAMP NULL,
+    unarchived_by VARCHAR(200) NULL,
+    unarchived_reason VARCHAR(255) NULL,
+    FOREIGN KEY (created_by) REFERENCES tbl_user(user_id),
+    FOREIGN KEY (archived_by) REFERENCES tbl_user(user_id),
+    FOREIGN KEY (unarchived_by) REFERENCES tbl_user(user_id)
 );
 
 CREATE TABLE tbl_event_application (
@@ -1077,36 +1085,50 @@ END $$
 DELIMITER ;
 
 DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE CreateEvent(IN
-    p_user_id VARCHAR(200),
-    p_title VARCHAR(300),
-    p_description TEXT,
-    p_venue_type ENUM('Face to face', 'Online'),
-    p_venue VARCHAR(200),
-    p_start_date DATE,
-    p_end_date DATE,
-    p_start_time TIME,
-    p_end_time TIME,
-    p_organization_id INT,
-    p_cycle_number INT,
-    p_event_type ENUM('Organization', 'SDAO', 'System'),
-    p_status ENUM('Pending', 'Approved', 'Rejected', 'Archived'),
-    p_type ENUM('Paid', 'Free'),
-    p_is_open_to ENUM('Members only', 'Open to all', 'NU Students only'),
-    p_fee INT,
-    p_capacity INT
+CREATE DEFINER='admin'@'%' PROCEDURE CreateEvent(
+    IN p_user_id VARCHAR(200),
+    IN p_title VARCHAR(300),
+    IN p_description TEXT,
+    IN p_venue_type ENUM('Face to face', 'Online'),
+    IN p_venue VARCHAR(200),
+    IN p_start_date DATE,
+    IN p_end_date DATE,
+    IN p_start_time TIME,
+    IN p_end_time TIME,
+    IN p_organization_id INT,
+    IN p_cycle_number INT,
+    IN p_event_type ENUM('Organization', 'SDAO', 'System'),
+    IN p_status ENUM('Pending', 'Approved', 'Rejected', 'Archived'),
+    IN p_type ENUM('Paid', 'Free'),
+    IN p_is_open_to ENUM('Members only', 'Open to all', 'NU Students only'),
+    IN p_fee INT,
+    IN p_capacity INT,
+    IN p_image TEXT
 )
 BEGIN
     DECLARE v_base_program_id INT;
     DECLARE v_event_id INT;
-    
-    DECLARE EXIT HANDLER FOR SQLEXCEPTION
-    BEGIN
-        ROLLBACK;
-        RESIGNAL;
-    END;
+    DECLARE v_role_id INT;
+    DECLARE v_user_email VARCHAR(100);
+    DECLARE v_all_emails JSON;
 
-    START TRANSACTION;
+    -- Get role and email of user
+    SELECT role_id, email INTO v_role_id, v_user_email FROM tbl_user WHERE user_id = p_user_id LIMIT 1;
+
+    -- Blocked period check: Only allow SDAO to create events during blocked periods
+    IF p_event_type != 'SDAO' THEN
+        IF EXISTS (
+            SELECT 1 FROM tbl_blocked_period
+            WHERE p_start_date <= end_date AND p_end_date >= start_date
+        ) THEN
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Events cannot be created during blocked periods';
+        END IF;
+    ELSE
+        -- SDAO check
+        IF v_role_id != 4 THEN
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Only SDAO can create SDAO events';
+        END IF;
+    END IF;
 
     -- Only check organization constraints for Organization events
     IF p_event_type = 'Organization' THEN
@@ -1129,7 +1151,7 @@ BEGIN
             SET MESSAGE_TEXT = 'Invalid organization_id and cycle_number combination';
         END IF;
     END IF;
- 
+
     INSERT INTO tbl_event (
         organization_id,
         cycle_number,
@@ -1137,6 +1159,7 @@ BEGIN
         user_id,
         title,
         description,
+        image,
         venue_type,
         venue,
         start_date,
@@ -1147,7 +1170,8 @@ BEGIN
         type,
         is_open_to,
         fee,
-        capacity
+        capacity,
+        created_at
     ) VALUES (
         CASE WHEN p_event_type = 'Organization' THEN p_organization_id ELSE NULL END,
         CASE WHEN p_event_type = 'Organization' THEN p_cycle_number ELSE NULL END,
@@ -1155,6 +1179,7 @@ BEGIN
         p_user_id,
         p_title,
         p_description,
+        p_image,
         p_venue_type,
         p_venue,
         p_start_date,
@@ -1165,9 +1190,10 @@ BEGIN
         p_type,
         p_is_open_to,
         p_fee,
-        p_capacity
+        p_capacity,
+        NOW()
     );
-    
+
     SET v_event_id = LAST_INSERT_ID();
 
     -- Only create course associations for organization events with restricted access
@@ -1183,6 +1209,38 @@ BEGIN
             FROM tbl_organization_course
             WHERE organization_id = p_organization_id
         ) AS org_courses;
+    END IF;
+
+    -- Get all active user emails for notification (for SDAO events)
+    IF p_event_type = 'SDAO' THEN
+        SELECT JSON_ARRAYAGG(email) INTO v_all_emails FROM tbl_user WHERE status = 'Active';
+
+        -- Log the action
+        CALL LogAction(
+            v_user_email,
+            CONCAT('Created SDAO event: ', p_title),
+            'event',
+            JSON_OBJECT(
+                'event_id', v_event_id,
+                'title', p_title,
+                'start_date', p_start_date,
+                'end_date', p_end_date
+            ),
+            CONCAT('/events/', v_event_id),
+            NULL
+        );
+
+        -- Notify all users
+        CALL CreateNotification(
+            CONCAT('New SDAO Event: ', p_title),
+            CONCAT('A new SDAO event "', p_title, '" has been created and is now available.'),
+            CONCAT('/events/', v_event_id),
+            'event',
+            v_event_id,
+            p_user_id,
+            v_all_emails,
+            'event_created'
+        );
     END IF;
 
     COMMIT;
@@ -5270,16 +5328,6 @@ BEGIN
 
     COMMIT;
 
-    -- -- Create notification and log for new event proposal
-    -- CALL NotifyNewEventProposal(
-    --     v_event_id,
-    --     v_event_application_id,
-    --     JSON_UNQUOTE(JSON_EXTRACT(p_event, '$.title')),
-    --     p_organization_id,
-    --     v_organization_name,
-    --     p_applicant_user_id
-    -- );
-
     -- Return success information
     SELECT 
         v_event_id AS event_id,
@@ -5426,7 +5474,8 @@ CREATE DEFINER='admin'@'%' PROCEDURE ApproveEventApplication(
     IN p_approval_id INT,
     IN p_comment TEXT,
     IN p_event_application_id INT,
-    IN p_user_id VARCHAR(200))
+    IN p_user_id VARCHAR(200)
+)
 BEGIN
     DECLARE v_step_number INT;
     DECLARE v_max_step INT;
@@ -5435,7 +5484,13 @@ BEGIN
     DECLARE v_event_title VARCHAR(300);
     DECLARE v_end_date DATE;
     DECLARE v_end_time TIME;
-    
+    DECLARE v_user_email VARCHAR(100);
+    DECLARE v_next_approver_id VARCHAR(200);
+    DECLARE v_next_approver_email VARCHAR(100);
+    DECLARE v_next_step INT;
+    DECLARE v_applicant_id VARCHAR(200);
+    DECLARE v_applicant_email VARCHAR(100);
+
     -- Update the approval status
     UPDATE tbl_event_approval_process
     SET 
@@ -5443,34 +5498,55 @@ BEGIN
         status = 'Approved',
         approved_at = CURRENT_TIMESTAMP
     WHERE event_approval_id = p_approval_id;
-    
-    -- Log the approval action
-    INSERT INTO tbl_logs (
-        user_id,
-        action,
-        type,
-        meta_data
-    ) VALUES (
-        p_user_id,
+
+    -- Log the approval action using LogAction
+    SELECT email INTO v_user_email FROM tbl_user WHERE user_id = p_user_id LIMIT 1;
+    CALL LogAction(
+        v_user_email,
         CONCAT('Approved event application step for application ID: ', p_event_application_id),
         'Event Approval',
         JSON_OBJECT(
             'approval_id', p_approval_id,
             'application_id', p_event_application_id,
             'comment', p_comment
-        )
+        ),
+        NULL,
+        NULL
     );
-    
+
     -- Get current step number
     SELECT step_number INTO v_step_number
     FROM tbl_event_approval_process
     WHERE event_approval_id = p_approval_id;
-    
+
     -- Get the max step number for this application
     SELECT MAX(step_number) INTO v_max_step
     FROM tbl_event_approval_process
     WHERE event_application_id = p_event_application_id;
-    
+
+    -- Notify next approver if not final step
+    IF v_step_number < v_max_step THEN
+        SELECT step_number, approver_id INTO v_next_step, v_next_approver_id
+        FROM tbl_event_approval_process
+        WHERE event_application_id = p_event_application_id
+          AND step_number = v_step_number + 1
+        LIMIT 1;
+
+        IF v_next_approver_id IS NOT NULL THEN
+            SELECT email INTO v_next_approver_email FROM tbl_user WHERE user_id = v_next_approver_id LIMIT 1;
+            CALL CreateNotification(
+                'Event Application Approval Needed',
+                CONCAT('You have a pending event application to review (Application ID: ', p_event_application_id, ').'),
+                NULL,
+                'approval',
+                p_event_application_id,
+                p_user_id,
+                JSON_ARRAY(v_next_approver_email),
+                'approval_required'
+            );
+        END IF;
+    END IF;
+
     -- Check if this is the final approval
     IF v_step_number = v_max_step THEN
         -- Get the proposed event ID and organization ID
@@ -5479,19 +5555,19 @@ BEGIN
         FROM tbl_event_application e
         LEFT JOIN tbl_event ev ON e.proposed_event_id = ev.event_id
         WHERE e.event_application_id = p_event_application_id;
-        
+
         -- Update event application status
         UPDATE tbl_event_application
         SET status = 'Approved',
             updated_at = CURRENT_TIMESTAMP
         WHERE event_application_id = p_event_application_id;
-        
+
         -- Update the event status if it exists
         IF v_event_id IS NOT NULL THEN
             UPDATE tbl_event
             SET status = 'Approved'
             WHERE event_id = v_event_id;
-            
+
             -- Create evaluation settings with default configuration
             INSERT INTO tbl_event_evaluation_settings (
                 event_id,
@@ -5504,44 +5580,54 @@ BEGIN
                 v_end_time,
                 TRUE
             );
-            
+
             -- Add default evaluation configuration (group 1 - Activity questions)
             INSERT INTO tbl_event_evaluation_config (event_id, group_id)
             VALUES (v_event_id, 1);
-            
-            -- Log evaluation setup
-            INSERT INTO tbl_logs (
-                user_id,
-                action,
-                type,
-                meta_data
-            ) VALUES (
-                p_user_id,
+
+            -- Log evaluation setup using LogAction
+            CALL LogAction(
+                v_user_email,
                 CONCAT('Added default evaluation configuration for event: ', v_event_title),
                 'Event Evaluation Setup',
                 JSON_OBJECT(
                     'event_id', v_event_id,
                     'default_group_id', 1
-                )
+                ),
+                NULL,
+                NULL
             );
         END IF;
-        
-        -- Log final approval
-        INSERT INTO tbl_logs (
-            user_id,
-            action,
-            type,
-            meta_data
-        ) VALUES (
-            p_user_id,
+
+        -- Log final approval using LogAction
+        CALL LogAction(
+            v_user_email,
             CONCAT('Fully approved event application for: ', IFNULL(v_event_title, 'Untitled Event')),
             'Event Final Approval',
             JSON_OBJECT(
                 'application_id', p_event_application_id,
                 'event_id', IFNULL(v_event_id, 'NULL'),
                 'organization_id', v_organization_id
-            )
+            ),
+            NULL,
+            NULL
         );
+
+        -- Notify applicant of final approval
+        SELECT applicant_user_id INTO v_applicant_id FROM tbl_event_application WHERE event_application_id = p_event_application_id;
+        SELECT email INTO v_applicant_email FROM tbl_user WHERE user_id = v_applicant_id LIMIT 1;
+        IF v_applicant_email IS NOT NULL THEN
+            CALL CreateNotification(
+                'Event Application Approved',
+                CONCAT('Your event application (', IFNULL(v_event_title, 'Untitled Event'), ') has been fully approved.'),
+                NULL,
+                'approval',
+                p_event_application_id,
+                p_user_id,
+                JSON_ARRAY(v_applicant_email),
+                'approval_final'
+            );
+        END IF;
     END IF;
 
     SELECT 
@@ -9767,72 +9853,6 @@ END$$
 DELIMITER ;
 
 DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE CreateSDAOEvent(
-    IN p_user_id VARCHAR(200),
-    IN p_title VARCHAR(300),
-    IN p_description TEXT,
-    IN p_venue_type ENUM('Face to face', 'Online'),
-    IN p_venue VARCHAR(200),
-    IN p_start_date DATE,
-    IN p_end_date DATE,
-    IN p_start_time TIME,
-    IN p_end_time TIME,
-    IN p_status ENUM('Pending', 'Approved', 'Rejected', 'Archived'),
-    IN p_type ENUM('Paid', 'Free'),
-    IN p_is_open_to ENUM('Members only', 'Open to all', 'NU Students only'),
-    IN p_fee INT,
-    IN p_capacity INT,
-    IN p_image TEXT
-)
-BEGIN
-    -- Only allow SDAO (role_id = 4) to use this proc
-    DECLARE v_role_id INT;
-    SELECT role_id INTO v_role_id FROM tbl_user WHERE user_id = p_user_id LIMIT 1;
-    IF v_role_id != 4 THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Only SDAO can create SDAO events';
-    END IF;
-
-    -- Check if event is within a blocked period
-    IF EXISTS (
-        SELECT 1 FROM tbl_blocked_period
-        WHERE p_start_date <= end_date AND p_end_date >= start_date
-    ) THEN
-        -- Only SDAO can create events in blocked periods (already checked above)
-        -- SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Events cannot be created during blocked periods';
-        -- Add a dummy statement to avoid empty block
-        SET @dummy := 1;
-    END IF;
-
-    INSERT INTO tbl_event (
-        organization_id,
-        cycle_number,
-        event_type,
-        user_id,
-        title,
-        description,
-        image,
-        venue_type,
-        venue,
-        start_date,
-        end_date,
-        start_time,
-        end_time,
-        status,
-        type,
-        is_open_to,
-        fee,
-        capacity,
-        created_at
-    ) VALUES (
-        NULL, NULL, 'SDAO', p_user_id, p_title, p_description, p_image, p_venue_type, p_venue,
-        p_start_date, p_end_date, p_start_time, p_end_time, 'Approved', p_type, p_is_open_to, p_fee, p_capacity, NOW()
-    );
-
-    SELECT * FROM tbl_event WHERE event_id = LAST_INSERT_ID();
-END$$
-DELIMITER ;
-
-DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE IsDateBlocked(
     IN p_start_date DATE,
     IN p_end_date DATE
@@ -9989,6 +10009,141 @@ BEGIN
         ) AS result;
 
     END renewal_proc;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE PROCEDURE CreateBlockedPeriod(
+    IN p_start_date DATE,
+    IN p_end_date DATE,
+    IN p_reason VARCHAR(255),
+    IN p_created_by VARCHAR(200)
+)
+BEGIN
+    INSERT INTO tbl_blocked_period (start_date, end_date, reason, created_by)
+    VALUES (p_start_date, p_end_date, p_reason, p_created_by);
+
+    -- Log action
+    CALL LogAction(
+        (SELECT email FROM tbl_user WHERE user_id = p_created_by LIMIT 1),
+        CONCAT('Created blocked period: ', p_reason),
+        'blocked_period',
+        JSON_OBJECT('blocked_period_id', LAST_INSERT_ID(), 'start_date', p_start_date, 'end_date', p_end_date),
+        NULL,
+        NULL
+    );
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE PROCEDURE UpdateBlockedPeriod(
+    IN p_blocked_period_id INT,
+    IN p_start_date DATE,
+    IN p_end_date DATE,
+    IN p_reason VARCHAR(255),
+    IN p_updated_by VARCHAR(200)
+)
+BEGIN
+    UPDATE tbl_blocked_period
+    SET start_date = p_start_date,
+        end_date = p_end_date,
+        reason = p_reason
+    WHERE blocked_period_id = p_blocked_period_id;
+
+    CALL LogAction(
+        (SELECT email FROM tbl_user WHERE user_id = p_updated_by LIMIT 1),
+        CONCAT('Updated blocked period: ', p_reason),
+        'blocked_period',
+        JSON_OBJECT('blocked_period_id', p_blocked_period_id, 'start_date', p_start_date, 'end_date', p_end_date),
+        NULL,
+        NULL
+    );
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE PROCEDURE ArchiveBlockedPeriod(
+    IN p_blocked_period_id INT,
+    IN p_archived_by VARCHAR(200),
+    IN p_reason VARCHAR(255)
+)
+BEGIN
+    UPDATE tbl_blocked_period
+    SET archived_at = CURRENT_TIMESTAMP,
+        archived_by = p_archived_by,
+        archived_reason = p_reason,
+        unarchived_at = NULL,
+        unarchived_by = NULL,
+        unarchived_reason = NULL
+    WHERE blocked_period_id = p_blocked_period_id;
+
+    CALL LogAction(
+        (SELECT email FROM tbl_user WHERE user_id = p_archived_by LIMIT 1),
+        CONCAT('Archived blocked period: ', p_reason),
+        'blocked_period',
+        JSON_OBJECT('blocked_period_id', p_blocked_period_id, 'reason', p_reason),
+        NULL,
+        NULL
+    );
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE PROCEDURE UnarchiveBlockedPeriod(
+    IN p_blocked_period_id INT,
+    IN p_unarchived_by VARCHAR(200),
+    IN p_reason VARCHAR(255)
+)
+BEGIN
+    UPDATE tbl_blocked_period
+    SET archived_at = NULL,
+        archived_by = NULL,
+        archived_reason = NULL,
+        unarchived_at = CURRENT_TIMESTAMP,
+        unarchived_by = p_unarchived_by,
+        unarchived_reason = p_reason
+    WHERE blocked_period_id = p_blocked_period_id;
+
+    CALL LogAction(
+        (SELECT email FROM tbl_user WHERE user_id = p_unarchived_by LIMIT 1),
+        CONCAT('Unarchived blocked period'),
+        'blocked_period',
+        JSON_OBJECT('blocked_period_id', p_blocked_period_id, 'reason', p_reason),
+        NULL,
+        NULL
+    );
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE PROCEDURE DeleteBlockedPeriod(
+    IN p_blocked_period_id INT,
+    IN p_deleted_by VARCHAR(200)
+)
+BEGIN
+    DELETE FROM tbl_blocked_period WHERE blocked_period_id = p_blocked_period_id;
+
+    CALL LogAction(
+        (SELECT email FROM tbl_user WHERE user_id = p_deleted_by LIMIT 1),
+        CONCAT('Deleted blocked period: ', p_blocked_period_id),
+        'blocked_period',
+        JSON_OBJECT('blocked_period_id', p_blocked_period_id),
+        NULL,
+        NULL
+    );
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE PROCEDURE GetBlockedPeriodsByStatus(
+    IN p_status ENUM('archived', 'unarchived')
+)
+BEGIN
+    IF p_status = 'archived' THEN
+        SELECT * FROM tbl_blocked_period WHERE archived_at IS NOT NULL;
+    ELSE
+        SELECT * FROM tbl_blocked_period WHERE archived_at IS NULL;
+    END IF;
 END$$
 DELIMITER ;
 
