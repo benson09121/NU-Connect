@@ -364,33 +364,38 @@ async function getEventRequirementSubmissions({
 }
 
 async function createEvent(event) {
-    const connection = await pool.getConnection();
-    try {
-        const [rows] = await connection.query(
-            'CALL CreateSDAOEvent(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);',
-            [
-                event.user_id,
-                event.title,
-                event.description,
-                event.venue_type,
-                event.venue || null,
-                event.start_date,
-                event.end_date,
-                event.start_time,
-                event.end_time,
-                event.status,
-                event.type,
-                event.is_open_to,
-                event.fee === "" ? null : event.fee,
-                event.capacity === "" ? null : event.capacity,
-                event.certificate ? String(event.certificate) : null
-            ]
-        );
-        return rows[0][0];
-    } finally {
-        connection.release();
-    }
+  const connection = await pool.getConnection();
+  try {
+    const sql = 'CALL CreateEvent(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);';
+    const params = [
+      event.user_id,                                   // 1: p_user_id
+      event.title,                                     // 2: p_title
+      event.description,                               // 3: p_description
+      event.venue_type,                                // 4: p_venue_type ('Face to face' | 'Online')
+      event.venue ?? null,                             // 5: p_venue
+      event.start_date,                                // 6: p_start_date (DATE)
+      event.end_date ?? event.start_date,              // 7: p_end_date (DATE) - default to start if not provided
+      event.start_time,                                // 8: p_start_time (TIME)
+      event.end_time,                                  // 9: p_end_time (TIME)
+      event.organization_id ?? null,                   // 10: p_organization_id (INT or NULL for SDAO/System)
+      event.cycle_number ?? null,                      // 11: p_cycle_number (INT or NULL for SDAO/System)
+      event.event_type ?? 'Organization',              // 12: p_event_type ('Organization' | 'SDAO' | 'System')
+      event.status ?? 'Pending',                       // 13: p_status ('Pending' | 'Approved' | 'Rejected' | 'Archived')
+      event.type ?? 'Free',                            // 14: p_type ('Paid' | 'Free')
+      event.is_open_to ?? 'Open to all',               // 15: p_is_open_to ('Members only' | 'Open to all' | 'NU Students only')
+      event.fee === '' || event.fee == null ? null : event.fee,                  // 16: p_fee (INT or NULL)
+      event.capacity === '' || event.capacity == null ? null : event.capacity,  // 17: p_capacity (INT or NULL)
+      event.image ?? null                               // 18: p_image (TEXT/URL/base64 or NULL)
+    ];
+
+    const [rows] = await connection.query(sql, params);
+    // MySQL returns multiple result sets for CALL; adjust if needed
+    return rows?.[0]?.[0] ?? rows?.[0] ?? null;
+  } finally {
+    connection.release();
+  }
 }
+
 async function getaddEventStatus(orgName){
     const connection = await pool.getConnection();
     try {
@@ -469,32 +474,63 @@ async function checkScheduleConflict(params) {
     }
 }
 
-async function createSDAOEvent(event) {
-    const connection = await pool.getConnection();
+async function createBlockedPeriod({ start_date, end_date, reason, created_by }) {
     try {
-        const [rows] = await connection.query(
-            'CALL CreateSDAOEvent(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);',
-            [
-                event.user_id,
-                event.title,
-                event.description,
-                event.venue_type,
-                event.venue || null,
-                event.start_date,
-                event.end_date,
-                event.start_time,
-                event.end_time,
-                event.status || 'Approved',
-                event.type,
-                event.is_open_to,
-                event.fee === "" ? null : event.fee,
-                event.capacity === "" ? null : event.capacity,
-                event.image || null
-            ]
-        );
-        return rows[0][0];
-    } finally {
-        connection.release();
+        const [rows] = await pool.query('CALL CreateBlockedPeriod(?, ?, ?, ?)', [start_date, end_date, reason, created_by]);
+        return rows;
+    } catch (error) {
+        console.error('Error in createBlockedPeriod:', error);
+        throw error;
+    }
+}
+
+async function updateBlockedPeriod({ blocked_period_id, start_date, end_date, reason, updated_by }) {
+    try {
+        const [rows] = await pool.query('CALL UpdateBlockedPeriod(?, ?, ?, ?, ?)', [blocked_period_id, start_date, end_date, reason, updated_by]);
+        return rows;
+    } catch (error) {
+        console.error('Error in updateBlockedPeriod:', error);
+        throw error;
+    }
+}
+
+async function archiveBlockedPeriod({ blocked_period_id, archived_by, archived_reason }) {
+    try {
+        const [rows] = await pool.query('CALL ArchiveBlockedPeriod(?, ?, ?)', [blocked_period_id, archived_by, archived_reason]);
+        return rows;
+    } catch (error) {
+        console.error('Error in archiveBlockedPeriod:', error);
+        throw error;
+    }
+}
+
+async function unarchiveBlockedPeriod({ blocked_period_id, unarchived_by, unarchived_reason }) {
+    try {
+        const [rows] = await pool.query('CALL UnarchiveBlockedPeriod(?, ?, ?)', [blocked_period_id, unarchived_by, unarchived_reason || null]);
+        return rows;
+    } catch (error) {
+        console.error('Error in unarchiveBlockedPeriod:', error);
+        throw error;
+    }
+}
+
+async function deleteBlockedPeriod({ blocked_period_id, deleted_by }) {
+    try {
+        const [rows] = await pool.query('CALL DeleteBlockedPeriod(?, ?)', [blocked_period_id, deleted_by]);
+        return rows;
+    } catch (error) {
+        console.error('Error in deleteBlockedPeriod:', error);
+        throw error;
+    }
+}
+
+async function getBlockedPeriodsByStatus(status) {
+    try {
+        const [rows] = await pool.query('CALL GetBlockedPeriodsByStatus(?)', [status]);
+        return rows[0];
+    } catch (error) {
+        console.error('Error in getBlockedPeriodsByStatus:', error);
+        throw error;
     }
 }
 
@@ -532,5 +568,10 @@ module.exports = {
     getCertificateTemplate,
     checkEventTitle,
     checkScheduleConflict,
-    createSDAOEvent
+    createBlockedPeriod,
+    updateBlockedPeriod,
+    archiveBlockedPeriod,
+    unarchiveBlockedPeriod,
+    deleteBlockedPeriod,
+    getBlockedPeriodsByStatus
 };
