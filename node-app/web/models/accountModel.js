@@ -138,9 +138,11 @@ async function getAllPendingUsersAndApplications() {
 async function addUserApplication(email, role, program_id, reason) {
     const connection = await pool.getConnection();
     try {
+        // Convert empty string or undefined to null
+        const programIdParam = (program_id === '' || program_id === undefined) ? null : program_id;
         const [rows] = await connection.query(
             'CALL AddUserApplication(?, ?, ?, ?);',
-            [email, role, program_id, reason]
+            [email, role, programIdParam, reason]
         );
         return rows[0][0];
     } finally {
