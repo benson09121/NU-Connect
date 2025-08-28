@@ -62,7 +62,7 @@ CREATE TABLE tbl_user_application (
     application_id INT AUTO_INCREMENT PRIMARY KEY,
     email VARCHAR(100) NOT NULL,
     role_id INT NOT NULL,
-    program_id INT NOT NULL,
+    program_id INT NULL,
     reason TEXT NOT NULL,
     status ENUM('Pending', 'Approved', 'Rejected') DEFAULT 'Pending',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -3407,12 +3407,15 @@ DELIMITER ;
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetEventsByStatus(IN p_status VARCHAR(20))
 BEGIN
-    IF p_status = 'Approved' THEN
-        -- Only show upcoming or ongoing approved events
+    DECLARE norm_status VARCHAR(20);
+    SET norm_status = LOWER(TRIM(p_status));
+
+    IF norm_status = 'approved' THEN
         SELECT
-            e.event_id,
+            e.event_id AS id,
             e.title,
             e.description,
+            e.image,
             e.start_date,
             e.end_date,
             e.start_time,
@@ -3425,24 +3428,26 @@ BEGIN
             e.venue,
             e.organization_id,
             o.name AS organization_name,
+            e.cycle_number,
+            e.event_type,
             e.status,
             e.type,
             e.user_id,
             e.created_at
         FROM tbl_event e
-        JOIN tbl_organization o ON e.organization_id = o.organization_id
-        WHERE e.status = 'Approved'
+        LEFT JOIN tbl_organization o ON e.organization_id = o.organization_id
+        WHERE LOWER(e.status) = 'approved'
           AND (
             (e.end_date > CURDATE())
             OR (e.end_date = CURDATE() AND e.end_time >= CURTIME())
             OR (e.end_date IS NULL AND e.start_date >= CURDATE())
           );
     ELSE
-        -- For Pending or Rejected, show all regardless of date
         SELECT 
-            e.event_id,
+            e.event_id AS id,
             e.title,
             e.description,
+            e.image,
             e.start_date,
             e.end_date,
             e.start_time,
@@ -3455,13 +3460,15 @@ BEGIN
             e.venue,
             e.organization_id,
             o.name AS organization_name,
+            e.cycle_number,
+            e.event_type,
             e.status,
             e.type,
             e.user_id,
             e.created_at
         FROM tbl_event e
-        JOIN tbl_organization o ON e.organization_id = o.organization_id
-        WHERE e.status = p_status;
+        LEFT JOIN tbl_organization o ON e.organization_id = o.organization_id
+        WHERE LOWER(e.status) = norm_status;
     END IF;
 END $$
 DELIMITER ;
@@ -8821,7 +8828,7 @@ CREATE DEFINER='admin'@'%' PROCEDURE AddUserApplication(
 BEGIN
     DECLARE v_role_id INT;
     DECLARE v_pending_count INT DEFAULT 0;
-    
+
     -- Get role ID from role name
     SELECT role_id INTO v_role_id 
     FROM tbl_role 
@@ -8848,7 +8855,7 @@ BEGIN
         archived_by = (SELECT user_id FROM tbl_user WHERE email = p_email LIMIT 1)
     WHERE email = p_email AND status = 'Rejected' AND archived_at IS NULL;
 
-    -- Create new application
+    -- Create new application (allow program_id to be NULL)
     INSERT INTO tbl_user_application (
         email,
         role_id,
@@ -8862,6 +8869,23 @@ BEGIN
         p_reason,
         'Pending'
     );
+
+    -- Log the application using LogAction (if user exists)
+    IF EXISTS (SELECT 1 FROM tbl_user WHERE email = p_email) THEN
+        CALL LogAction(
+            p_email,
+            CONCAT('Submitted a new user application for role: ', p_role_name, IFNULL(CONCAT(', program ID: ', p_program_id), ''), '.'),
+            'user_application',
+            JSON_OBJECT(
+                'email', p_email,
+                'role', p_role_name,
+                'program_id', p_program_id,
+                'reason', p_reason
+            ),
+            NULL,
+            NULL
+        );
+    END IF;
 
     -- Return the created application
     SELECT 
