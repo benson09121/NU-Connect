@@ -1203,6 +1203,23 @@ async function getBlockedPeriodsByStatus(req, res) {
   }
 }
 
+async function checkAllPostEventRequirementsSubmitted(req, res) {
+    try {
+        const { event_id, organization_id } = req.query;
+        if (!event_id || !organization_id) {
+            return res.status(400).json({ message: "event_id and organization_id are required" });
+        }
+        const allSubmitted = await eventModel.checkAllPostEventRequirementsSubmitted(
+            parseInt(event_id), parseInt(organization_id)
+        );
+        res.status(200).json({ all_submitted: allSubmitted });
+    } catch (error) {
+        res.status(500).json({
+            error: error.message || "An error occurred while checking post-event requirements."
+        });
+    }
+}
+
 module.exports = {
   addEvent,
   getEventRequirements,
@@ -1240,5 +1257,6 @@ module.exports = {
   archiveBlockedPeriod,
   unarchiveBlockedPeriod,
   deleteBlockedPeriod,
-  getBlockedPeriodsByStatus
+  getBlockedPeriodsByStatus,
+  checkAllPostEventRequirementsSubmitted
 };
