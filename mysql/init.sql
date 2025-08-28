@@ -3343,32 +3343,35 @@ DELIMITER ;
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetEventById(IN p_event_id INT)
 BEGIN
-SELECT
-     e.event_id as id,
+    SELECT
+        e.event_id AS id,
+        e.organization_id,
+        e.cycle_number,
+        e.event_type,
+        e.user_id,
         e.title,
         e.description,
         e.image,
+        e.venue_type,
+        e.venue,
         e.start_date,
         e.end_date,
         e.start_time,
         e.end_time,
-        e.capacity,
-        e.certificate,
-        e.fee,
-        e.is_open_to,
-        e.venue_type,
-        e.venue,
-        e.organization_id,
-        o.name AS organization_name,
-        rc.cycle_number,
         e.status,
         e.type,
-        e.user_id,
-        e.created_at
+        e.is_open_to,
+        e.fee,
+        e.capacity,
+        e.created_at,
+        e.certificate,
+        o.name AS organization_name,
+        rc.cycle_number AS renewal_cycle_number
     FROM tbl_event e
     LEFT JOIN tbl_organization o ON e.organization_id = o.organization_id
     LEFT JOIN tbl_renewal_cycle rc ON e.organization_id = rc.organization_id AND e.cycle_number = rc.cycle_number
-    WHERE e.event_id = p_event_id;
+    WHERE e.event_id = p_event_id
+    LIMIT 1;
 END $$
 DELIMITER ;
 
@@ -5858,7 +5861,6 @@ CREATE DEFINER='admin'@'%' PROCEDURE UploadOrUpdatePostEventRequirement(
     IN p_submitted_by VARCHAR(200)
 )
 BEGIN
-    -- All DECLAREs must be here, before any other statement!
     DECLARE v_event_application_id INT;
     DECLARE v_submission_id INT;
 
@@ -5885,10 +5887,11 @@ BEGIN
         -- Update the existing submission
         UPDATE tbl_event_requirement_submissions
         SET file_path = p_file_path,
-            submitted_at = CURRENT_TIMESTAMP
+            submitted_at = CURRENT_TIMESTAMP,
+            status = 'Approved'
         WHERE submission_id = v_submission_id;
     ELSE
-        -- Insert a new submission
+        -- Insert a new submission with status 'Approved'
         INSERT INTO tbl_event_requirement_submissions (
             event_id,
             event_application_id,
@@ -5896,7 +5899,8 @@ BEGIN
             cycle_number,
             organization_id,
             file_path,
-            submitted_by
+            submitted_by,
+            status
         ) VALUES (
             p_event_id,
             v_event_application_id,
@@ -5904,7 +5908,8 @@ BEGIN
             p_cycle_number,
             p_organization_id,
             p_file_path,
-            p_submitted_by
+            p_submitted_by,
+            'Approved'
         );
     END IF;
 END$$
@@ -10168,6 +10173,32 @@ BEGIN
     ELSE
         SELECT * FROM tbl_blocked_period WHERE archived_at IS NULL;
     END IF;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE CheckAllPostEventRequirementsSubmitted(
+    IN p_event_id INT,
+    IN p_organization_id INT
+)
+BEGIN
+    DECLARE v_total INT DEFAULT 0;
+    DECLARE v_submitted INT DEFAULT 0;
+
+    -- Count all active post-event requirements for this event's organization
+    SELECT COUNT(*) INTO v_total
+    FROM tbl_event_application_requirement r
+    WHERE r.is_applicable_to = 'post-event'
+      AND r.status = 'active';
+
+    -- Count all unique requirements submitted for this event and organization
+    SELECT COUNT(DISTINCT ers.requirement_id) INTO v_submitted
+    FROM tbl_event_requirement_submissions ers
+    WHERE ers.event_id = p_event_id
+      AND ers.organization_id = p_organization_id
+      AND ers.status = 'Approved';
+
+    SELECT v_total = v_submitted AS all_submitted;
 END$$
 DELIMITER ;
 

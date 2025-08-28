@@ -418,6 +418,7 @@ async function getEventApprovalTimeline(event_id) {
         connection.release();
     }
 }
+
 async function getEventEvaluationFeedbackPeriod(event_id){
   const connection = await pool.getConnection();
   try {
@@ -534,6 +535,20 @@ async function getBlockedPeriodsByStatus(status) {
     }
 }
 
+async function checkAllPostEventRequirementsSubmitted(event_id, organization_id) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query(
+            'CALL CheckAllPostEventRequirementsSubmitted(?, ?);',
+            [event_id, organization_id]
+        );
+        // rows[0][0].all_submitted will be true/false
+        return rows[0][0]?.all_submitted === 1;
+    } finally {
+        connection.release();
+    }
+}
+
 module.exports = {
     addEvent,
     getEventRequirements,
@@ -573,5 +588,6 @@ module.exports = {
     archiveBlockedPeriod,
     unarchiveBlockedPeriod,
     deleteBlockedPeriod,
-    getBlockedPeriodsByStatus
+    getBlockedPeriodsByStatus,
+    checkAllPostEventRequirementsSubmitted
 };
