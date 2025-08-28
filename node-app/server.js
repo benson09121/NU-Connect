@@ -50,6 +50,7 @@ const emailSuggestionsRoutes = require('./web/routes/emailSuggestions');
 const notificationsRoutes = require('./web/routes/notifications');
 const transactionsRoutes = require('./web/routes/transactions');
 const publicRoutes = require('./web/routes/public');
+const analytics = require('./web/routes/analytics');
 
 
 // Routes on Mobile
@@ -72,7 +73,9 @@ app.use('/api/web', sse);
 app.use('/api/web', emailSuggestionsRoutes);
 app.use('/api/web', notificationsRoutes);
 app.use('/api/web', transactionsRoutes);
+app.use('/api/web', analytics);
 app.use('/api/web/public', publicRoutes);
+
 
 // Initialize cron jobs
 const { initializeCronJobs } = require('./jobs');
