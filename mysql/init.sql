@@ -124,8 +124,9 @@ CREATE TABLE tbl_organization (
 );
 
 CREATE TABLE tbl_organization_version (
+
     org_version_id INT AUTO_INCREMENT PRIMARY KEY,
-    organization_id INT NULL,            -- null for proposals before org exists
+    organization_id INT NULL,
     name VARCHAR(255) NOT NULL,
     status ENUM('Pending', 'Approved', 'Rejected', 'Archived') DEFAULT 'Pending',
     logo_path VARCHAR(500) NULL,
@@ -136,19 +137,16 @@ CREATE TABLE tbl_organization_version (
     membership_fee_amount DECIMAL(10,2) NULL,
     is_recruiting BOOLEAN DEFAULT TRUE,
     is_open_to_all_courses BOOLEAN DEFAULT FALSE,
-    created_by VARCHAR(200) NOT NULL,   -- applicant or user who created the version
+    created_by VARCHAR(200) NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     valid_from DATE NULL,
     valid_to DATE NULL,
-
-    -- Archive / unarchive audit columns for version snapshots (optional audit)
     archived_at TIMESTAMP NULL,
     archived_by VARCHAR(200) NULL,
     archived_reason VARCHAR(255) NULL,
     unarchived_at TIMESTAMP NULL,
     unarchived_by VARCHAR(200) NULL,
     unarchived_reason VARCHAR(255) NULL,
-
     FOREIGN KEY (created_by) REFERENCES tbl_user(user_id),
     FOREIGN KEY (archived_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
     FOREIGN KEY (unarchived_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
@@ -10199,7 +10197,7 @@ BEGIN
       AND ers.organization_id = p_organization_id
       AND ers.status = 'Approved';
 
-    SELECT v_total = v_submitted AS all_submitted;
+    SELECT (v_total = v_submitted) AS all_submitted;
 END$$
 DELIMITER ;
 
