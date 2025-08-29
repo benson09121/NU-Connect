@@ -10203,6 +10203,7 @@ BEGIN
 END$$
 DELIMITER ;
 
+DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetAllOrganizationsEventStatistics()
 BEGIN
     -- Return final results with ranking and calculated trend status
@@ -10368,7 +10369,6 @@ BEGIN
   WHERE o.status = 'Approved'
   ORDER BY sort_order, organization_name;
 END$$
-
 DELIMITER ;
 
 DELIMITER $$
