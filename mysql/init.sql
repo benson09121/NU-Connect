@@ -3413,8 +3413,8 @@ BEGIN
     SET norm_status = LOWER(TRIM(p_status));
 
     IF norm_status = 'approved' THEN
-        SELECT
-            e.event_id AS id,
+        SELECT 
+            e.event_id as id,
             e.title,
             e.description,
             e.image,
@@ -3430,14 +3430,14 @@ BEGIN
             e.venue,
             e.organization_id,
             o.name AS organization_name,
-            e.cycle_number,
-            e.event_type,
+            rc.cycle_number,
             e.status,
             e.type,
             e.user_id,
             e.created_at
         FROM tbl_event e
         LEFT JOIN tbl_organization o ON e.organization_id = o.organization_id
+        LEFT JOIN tbl_renewal_cycle rc ON e.organization_id = rc.organization_id AND e.cycle_number = rc.cycle_number
         WHERE LOWER(e.status) = 'approved'
           AND (
             (e.end_date > CURDATE())
@@ -3446,7 +3446,7 @@ BEGIN
           );
     ELSE
         SELECT 
-            e.event_id AS id,
+            e.event_id as id,
             e.title,
             e.description,
             e.image,
@@ -3462,14 +3462,14 @@ BEGIN
             e.venue,
             e.organization_id,
             o.name AS organization_name,
-            e.cycle_number,
-            e.event_type,
+            rc.cycle_number,
             e.status,
             e.type,
             e.user_id,
             e.created_at
         FROM tbl_event e
         LEFT JOIN tbl_organization o ON e.organization_id = o.organization_id
+        LEFT JOIN tbl_renewal_cycle rc ON e.organization_id = rc.organization_id AND e.cycle_number = rc.cycle_number
         WHERE LOWER(e.status) = norm_status;
     END IF;
 END $$
