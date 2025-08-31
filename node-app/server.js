@@ -51,7 +51,7 @@ const notificationsRoutes = require('./web/routes/notifications');
 const transactionsRoutes = require('./web/routes/transactions');
 const publicRoutes = require('./web/routes/public');
 const analytics = require('./web/routes/analytics');
-
+const novaRoutes = require('./web/routes/nova');
 
 // Routes on Mobile
 app.use('/', indexRoutes);
@@ -74,6 +74,7 @@ app.use('/api/web', emailSuggestionsRoutes);
 app.use('/api/web', notificationsRoutes);
 app.use('/api/web', transactionsRoutes);
 app.use('/api/web', analytics);
+app.use('/api/web', novaRoutes);
 app.use('/api/web/public', publicRoutes);
 
 
