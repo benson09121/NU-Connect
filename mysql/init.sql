@@ -12,6 +12,7 @@ SET GLOBAL event_scheduler = ON;
 
 DROP DATABASE IF EXISTS db_nuconnect;
 CREATE DATABASE db_nuconnect;
+ALTER DATABASE db_nuconnect CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE db_nuconnect;
 CREATE TABLE tbl_role(
     role_id INT AUTO_INCREMENT PRIMARY KEY,
@@ -416,7 +417,7 @@ CREATE TABLE tbl_event (
     title VARCHAR(300) NOT NULL,
     description TEXT NOT NULL,
     image TEXT NULL,
-    venue_type ENUM('Face to face', 'Online') DEFAULT 'face to face',
+    venue_type ENUM('Face to face', 'Online') DEFAULT 'Face to face',
     venue VARCHAR(200) NULL,
     start_date DATE NOT NULL,
     end_date DATE NOT NULL,
@@ -866,6 +867,62 @@ CREATE TABLE tbl_transaction_expense (
     reference_doc VARCHAR(255) NULL,        -- invoice, OR number, etc.
     FOREIGN KEY (transaction_id) REFERENCES tbl_transaction(transaction_id) ON DELETE CASCADE
 );
+
+CREATE TABLE tbl_ai_conversation (
+  conversation_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  owner_id VARCHAR(200) NOT NULL,                       -- who started/owns this chat
+  title VARCHAR(255) NULL,
+  system_prompt TEXT NULL,                               -- store custom instructions if any
+  model VARCHAR(100) DEFAULT 'deepseek-chat',
+  temperature DECIMAL(3,2) DEFAULT 0.7,
+  top_p DECIMAL(3,2) DEFAULT 1.0,
+
+  -- Optional: scope this chat to something in your system (like your notification pattern)
+  entity_type ENUM('general','user','organization','event','application','approval','system') DEFAULT 'general',
+  entity_id INT NULL,
+
+  summary LONGTEXT NULL,                                 -- rolling summary for long chats
+  last_summary_message_id BIGINT NULL,
+
+  is_archived BOOLEAN DEFAULT FALSE,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+  FOREIGN KEY (owner_id) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
+  INDEX idx_owner_updated (owner_id, updated_at DESC),
+  INDEX idx_scope (entity_type, entity_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE tbl_ai_message (
+  message_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  conversation_id BIGINT NOT NULL,
+  role ENUM('system','user','assistant','tool') NOT NULL,
+  user_id VARCHAR(200) NULL,                              -- set for role='user'
+  content LONGTEXT NOT NULL,
+  model VARCHAR(100) NULL,                                -- set for assistant messages
+  usage_prompt_tokens INT NULL,
+  usage_completion_tokens INT NULL,
+  usage_total_tokens INT NULL,
+  meta JSON NULL,                                         -- tool_calls, function args, etc.
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+  FOREIGN KEY (conversation_id) REFERENCES tbl_ai_conversation(conversation_id) ON DELETE CASCADE,
+  FOREIGN KEY (user_id) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
+  INDEX idx_conv_time (conversation_id, created_at),
+  INDEX idx_conv_msg (conversation_id, message_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Optional: attachments if you plan to support file uploads to the AI later
+CREATE TABLE tbl_ai_message_attachment (
+  attachment_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  message_id BIGINT NOT NULL,
+  file_url VARCHAR(1000) NOT NULL,
+  mime_type VARCHAR(100) NULL,
+  meta JSON NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (message_id) REFERENCES tbl_ai_message(message_id) ON DELETE CASCADE,
+  INDEX idx_msg (message_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- PROCEDURES
 use db_nuconnect;
