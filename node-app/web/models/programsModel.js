@@ -152,10 +152,44 @@ async function deleteProgram(program_id, email) {
     }
 }
 
+async function archiveProgram(program_id, user_id, reason) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query(
+            'CALL ArchiveProgram(?, ?, ?);',
+            [program_id, user_id, reason]
+        );
+        return rows[0][0];
+    } catch (error) {
+        console.error('Error in archiveProgram:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function unarchiveProgram(program_id, user_id, reason) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query(
+            'CALL UnarchiveProgram(?, ?, ?);',
+            [program_id, user_id, reason]
+        );
+        return rows[0][0];
+    } catch (error) {
+        console.error('Error in unarchiveProgram:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
 module.exports = {
     getAllPrograms,
     getAllColleges,
     createProgram,
     updateProgram,
     deleteProgram,
+    archiveProgram, 
+    unarchiveProgram 
 };

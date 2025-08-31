@@ -366,30 +366,30 @@ async function getEventRequirementSubmissions({
 async function createEvent(event) {
   const connection = await pool.getConnection();
   try {
-    const sql = 'CALL CreateEvent(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);';
+    const sql = 'CALL CreateEvent(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);';
     const params = [
       event.user_id,                                   // 1: p_user_id
       event.title,                                     // 2: p_title
       event.description,                               // 3: p_description
-      event.venue_type,                                // 4: p_venue_type ('Face to face' | 'Online')
+      event.venue_type,                                // 4: p_venue_type
       event.venue ?? null,                             // 5: p_venue
-      event.start_date,                                // 6: p_start_date (DATE)
-      event.end_date ?? event.start_date,              // 7: p_end_date (DATE) - default to start if not provided
-      event.start_time,                                // 8: p_start_time (TIME)
-      event.end_time,                                  // 9: p_end_time (TIME)
-      event.organization_id ?? null,                   // 10: p_organization_id (INT or NULL for SDAO/System)
-      event.cycle_number ?? null,                      // 11: p_cycle_number (INT or NULL for SDAO/System)
-      event.event_type ?? 'Organization',              // 12: p_event_type ('Organization' | 'SDAO' | 'System')
-      event.status ?? 'Pending',                       // 13: p_status ('Pending' | 'Approved' | 'Rejected' | 'Archived')
-      event.type ?? 'Free',                            // 14: p_type ('Paid' | 'Free')
-      event.is_open_to ?? 'Open to all',               // 15: p_is_open_to ('Members only' | 'Open to all' | 'NU Students only')
-      event.fee === '' || event.fee == null ? null : event.fee,                  // 16: p_fee (INT or NULL)
-      event.capacity === '' || event.capacity == null ? null : event.capacity,  // 17: p_capacity (INT or NULL)
-      event.image ?? null                               // 18: p_image (TEXT/URL/base64 or NULL)
+      event.start_date,                                // 6: p_start_date
+      event.end_date ?? event.start_date,              // 7: p_end_date
+      event.start_time,                                // 8: p_start_time
+      event.end_time,                                  // 9: p_end_time
+      event.organization_id ?? null,                   // 10: p_organization_id
+      event.cycle_number ?? null,                      // 11: p_cycle_number
+      event.event_type ?? 'Organization',              // 12: p_event_type
+      event.status ?? 'Pending',                       // 13: p_status
+      event.type ?? 'Free',                            // 14: p_type
+      event.is_open_to ?? 'Open to all',               // 15: p_is_open_to
+      event.fee === '' || event.fee == null ? null : event.fee,                  // 16: p_fee
+      event.capacity === '' || event.capacity == null ? null : event.capacity,  // 17: p_capacity
+      event.image ?? null,                             // 18: p_image
+      event.collaborators ? JSON.stringify(event.collaborators) : null // 19: p_collaborators
     ];
 
     const [rows] = await connection.query(sql, params);
-    // MySQL returns multiple result sets for CALL; adjust if needed
     return rows?.[0]?.[0] ?? rows?.[0] ?? null;
   } finally {
     connection.release();

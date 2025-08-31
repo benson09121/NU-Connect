@@ -523,6 +523,66 @@ async function getEventApplicationRequirement(req, res) {
   }
 }
 
+async function getEventApplicationPublicationImage(req, res) {
+  let { organization_name, cycle_number, event_id, image_name } = req.query;
+
+  if (!organization_name || !cycle_number || !event_id || !image_name) {
+    return res.status(400).json({
+      error: "Missing required parameters: organization_name, cycle_number, event_id, image_name"
+    });
+  }
+
+  // Encode for URL and filesystem safety
+  const organization_name_encoded = encodeURIComponent(organization_name);
+  const image_name_encoded = encodeURIComponent(image_name);
+
+  // Physical path for existence check (optional, but good for error handling)
+  const physicalPath = path.join(
+    '/app/organizations',
+    organization_name,
+    String(cycle_number),
+    'events',
+    String(event_id),
+    'publication_images',
+    image_name
+  );
+
+  // Log for debugging
+  console.log(`getEventApplicationPublicationImage: Attempting to serve image`, {
+    organization_name,
+    cycle_number,
+    event_id,
+    image_name,
+    physicalPath,
+    exists: fs.existsSync(physicalPath)
+  });
+
+  if (!fs.existsSync(physicalPath)) {
+    return res.status(404).json({
+      error: "Image not found",
+      message: "The requested publication image does not exist."
+    });
+  }
+
+  try {
+    res.header('Access-Control-Allow-Origin', 'http://localhost:5173');
+    res.header('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Authorization, Content-Type, Accept');
+    res.setHeader('Content-Type', getContentType(image_name));
+    res.setHeader('Content-Disposition', `inline; filename="${image_name}"`);
+    res.setHeader(
+      'X-Accel-Redirect',
+      `/protected-organization-requirements/${organization_name_encoded}/${cycle_number}/events/${event_id}/publication_images/${image_name_encoded}`
+    );
+    res.end();
+  } catch (error) {
+    console.error('getEventApplicationPublicationImage error:', error);
+    res.status(500).json({
+      error: error.message || "An error occurred while fetching the publication image.",
+    });
+  }
+}
+
 async function approveEventApplication(req, res) {
   try {
     const { approval_id, event_application_id } = req.params;
@@ -719,7 +779,9 @@ async function createEvent(req, res) {
     const event = req.body;
     let imageFile = req.files?.image || null;
     let imageFilename = null;
+    let tempImagePath = null;
 
+    // Handle user_id - convert email to user_id if needed
     let user_id = event.user_id;
     if (user_id && user_id.includes('@')) {
       const user = await eventModel.getUserByEmail(user_id);
@@ -734,42 +796,167 @@ async function createEvent(req, res) {
       }
       user_id = user.user_id;
     }
+    
     if (!user_id) {
       return res.status(400).json({ message: "user_id (or user_email) is required." });
     }
+    
     event.user_id = user_id;
 
+    // Handle null/empty values
     event.venue = event.venue || null;
     event.capacity = event.capacity === "" ? null : event.capacity;
     event.fee = event.fee === "" ? null : event.fee;
 
-    if (imageFile) {
-      const orgDir = path.join(
-        '/app/events',
-        event.organization_id ? String(event.organization_id) : 'SDAO'
-      );
-      if (!fs.existsSync(orgDir)) fs.mkdirSync(orgDir, { recursive: true });
-      imageFilename = `event-${Date.now()}-${imageFile.name}`;
-      fs.writeFileSync(path.join(orgDir, imageFilename), imageFile.data);
-      event.image = imageFilename;
-    } else {
-      event.image = null;
+    // Parse collaborators if sent as JSON string
+    if (typeof event.collaborators === 'string') {
+      try {
+        event.collaborators = JSON.parse(event.collaborators);
+      } catch (e) {
+        console.log('Failed to parse collaborators:', e);
+        event.collaborators = [];
+      }
+    }
+    
+    // Ensure collaborators is an array or null
+    if (!Array.isArray(event.collaborators) || event.collaborators.length === 0) {
+      event.collaborators = null;
     }
 
-    const createdEvent = await eventModel.createEvent(event);
+    // Handle image upload
+    if (imageFile) {
+      const fileExt = path.extname(imageFile.name);
+      const baseName = path.basename(imageFile.name, fileExt)
+        .replace(/[^a-zA-Z0-9_\-]/g, '_')
+        .substring(0, 50);
+      imageFilename = `event-${Date.now()}-${baseName}${fileExt}`;
+      
+      if (event.organization_id) {
+        const orgDir = path.join('/app/events', String(event.organization_id));
+        if (!fs.existsSync(orgDir)) {
+          fs.mkdirSync(orgDir, { recursive: true });
+        }
+        const imagePath = path.join(orgDir, imageFilename);
+        fs.writeFileSync(imagePath, imageFile.data);
+        event.image = imageFilename;
+        console.log(`[createEvent] Saved organization event image: ${imagePath}`);
+      } else {
+        const tempDir = path.join('/app/events/SDAO/tmp');
+        if (!fs.existsSync(tempDir)) {
+          fs.mkdirSync(tempDir, { recursive: true });
+        }
+        
+        tempImagePath = path.join(tempDir, imageFilename);
+        fs.writeFileSync(tempImagePath, imageFile.data);
+        event.image = imageFilename;
+        console.log(`[createEvent] Saved SDAO event image to temp: ${tempImagePath}`);
+      }
+    }
 
-    const allEvents = await eventModel.getEvents();
-    publishToChannel('events', {
-      channel: 'events',
-      operation: 'SNAPSHOT',
-      data: Array.isArray(allEvents) ? allEvents : []
+    // Create event in database
+    console.log(`[createEvent] Creating event in database...`);
+    const dbResponse = await eventModel.createEvent(event);
+    console.log(`[createEvent] Database response:`, JSON.stringify(dbResponse, null, 2));
+
+    // WORKAROUND: Fetch the created event by title and user_id
+    let createdEvent = null;
+    let eventId = null;
+
+    try {
+      // Get the most recently created event for this user with this title
+      const recentEvents = await eventModel.getEventsByUserAndTitle(event.user_id, event.title);
+      if (recentEvents && recentEvents.length > 0) {
+        // Sort by created_at descending and get the most recent
+        createdEvent = recentEvents.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
+        eventId = createdEvent.event_id || createdEvent.id;
+        console.log(`[createEvent] Found created event with ID: ${eventId}`);
+      }
+    } catch (fetchError) {
+      console.error(`[createEvent] Error fetching created event:`, fetchError);
+    }
+
+    // Alternative: Query all events and find the most recent one
+    if (!eventId) {
+      try {
+        const allEvents = await eventModel.getEvents();
+        if (allEvents && allEvents.length > 0) {
+          // Find the most recent event (assuming it's the one we just created)
+          const sortedEvents = allEvents.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+          const mostRecent = sortedEvents[0];
+          
+          // Verify it matches our event data
+          if (mostRecent.title === event.title && mostRecent.user_id === event.user_id) {
+            createdEvent = mostRecent;
+            eventId = mostRecent.event_id || mostRecent.id;
+            console.log(`[createEvent] Found event by matching recent events: ${eventId}`);
+          }
+        }
+      } catch (fetchError) {
+        console.error(`[createEvent] Error fetching all events:`, fetchError);
+      }
+    }
+
+    // Move SDAO image from temp to final location
+    if (!event.organization_id && imageFile && eventId) {
+      const destDir = path.join('/app/events/SDAO', String(eventId), 'publication_images');
+      
+      console.log(`[createEvent] Creating destination directory: ${destDir}`);
+      if (!fs.existsSync(destDir)) {
+        fs.mkdirSync(destDir, { recursive: true });
+        console.log(`[createEvent] Directory created successfully`);
+      }
+      
+      const finalPath = path.join(destDir, imageFilename);
+      console.log(`[createEvent] Moving file from ${tempImagePath} to ${finalPath}`);
+      
+      if (fs.existsSync(tempImagePath)) {
+        try {
+          fs.copyFileSync(tempImagePath, finalPath);
+          console.log(`[createEvent] File copied successfully`);
+          fs.unlinkSync(tempImagePath);
+          console.log(`[createEvent] Temp file deleted successfully`);
+          console.log(`[createEvent] Image successfully moved to: ${finalPath}`);
+        } catch (moveError) {
+          console.error(`[createEvent] Error moving file:`, moveError);
+        }
+      } else {
+        console.error(`[createEvent] Temp file not found: ${tempImagePath}`);
+      }
+    } else {
+      if (!event.organization_id && imageFile && !eventId) {
+        console.error(`[createEvent] Cannot move SDAO image - no event_id available`);
+      }
+    }
+
+    // Fetch all events and publish to SSE channel
+    try {
+      const allEvents = await eventModel.getEvents();
+      publishToChannel('events', {
+        channel: 'events',
+        operation: 'SNAPSHOT',
+        data: Array.isArray(allEvents) ? allEvents : []
+      });
+      console.log(`[createEvent] Published events snapshot to SSE channel`);
+    } catch (sseError) {
+      console.error(`[createEvent] Failed to publish SSE update:`, sseError);
+    }
+
+    // Send success response
+    res.status(201).json({ 
+      success: true,
+      message: 'Event created successfully', 
+      event: createdEvent || dbResponse,
+      data: createdEvent || dbResponse,
+      event_id: eventId
     });
-
-    res.status(201).json({ message: 'Event created successfully', event: createdEvent });
+    
   } catch (error) {
-    console.error("Error creating event:", error);
+    console.error("[createEvent] Error creating event:", error);
+    
     res.status(500).json({
+      success: false,
       error: error.message || "An error occurred while creating the event.",
+      message: error.message || "Failed to create event. Please try again."
     });
   }
 }
@@ -948,22 +1135,74 @@ async function getSampleCertificate(req, res) {
 }
 
 async function getEventPublicationImage(req, res) {
-  let {event_id, image_name, cycle_number, organization_name } = req.query;
+  let { event_id, image_name, cycle_number, organization_name, organization_id } = req.query;
 
-  if (!event_id || !image_name || !cycle_number || !organization_name) {
+  if (!event_id || !image_name) {
     return res.status(400).json({
-      error: "Missing required parameters: event_id, image_name, cycle_number, organization_name"
+      error: "Missing required parameters: event_id, image_name"
     });
   }
 
+  // Determine if it's an SDAO event
+  const isSDAO = !organization_id || organization_id === 'null' || organization_id === '' || organization_id === 'undefined';
+
   const image_name_encoded = encodeURIComponent(image_name);
-  const organization_name_encoded = encodeURIComponent(organization_name);
+
+  let xAccelPath;
+  let physicalPath;
+
+  if (isSDAO) {
+    // SDAO event: serve from /app/events/SDAO/{event_id}/publication_images/{image_name}
+    xAccelPath = `/protected-events/SDAO/${event_id}/publication_images/${image_name_encoded}`;
+    physicalPath = path.join('/app/events/SDAO', String(event_id), 'publication_images', image_name);
+  } else {
+    // Organization event: Always use the complex path
+    if (!organization_name || !cycle_number) {
+      return res.status(400).json({
+        error: "Missing required parameters: organization_name, cycle_number for organization event"
+      });
+    }
+    const organization_name_encoded = encodeURIComponent(organization_name);
+    physicalPath = path.join(
+      '/app/organizations',
+      organization_name,
+      String(cycle_number),
+      'events',
+      String(event_id),
+      'publication_images',
+      image_name
+    );
+    xAccelPath = `/protected-organization-requirements/${organization_name_encoded}/${cycle_number}/events/${event_id}/publication_images/${image_name_encoded}`;
+  }
+
+  // Log for debugging
+  console.log(`getEventPublicationImage: Attempting to serve image`, {
+    event_id,
+    image_name,
+    organization_id,
+    isSDAO,
+    xAccelPath,
+    physicalPath,
+    exists: physicalPath ? fs.existsSync(physicalPath) : false
+  });
+
+  // Check if file exists before trying to serve it
+  if (!fs.existsSync(physicalPath)) {
+    console.error(`getEventPublicationImage: File not found at ${physicalPath}`);
+    return res.status(404).json({
+      error: "Image not found",
+      message: "The requested image file does not exist."
+    });
+  }
 
   try {
     res.header('Access-Control-Allow-Origin', 'http://localhost:5173');
+    res.header('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Authorization, Content-Type, Accept');
+    res.setHeader('Content-Type', getContentType(image_name));
     res.setHeader('Content-Disposition', `inline; filename="${image_name}"`);
-    res.setHeader('X-Accel-Redirect', `/protected-organization-requirements/${organization_name_encoded}/${cycle_number}/events/${event_id}/publication_images/${image_name_encoded}`);
-    console.log(`getEventPublicationImage: Serving image ${image_name} for event ${event_id}`);
+    res.setHeader('Cache-Control', 'public, max-age=3600'); // Cache for 1 hour
+    res.setHeader('X-Accel-Redirect', xAccelPath);
     res.end();
   } catch (error) {
     console.error('getEventPublicationImage error:', error);
@@ -971,6 +1210,22 @@ async function getEventPublicationImage(req, res) {
       error: error.message || "An error occurred while fetching the publication image.",
     });
   }
+}
+
+// Helper function to get content type
+function getContentType(filename) {
+  const ext = path.extname(filename).toLowerCase();
+  const contentTypes = {
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.gif': 'image/gif',
+    '.webp': 'image/webp',
+    '.svg': 'image/svg+xml',
+    '.bmp': 'image/bmp',
+    '.ico': 'image/x-icon',
+  };
+  return contentTypes[ext] || 'application/octet-stream';
 }
 
 async function checkEventTitle(req, res) {
@@ -1258,5 +1513,6 @@ module.exports = {
   unarchiveBlockedPeriod,
   deleteBlockedPeriod,
   getBlockedPeriodsByStatus,
-  checkAllPostEventRequirementsSubmitted
+  checkAllPostEventRequirementsSubmitted,
+  getEventApplicationPublicationImage
 };

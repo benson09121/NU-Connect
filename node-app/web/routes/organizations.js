@@ -188,4 +188,10 @@ router.get(
     organizationsController.getApprovedOrganizationLogos
 );
 
+router.get(
+    '/organization-dashboard-overview',
+    middleware.validateAzureJWT,
+    organizationsController.getOrganizationDashboardOverview
+);
+
 module.exports = router

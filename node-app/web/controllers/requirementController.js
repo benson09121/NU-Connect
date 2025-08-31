@@ -259,12 +259,8 @@ async function addApplicationPeriod(req, res) {
       req.user.email
     );
 
-    const activePeriods = await requirementModel.getActiveApplicationPeriod();
-    publishToChannel('application_periods', {
-      channel: 'application_periods',
-      operation: 'SNAPSHOT',
-      data: Array.isArray(activePeriods) ? activePeriods : [activePeriods].filter(Boolean)
-    });
+    // Publish consistent update
+    await publishApplicationPeriodUpdate();
 
     res.status(201).json({
       success: true,
@@ -272,6 +268,7 @@ async function addApplicationPeriod(req, res) {
       data: result
     });
   } catch (error) {
+    console.error('[addApplicationPeriod] Error:', error);
     res.status(500).json({
       success: false,
       error: error.message || 'An error occurred while creating the application period.'
@@ -319,21 +316,47 @@ async function getActiveApplicationPeriod(req, res) {
   const { sessionId } = req.query;
   try {
     const activePeriod = await requirementModel.getActiveApplicationPeriod();
+    
+    // Ensure consistent data structure - always return array
+    const dataToPublish = Array.isArray(activePeriod) 
+      ? activePeriod 
+      : (activePeriod ? [activePeriod] : []);
 
     if (sessionId) {
       subscribeToChannel(sessionId, 'application_periods');
+      // Publish with consistent structure
       publishToChannel('application_periods', {
         channel: 'application_periods',
         operation: 'SNAPSHOT',
-        data: Array.isArray(activePeriod) ? activePeriod : [activePeriod].filter(Boolean)
+        data: dataToPublish
       });
     }
 
-    res.status(200).json(activePeriod);
+    res.status(200).json(dataToPublish); // Return array consistently
   } catch (error) {
+    console.error('[getActiveApplicationPeriod] Error:', error);
     res.status(500).json({
       error: error.message || 'An error occurred while fetching the active application period.'
     });
+  }
+}
+
+async function publishApplicationPeriodUpdate() {
+  try {
+    const activePeriods = await requirementModel.getActiveApplicationPeriod();
+    const dataToPublish = Array.isArray(activePeriods) 
+      ? activePeriods 
+      : (activePeriods ? [activePeriods] : []);
+    
+    publishToChannel('application_periods', {
+      channel: 'application_periods',
+      operation: 'SNAPSHOT',
+      data: dataToPublish
+    });
+    
+    console.log('[publishApplicationPeriodUpdate] Published:', dataToPublish.length, 'periods');
+  } catch (error) {
+    console.error('[publishApplicationPeriodUpdate] Error:', error);
   }
 }
 
@@ -363,12 +386,8 @@ async function updateApplicationPeriod(req, res) {
       req.user.email
     );
 
-    const activePeriods = await requirementModel.getActiveApplicationPeriod();
-    publishToChannel('application_periods', {
-      channel: 'application_periods',
-      operation: 'SNAPSHOT',
-      data: Array.isArray(activePeriods) ? activePeriods : [activePeriods].filter(Boolean)
-    });
+    // Publish consistent update
+    await publishApplicationPeriodUpdate();
 
     res.status(200).json({
       success: true,
@@ -376,7 +395,7 @@ async function updateApplicationPeriod(req, res) {
       data: result
     });
   } catch (error) {
-    console.error('[requirementController.updateApplicationPeriod] error:', error);
+    console.error('[updateApplicationPeriod] Error:', error);
     res.status(500).json({
       success: false,
       error: error.message || 'An error occurred while updating the application period.'
@@ -418,15 +437,21 @@ async function terminateActiveApplicationPeriod(req, res) {
 
     await requirementModel.terminateActiveApplicationPeriod(user.user_id);
 
+    // Publish empty array consistently
     publishToChannel('application_periods', {
       channel: 'application_periods',
       operation: 'SNAPSHOT',
-      data: [] // no active periods after termination
+      data: []
     });
 
-    res.status(200).json({ message: 'Active application period terminated successfully.' });
+    res.status(200).json({ 
+      success: true,
+      message: 'Active application period terminated successfully.' 
+    });
   } catch (error) {
+    console.error('[terminateActiveApplicationPeriod] Error:', error);
     res.status(500).json({
+      success: false,
       error: error.message || 'An error occurred while terminating the active application period.'
     });
   }

@@ -36,5 +36,10 @@ RUN mkdir -p /usr/share/nginx/html/applications && \
     chown -R nginx:nginx /usr/share/nginx/html/applications && \
     chmod -R 755 /usr/share/nginx/html/applications
 
+# Events directory setup
+RUN mkdir -p /usr/share/nginx/html/events && \
+    chown -R nginx:nginx /usr/share/nginx/html/events && \
+    chmod -R 755 /usr/share/nginx/html/events
+
 # Ensure root directory permissions
 RUN chmod -R 755 /usr/share/nginx/html

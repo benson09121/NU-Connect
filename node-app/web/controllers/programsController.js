@@ -195,10 +195,61 @@ async function deleteProgram(req, res) {
     }
 }
 
+async function archiveProgram(req, res) {
+    const { program_id, reason } = req.body;
+    const user_id = req.user?.user_id || req.body.user_id;
+    try {
+        const program = await programsModel.archiveProgram(program_id, user_id, reason);
+        publishToChannel('programs_updates', {
+            operation: 'UPDATE',
+            data: program,
+            user: req.user?.email,
+            timestamp: new Date()
+        });
+        res.status(200).json({
+            success: true,
+            message: "Program archived successfully.",
+            data: program
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message || "An error occurred while archiving the program."
+        });
+    }
+}
+
+async function unarchiveProgram(req, res) {
+    const { program_id, reason } = req.body;
+    const user_id = req.user?.user_id || req.body.user_id;
+    try {
+        const program = await programsModel.unarchiveProgram(program_id, user_id, reason);
+        publishToChannel('programs_updates', {
+            operation: 'UPDATE',
+            data: program,
+            user: req.user?.email,
+            timestamp: new Date()
+        });
+        res.status(200).json({
+            success: true,
+            message: "Program unarchived successfully.",
+            data: program
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message || "An error occurred while unarchiving the program."
+        });
+    }
+}
+
+
 module.exports = {
     getAllPrograms,
     getAllColleges,
     createProgram,
     updateProgram,
     deleteProgram,
+    archiveProgram,      // <-- add this
+    unarchiveProgram 
 };
