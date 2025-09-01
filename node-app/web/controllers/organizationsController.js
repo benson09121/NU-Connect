@@ -597,26 +597,27 @@ async function createExecutiveMember(req, res) {
         });
 
         const {
-            organization_id,
             email,
             program_name,
             role_title,
             rank_level,
-            org_name
+            orgId,
+            orgVersionId
         } = req.body;
 
         const action_by_email = req.user.email;
 
         const result = await organizationsModel.createExecutiveMember({
-            organization_id,
+            orgId,
             email,
             program_name,
             role_title,
             rank_level,
-            action_by_email
+            action_by_email,
+            orgVersionId
         });
 
-        publishToChannel(`organization_officers_${org_name}`, {
+        publishToChannel(`organization_officers_${orgId}_${orgVersionId}`, {
             operation: 'CREATE',
             data: result
         });
@@ -638,28 +639,30 @@ async function updateExecutiveMember(req, res) {
         });
 
         const {
-            organization_id,
+            orgId,
             email,
             program_name,
             role_title,
             rank_level,
-            org_name
+            org_name,
+            orgVersionId
         } = req.body;
 
         const action_by_email = req.user.email;
 
         const result = await organizationsModel.updateExecutiveMember({
-            organization_id,
+            orgId,
             email,
             program_name,
             role_title,
             rank_level,
-            action_by_email
+            action_by_email,
+            orgVersionId
         });
 
         console.log(result);
 
-        publishToChannel(`organization_officers_${org_name}`, {
+        publishToChannel(`organization_officers_${orgId}_${orgVersionId}`, {
             operation: 'UPDATE',
             data: result
         });
@@ -683,7 +686,8 @@ async function archiveExecutiveMember(req, res) {
         const {
             organization_id,
             email,
-            org_name
+            org_name,
+            orgVersionId
         } = req.body;
 
         const action_by_email = req.user.email;
@@ -693,8 +697,8 @@ async function archiveExecutiveMember(req, res) {
             email,
             action_by_email
         });
-
-        publishToChannel(`organization_officers_${org_name}`, {
+        console.log(result);
+        publishToChannel(`organization_officers_${organization_id}_${orgVersionId}`, {
             operation: 'DELETE',
             data: result
         });
@@ -729,20 +733,21 @@ async function createCommittee(req, res) {
         const {
             committee_name,
             description,
-            orgName,
+            orgId,
+            orgVersionId,
         } = req.body;
 
         const action_by_email = req.user.email;
 
         const result = await organizationsModel.createCommittee({
-            orgName,
+            orgId,
             committee_name,
             description,
             action_by_email,
             
         });
 
-        publishToChannel(`organization_committees_${orgName}`, {
+        publishToChannel(`organization_committees_${orgId}_${orgVersionId}`, {
             operation: 'CREATE',
             data: result
         });
@@ -763,17 +768,19 @@ async function updateCommittee(req, res) {
             committee_id,
             new_name,
             new_description,
-            orgName
+            orgName,
+            orgId,
+            orgVersionId
         } = req.body;
         const action_by_email = req.user.email;
-
+        
         const result = await organizationsModel.updateCommittee({
             committee_id,
             new_name,
             new_description,
             action_by_email
         });
-        publishToChannel(`organization_committees_${orgName}`, {
+        publishToChannel(`organization_committees_${orgId}_${orgVersionId}`, {
             operation: 'UPDATE',
             data: result
         });
@@ -793,7 +800,9 @@ async function archiveCommittee(req, res) {
         const {
             committee_id,
             reason,
-            orgName
+            orgName,
+            orgId,
+            orgVersionId
         } = req.body;
 
         const archived_by_email = req.user.email;
@@ -804,7 +813,7 @@ async function archiveCommittee(req, res) {
             archived_by_email
         });
         console.log(result);
-        publishToChannel(`organization_committees_${orgName}`, {
+        publishToChannel(`organization_committees_${orgId}_${orgVersionId}`, {
             operation: 'DELETE',
             data: result
         });
@@ -825,7 +834,7 @@ async function getAllCommitteeMembers(req, res) {
         const { org_id, org_version_id, sessionId } = req.query;
         const committees = await organizationsModel.getAllCommitteeMembers(org_id, org_version_id);
         if (sessionId) {
-            subscribeToChannel(sessionId, `all_committees_members_${org_id}_${org_version_id}`);
+            subscribeToChannel(sessionId, `committee_members_${org_id}_${org_version_id}`);
         }
         res.status(200).json(committees);
     } catch (error) {
@@ -841,7 +850,8 @@ async function addCommitteeMember(req, res) {
             committee_id,
             user_email,
             role,
-            orgName
+            orgId,
+            orgVersionId,
         } = req.body;
 
         const action_by_email = req.user.email;
@@ -852,17 +862,19 @@ async function addCommitteeMember(req, res) {
             role,
             action_by_email
         });
-        const emailUpdate = await organizationsModel.getSingleOrganizationMember(result[0].member_id, orgName);
-        const emailSUggestionOrganizationUpdate = await organizationsModel.GetSingleOrganizationUser(result[0].member_id);
-        await userCacheModel.cacheSingleOrganizationUser(orgName,emailSUggestionOrganizationUpdate[0]);
-        console.log();
-        publishToChannel(`organizations_members_${orgName}`, {
-            operation: 'DELETE',
-            data: emailUpdate
-        });
-        publishToChannel(`organizations_committeesMembers_${orgName}`, {
+        const emailUpdate = await organizationsModel.getSingleOrganizationMember(result[0].member_id, orgId);
+        const emailSSuggestionOrganizationUpdate = await organizationsModel.GetSingleOrganizationUser(result[0].member_id);
+        await userCacheModel.cacheSingleOrganizationUser(orgId, orgVersionId, emailSSuggestionOrganizationUpdate[0]);
+        console.log(emailUpdate);
+
+        console.log(result);
+        publishToChannel(`committee_members_${orgId}_${orgVersionId}`, {
             operation: 'CREATE',
             data: result
+        });
+        publishToChannel(`organization_members_${orgId}_${orgVersionId}`, {
+            operation: 'DELETE',
+            data: emailUpdate
         });
         res.status(201).json({
             message: 'Committee member added successfully.',
@@ -877,20 +889,23 @@ async function addCommitteeMember(req, res) {
 
 async function updateCommitteeMember(req, res) {
     try {
-        const { committee_member_id, new_role, orgName } = req.body;
+        const { committee_member_id, new_role, orgId, orgVersionId, committee_id } = req.body;
         const action_by_email = req.user.email;
+        console.log(req.body);
         const result = await organizationsModel.updateCommitteeMember({
             committee_member_id,
             new_role,
             action_by_email,
+            committee_id
         });
-        publishToChannel(`organizations_committeesMembers_${orgName}`, {
+        console.log(result);
+        publishToChannel(`committee_members_${orgId}_${orgVersionId}`, {
             operation: 'UPDATE',
             data: result
         });
         res.status(200).json({
             message: 'Committee member updated successfully.',
-            rows_affected: result.rows_affected
+            rows_affected: result
         });
     } catch (error) {
         const sqlMessage = error.sqlMessage || error.message || 'An error occurred while updating committee member.';
@@ -900,14 +915,16 @@ async function updateCommitteeMember(req, res) {
 
 async function archiveCommitteeMember(req, res) {
     try {
-        const { committee_member_id, reason, orgName } = req.body;
+        const { committee_member_id, reason, orgId, orgVersionId } = req.body;
         const action_by_email = req.user.email;
+        console.log(req.body);
         const result = await organizationsModel.archiveCommitteeMember({
             committee_member_id,
             reason,
             action_by_email
         });
-        publishToChannel(`organizations_committeesMembers_${orgName}`, {
+        console.log(result);
+        publishToChannel(`committee_members_${orgId}_${orgVersionId}`, {
             operation: 'DELETE',
             data: result
         });
@@ -987,7 +1004,7 @@ async function addOrganizationMember(req, res) {
         await userCacheModel.cacheSingleUser(emailSuggestionUpdate[0]);
         const emailSUggestionOrganizationUpdate = await organizationsModel.GetSingleOrganizationUser(result[0].id);
         await userCacheModel.cacheSingleOrganizationUser(orgName,emailSUggestionOrganizationUpdate[0]);
-        publishToChannel(`organizations_members_${orgName}`, {
+        publishToChannel(`organization_members_${orgName}`, {
             operation: 'CREATE',
             data: result
         });
@@ -1022,12 +1039,17 @@ async function editOrganizationMember(req, res) {
 
 async function archiveOrganizationMember(req, res) {
     try {
-        const { member_id } = req.body;
+        const { member_id, reason, reasonKey, orgId, orgVersionId } = req.body;
         if (!member_id) {
             return res.status(400).json({ error: "member_id is required." });
         }
         const archived_by_email = req.user.email;
-        await organizationsModel.archiveOrganizationMember({ member_id, archived_by_email });
+        const result = await organizationsModel.archiveOrganizationMember({ member_id, archived_by_email, reason, orgId, orgVersionId });
+        console.log(result);
+        publishToChannel(`organization_members_${orgId}_${orgVersionId}`, {
+            operation: 'DELETE',
+            data: result
+        });
         res.status(200).json({ message: 'Organization member archived successfully.' });
     } catch (error) {
         res.status(400).json({

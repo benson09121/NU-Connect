@@ -233,34 +233,26 @@ async function getOrganizationDashboardStats(organization_id) {
 }
 
 async function createExecutiveMember({
-    organization_id,
+    orgId,
     email,
     program_name,
     role_title,
     rank_level,
-    action_by_email
+    action_by_email,
+    orgVersionId
 }) {
     const connection = await pool.getConnection();
     try {
-        // Log the SQL call and parameters
-        console.log('SQL CALL: CALL CreateExecutiveMember(?, ?, ?, ?, ?, ?);', [
-            organization_id,
-
-            email,
-            program_name,
-            role_title,
-            rank_level,
-            action_by_email
-        ]);
         [row] = await connection.query(
-            `CALL CreateExecutiveMember(?, ?, ?, ?, ?, ?)`,
+            `CALL CreateExecutiveMember(?, ?, ?, ?, ?, ?, ?)`,
             [
-                organization_id,
+                orgId,
                 email,
                 program_name,
                 role_title,
                 rank_level,
-                action_by_email
+                action_by_email,
+                orgVersionId
             ]
         );
         // If no error, success
@@ -273,32 +265,26 @@ async function createExecutiveMember({
 }
 
 async function updateExecutiveMember({
-    organization_id,
+    orgId,
     email,
     program_name,
     role_title,
     rank_level,
-    action_by_email
+    action_by_email,
+    orgVersionId
 }) {
     const connection = await pool.getConnection();
     try {
-        console.log('SQL CALL: CALL UpdateExecutiveMember(?, ?, ?, ?, ?, ?);', [
-            organization_id,
-            email,
-            program_name,
-            role_title,
-            rank_level,
-            action_by_email
-        ]);
         [row] = await connection.query(
-            `CALL UpdateExecutiveMember(?, ?, ?, ?, ?, ?)`,
+            `CALL UpdateExecutiveMember(?, ?, ?, ?, ?, ?, ?)`,
             [
-                organization_id,
+                orgId,
                 email,
                 program_name,
                 role_title,
                 rank_level,
-                action_by_email
+                action_by_email,
+                orgVersionId
             ]
         );
         return row[0];
@@ -352,8 +338,7 @@ async function getOrganizationCommittees(org_id, org_version_id) {
 }
 
 async function createCommittee({
-    orgName,
-    cycle_number,
+    orgId,
     committee_name,
     description,
     action_by_email
@@ -363,7 +348,7 @@ async function createCommittee({
         const [rows] = await connection.query(
             `CALL CreateCommittee( ?, ?, ?, ?)`,
             [
-                orgName,
+                orgId,
                 committee_name,
                 description,
                 action_by_email
@@ -470,13 +455,14 @@ async function addCommitteeMember({
 async function updateCommitteeMember({
     committee_member_id,
     new_role,
-    action_by_email
+    action_by_email,
+    committee_id
 }) {
     const connection = await pool.getConnection();
     try {
         const [rows] = await connection.query(
-            `CALL UpdateCommitteeMember(?, ?, ?)`,
-            [committee_member_id, new_role, action_by_email]
+            `CALL UpdateCommitteeMember(?, ?, ?, ?)`,
+            [committee_member_id, new_role, action_by_email, committee_id]
         );
         return rows[0];
     } catch (error) {
@@ -497,7 +483,7 @@ async function archiveCommitteeMember({
             `CALL ArchiveCommitteeMember(?, ?, ?)`,
             [committee_member_id, reason, action_by_email]
         );
-        return rows[0][0]; // { rows_archived: ... }
+        return rows[0];
     } catch (error) {
         throw error;
     } finally {
@@ -595,12 +581,12 @@ async function editOrganizationMember({
     }
 }
 
-async function archiveOrganizationMember({ member_id, archived_by_email }) {
+async function archiveOrganizationMember({ member_id, archived_by_email, reason, orgId, orgVersionId }) {
     const connection = await pool.getConnection();
     try {
         const [rows] = await connection.query(
-            'CALL ArchiveOrganizationMember(?, ?);',
-            [member_id, archived_by_email]
+            'CALL ArchiveOrganizationMember(?, ?, ?, ?, ?);',
+            [member_id, archived_by_email, reason, orgId, orgVersionId]
         );
         return rows[0];
     } catch (error) {

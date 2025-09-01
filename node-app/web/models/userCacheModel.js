@@ -1,180 +1,195 @@
 const { redisClient } = require('../../config/redis');
 
+function orgKey(org_id, org_version_id) {
+  return `org:${org_id}:v:${org_version_id}:users`;
+}
+
 class UserCacheModel {
-    // Cache users by organization
-    async cacheUsersByOrganization(org_name, users) {
-        const key = `org:${org_name}:users`;
-        const pipeline = redisClient.pipeline();
-        
-        // Clear existing data
-        await redisClient.del(key);
-        
-        // Store each user as a hash field
-        users.forEach(user => {
-            pipeline.hset(key, user.email, JSON.stringify({
-                email: user.email,
-                f_name: user.f_name,
-                l_name: user.l_name,
-                user_id: user.user_id,
-                program_name: user.program_name,
-                role: user.role,
-                org_name: org_name,
-                is_executive: user.is_executive,
-                is_committee: user.is_committee
-            }));
-        });
-        
-        await pipeline.exec();
-        // Set expiration (1 hour)
-        await redisClient.expire(key, 3600);
-    }
+  // Cache users by organization + version
+  async cacheUsersByOrganization(org_id, org_version_id, users) {
+    const key = orgKey(org_id, org_version_id);
+    const pipeline = redisClient.pipeline();
 
-    async cacheSingleOrganizationUser(orgn_name, user) {
-        const key = `org:${orgn_name}:users`;
-        const exists = await redisClient.exists(key);
-        if (!exists) return; // Only update if cache exists
+    // Clear existing data
+    await redisClient.del(key);
 
-        await redisClient.hset(key, user.email, JSON.stringify({
-            email: user.email,
-            f_name: user.f_name,
-            l_name: user.l_name,
-            user_id: user.user_id,
-            program_name: user.program_name,
-            role: user.role,
-            org_name: user.org_name,
-            is_executive: user.is_executive,
-            is_committee: user.is_committee
-        }));
-        await redisClient.expire(key, 3600);
-    }
+    // Store each user as hash field keyed by email
+    users.forEach((user) => {
+      pipeline.hset(
+        key,
+        user.email,
+        JSON.stringify({
+          email: user.email,
+          f_name: user.f_name,
+          l_name: user.l_name,
+          user_id: user.user_id,
+          program_name: user.program_name,
+          role: user.role,
+          org_id,
+          org_version_id,
+          is_executive: !!user.is_executive,
+          is_committee: !!user.is_committee,
+        })
+      );
+    });
 
-    
+    await pipeline.exec();
+    await redisClient.expire(key, 3600); // 1 hour TTL
+  }
 
-async searchUsersByEmail(org_name, emailPattern) {
-    const key = `org:${org_name}:users`;
+  // Update single user inside an existing org/version cache
+  async cacheSingleOrganizationUser(org_id, org_version_id, user) {
+    const key = orgKey(org_id, org_version_id);
+    const exists = await redisClient.exists(key);
+    if (!exists) return; // only update if cache exists
+
+    await redisClient.hset(
+      key,
+      user.email,
+      JSON.stringify({
+        email: user.email,
+        f_name: user.f_name,
+        l_name: user.l_name,
+        user_id: user.user_id,
+        program_name: user.program_name,
+        role: user.role,
+        org_id,
+        org_version_id,
+        is_executive: !!user.is_executive,
+        is_committee: !!user.is_committee,
+      })
+    );
+    await redisClient.expire(key, 3600);
+  }
+
+  // Search by email/name/program within specific org/version
+  async searchUsersByEmail(org_id, org_version_id, emailPattern) {
+    const key = orgKey(org_id, org_version_id);
     const allUsers = await redisClient.hgetall(key);
+    if (!allUsers || Object.keys(allUsers).length === 0) return [];
 
     const matches = [];
     const pattern = emailPattern.toLowerCase();
 
     for (const [email, userData] of Object.entries(allUsers)) {
-        const user = JSON.parse(userData);
-        if (
-            email.toLowerCase().includes(pattern) ||
-            (user.f_name && user.f_name.toLowerCase().includes(pattern)) ||
-            (user.l_name && user.l_name.toLowerCase().includes(pattern)) ||
-            (user.program_name && user.program_name.toLowerCase().includes(pattern))
-        ) {
-            matches.push({
-                email,
-                ...user
-            });
-        }
-    }
+      const user = JSON.parse(userData);
+      const fName = user.f_name?.toLowerCase() || '';
+      const lName = user.l_name?.toLowerCase() || '';
+      const prog = user.program_name?.toLowerCase() || '';
 
-    // Sort by relevance (exact match first, then starts with, then contains)
-    return matches.sort((a, b) => {
-        const fieldsA = [a.email, a.f_name, a.l_name, a.program_name].map(f => f?.toLowerCase() || '');
-        const fieldsB = [b.email, b.f_name, b.l_name, b.program_name].map(f => f?.toLowerCase() || '');
-
-        function getScore(fields) {
-            if (fields.some(f => f === pattern)) return 0;
-            if (fields.some(f => f.startsWith(pattern))) return 1;
-            if (fields.some(f => f.includes(pattern))) return 2;
-            return 3;
-        }
-
-        return getScore(fieldsA) - getScore(fieldsB);
-    }).slice(0, 10); // Limit to 10 results
-}
-
-     async cacheAllUsers(users) {
-        const key = `all:users`;
-        const pipeline = redisClient.pipeline();
-
-        // Clear existing data
-        await redisClient.del(key);
-
-        // Store each user as a hash field
-        users.forEach(user => {
-            pipeline.hset(key, user.email, JSON.stringify({
-                email: user.email,
-                f_name: user.f_name,
-                l_name: user.l_name,
-                user_id: user.user_id,
-                program_name: user.program_name,
-                role: user.role,
-                org_name: user.org_name,
-            }));
+      if (
+        email.toLowerCase().includes(pattern) ||
+        fName.includes(pattern) ||
+        lName.includes(pattern) ||
+        prog.includes(pattern)
+      ) {
+        matches.push({
+          email,
+          ...user,
         });
-
-        await pipeline.exec();
-        // Set expiration (1 hour)
-        await redisClient.expire(key, 3600);
+      }
     }
 
-        async cacheSingleUser(user) {
-        const key = `all:users`;
-        const exists = await redisClient.exists(key);
-        if (!exists){
-            console.log("Cache does not exist, skipping update");
-            return;
-        }
-        await redisClient.hset(key, user.email, JSON.stringify({
-            email: user.email,
-            f_name: user.f_name,
-            l_name: user.l_name,
-            user_id: user.user_id,
-            program_name: user.program_name,
-            role: user.role,
-            org_name: user.org_name,
-        }));
-        await redisClient.expire(key, 3600);
+    // Relevance sort
+    const score = (u) => {
+      const fields = [u.email, u.f_name, u.l_name, u.program_name]
+        .map((f) => f?.toLowerCase() || '');
+      if (fields.some((f) => f === pattern)) return 0;
+      if (fields.some((f) => f.startsWith(pattern))) return 1;
+      if (fields.some((f) => f.includes(pattern))) return 2;
+      return 3;
+    };
+
+    return matches.sort((a, b) => score(a) - score(b)).slice(0, 10);
+  }
+
+  // Global cache for all users
+  async cacheAllUsers(users) {
+    const key = `all:users`;
+    const pipeline = redisClient.pipeline();
+
+    await redisClient.del(key);
+
+    users.forEach((user) => {
+      pipeline.hset(
+        key,
+        user.email,
+        JSON.stringify({
+          email: user.email,
+          f_name: user.f_name,
+          l_name: user.l_name,
+          user_id: user.user_id,
+          program_name: user.program_name,
+          role: user.role,
+          org_name: user.org_name || null,
+        })
+      );
+    });
+
+    await pipeline.exec();
+    await redisClient.expire(key, 3600);
+  }
+
+  async cacheSingleUser(user) {
+    const key = `all:users`;
+    const exists = await redisClient.exists(key);
+    if (!exists) {
+      console.log('Cache does not exist, skipping update');
+      return;
     }
-    
-async searchAllUsersByEmail(emailPattern) {
+    await redisClient.hset(
+      key,
+      user.email,
+      JSON.stringify({
+        email: user.email,
+        f_name: user.f_name,
+        l_name: user.l_name,
+        user_id: user.user_id,
+        program_name: user.program_name,
+        role: user.role,
+        org_name: user.org_name || null,
+      })
+    );
+    await redisClient.expire(key, 3600);
+  }
+
+  async searchAllUsersByEmail(emailPattern) {
     const key = `all:users`;
     const allUsers = await redisClient.hgetall(key);
+    if (!allUsers || Object.keys(allUsers).length === 0) return [];
 
     const matches = [];
     const pattern = emailPattern.toLowerCase();
 
-    for (const [email, userData] of Object.entries(allUsers)) {
-        const user = JSON.parse(userData);
-        if (
-            email.toLowerCase().includes(pattern) ||
-            (user.f_name && user.f_name.toLowerCase().includes(pattern)) ||
-            (user.l_name && user.l_name.toLowerCase().includes(pattern))
-        ) {
-            matches.push({
-                email: user.email,
-                f_name: user.f_name,
-                l_name: user.l_name,
-                user_id: user.user_id,
-                program_name: user.program_name,
-                role: user.role,
-                org_name: user.org_name
-            });
-        }
+    for (const [, userData] of Object.entries(allUsers)) {
+      const user = JSON.parse(userData);
+      const fName = user.f_name?.toLowerCase() || '';
+      const lName = user.l_name?.toLowerCase() || '';
+      const email = user.email?.toLowerCase() || '';
+
+      if (email.includes(pattern) || fName.includes(pattern) || lName.includes(pattern)) {
+        matches.push({
+          email: user.email,
+          f_name: user.f_name,
+          l_name: user.l_name,
+          user_id: user.user_id,
+          program_name: user.program_name,
+          role: user.role,
+          org_name: user.org_name || null,
+        });
+      }
     }
 
-    // Sort by relevance and limit results
-   return matches.sort((a, b) => {
-    const patternLower = pattern;
+    const score = (u) => {
+      const fields = [u.email, u.f_name, u.l_name].map((f) => f?.toLowerCase() || '');
+      if (fields.some((f) => f === pattern)) return 0;
+      if (fields.some((f) => f.startsWith(pattern))) return 1;
+      if (fields.some((f) => f.includes(pattern))) return 2;
+      return 3;
+    };
 
-    // Helper to get best match score for a user
-    function getScore(user) {
-        const fields = [user.email, user.f_name, user.l_name].map(f => f?.toLowerCase() || '');
-        if (fields.some(f => f === patternLower)) return 0; // exact match
-        if (fields.some(f => f.startsWith(patternLower))) return 1; // starts with
-        if (fields.some(f => f.includes(patternLower))) return 2; // contains
-        return 3; // no match (shouldn't happen)
-    }
-
-    return getScore(a) - getScore(b);
-}).slice(0, 10);
-}
-
+    return matches.sort((a, b) => score(a) - score(b)).slice(0, 10);
+  }
 }
 
 module.exports = new UserCacheModel();
