@@ -29,6 +29,7 @@ services:
       - /opt/requirements:/app/requirements
       - /opt/organizations:/app/organizations
       - /opt/applications:/app/applications
+      - /opt/events:/app/events
     networks:
       - my-network
     ports:
@@ -55,6 +56,7 @@ services:
       - /opt/requirements:/usr/share/nginx/html/requirements
       - /opt/organizations:/usr/share/nginx/html/organizations
       - /opt/applications:/usr/share/nginx/html/applications
+      - /opt/events:/usr/share/nginx/html/events
     ports:
       - "8080:80"
     networks:

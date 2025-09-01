@@ -17,7 +17,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use(fileUpload({
     limits: {fileSize: 100 * 1024 * 1024},
     abortOnLimit: true, 
-    safeFileNames: true,
+    safeFileNames: false,  // Disable safe file names to preserve original extensions
     preserveExtension: true,
     createParentPath: true,
 }));

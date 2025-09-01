@@ -12,7 +12,6 @@ SET GLOBAL event_scheduler = ON;
 
 DROP DATABASE IF EXISTS db_nuconnect;
 CREATE DATABASE db_nuconnect;
-ALTER DATABASE db_nuconnect CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE db_nuconnect;
 CREATE TABLE tbl_role(
     role_id INT AUTO_INCREMENT PRIMARY KEY,
@@ -51,12 +50,9 @@ CREATE TABLE tbl_user(
     archived_at TIMESTAMP NULL,
     archived_by VARCHAR(200) NULL,
     archived_reason VARCHAR(255),
-    unarchived_at TIMESTAMP NULL,
-    unarchived_by VARCHAR(200) NULL,
     FOREIGN KEY (role_id) REFERENCES tbl_role(role_id),
     FOREIGN KEY (program_id) REFERENCES tbl_program(program_id),
-    FOREIGN KEY (archived_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
-    FOREIGN KEY (unarchived_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE
+    FOREIGN KEY (archived_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE
 );
 
 CREATE TABLE tbl_user_application (
@@ -237,8 +233,6 @@ CREATE TABLE tbl_organization_members (
     FOREIGN KEY (org_version_id) REFERENCES tbl_organization_version(org_version_id) ON DELETE SET NULL
 );
 
-
-
 CREATE TABLE tbl_application_period (
     period_id INT AUTO_INCREMENT PRIMARY KEY,
     start_date DATE NOT NULL,
@@ -406,8 +400,6 @@ CREATE TABLE tbl_archived_committees (
     FOREIGN KEY (archived_by) REFERENCES tbl_user(user_id)
 );
 
-
-
 CREATE TABLE tbl_event (
     event_id INT AUTO_INCREMENT PRIMARY KEY,
     organization_id INT NULL,
@@ -417,7 +409,7 @@ CREATE TABLE tbl_event (
     title VARCHAR(300) NOT NULL,
     description TEXT NOT NULL,
     image TEXT NULL,
-    venue_type ENUM('Face to face', 'Online') DEFAULT 'Face to face',
+    venue_type ENUM('Face to face', 'Online') DEFAULT 'face to face',
     venue VARCHAR(200) NULL,
     start_date DATE NOT NULL,
     end_date DATE NOT NULL,
@@ -534,6 +526,14 @@ CREATE TABLE tbl_blocked_period (
     FOREIGN KEY (unarchived_by) REFERENCES tbl_user(user_id)
 );
 
+CREATE TABLE tbl_event_collaborator (
+    event_id INT NOT NULL,
+    organization_id INT NOT NULL,
+    PRIMARY KEY (event_id, organization_id),
+    FOREIGN KEY (event_id) REFERENCES tbl_event(event_id) ON DELETE CASCADE,
+    FOREIGN KEY (organization_id) REFERENCES tbl_organization(organization_id) ON DELETE CASCADE
+);
+
 CREATE TABLE tbl_event_application (
     event_application_id INT AUTO_INCREMENT PRIMARY KEY,
     organization_id INT NOT NULL,
@@ -560,7 +560,7 @@ CREATE TABLE tbl_event_application_requirement (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (created_by) REFERENCES tbl_user(user_id)
 );
--- 3. Event Application Approval Process
+
 CREATE TABLE tbl_event_approval_process (
     event_approval_id INT AUTO_INCREMENT PRIMARY KEY,
     event_application_id INT NOT NULL,
@@ -867,43 +867,6 @@ CREATE TABLE tbl_transaction_expense (
     reference_doc VARCHAR(255) NULL,        -- invoice, OR number, etc.
     FOREIGN KEY (transaction_id) REFERENCES tbl_transaction(transaction_id) ON DELETE CASCADE
 );
-CREATE TABLE tbl_ai_conversation (
-  conversation_id BIGINT AUTO_INCREMENT PRIMARY KEY,
-  owner_id VARCHAR(200) NOT NULL,                       -- who started/owns this chat
-  title VARCHAR(255) NULL,
-  system_prompt TEXT NULL,                               -- store custom instructions if any
-  model VARCHAR(100) DEFAULT 'deepseek-chat',
-  temperature DECIMAL(3,2) DEFAULT 0.7,
-  top_p DECIMAL(3,2) DEFAULT 1.0,
-  entity_type ENUM('general','user','organization','event','application','approval','system') DEFAULT 'general',
-  entity_id INT NULL,
-  summary LONGTEXT NULL,                                 -- rolling summary for long chats
-  last_summary_message_id BIGINT NULL,
-  is_archived BOOLEAN DEFAULT FALSE,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  FOREIGN KEY (owner_id) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
-  INDEX idx_owner_updated (owner_id, updated_at DESC),
-  INDEX idx_scope (entity_type, entity_id)
-);
-
-CREATE TABLE tbl_ai_message (
-  message_id BIGINT AUTO_INCREMENT PRIMARY KEY,
-  conversation_id BIGINT NOT NULL,
-  role ENUM('system','user','assistant','tool') NOT NULL,
-  user_id VARCHAR(200) NULL,                              -- set for role='user'
-  content LONGTEXT NOT NULL,
-  model VARCHAR(100) NULL,                                -- set for assistant messages
-  usage_prompt_tokens INT NULL,
-  usage_completion_tokens INT NULL,
-  usage_total_tokens INT NULL,
-  meta JSON NULL,                                         -- tool_calls, function args, etc.
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (conversation_id) REFERENCES tbl_ai_conversation(conversation_id) ON DELETE CASCADE,
-  FOREIGN KEY (user_id) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
-  INDEX idx_conv_time (conversation_id, created_at),
-  INDEX idx_conv_msg (conversation_id, message_id)
-);
 
 -- PROCEDURES
 use db_nuconnect;
@@ -1139,7 +1102,8 @@ CREATE DEFINER='admin'@'%' PROCEDURE CreateEvent(
     IN p_is_open_to ENUM('Members only', 'Open to all', 'NU Students only'),
     IN p_fee INT,
     IN p_capacity INT,
-    IN p_image TEXT
+    IN p_image TEXT,
+    IN p_collaborators JSON -- << NEW PARAMETER
 )
 BEGIN
     DECLARE v_base_program_id INT;
@@ -1147,6 +1111,9 @@ BEGIN
     DECLARE v_role_id INT;
     DECLARE v_user_email VARCHAR(100);
     DECLARE v_all_emails JSON;
+    DECLARE i INT DEFAULT 0;
+    DECLARE v_collab_count INT DEFAULT 0;
+    DECLARE v_collab_org_id INT;
 
     -- Get role and email of user
     SELECT role_id, email INTO v_role_id, v_user_email FROM tbl_user WHERE user_id = p_user_id LIMIT 1;
@@ -1245,6 +1212,20 @@ BEGIN
             FROM tbl_organization_course
             WHERE organization_id = p_organization_id
         ) AS org_courses;
+    END IF;
+
+    -- Add event collaborators if provided
+    IF p_collaborators IS NOT NULL AND JSON_LENGTH(p_collaborators) > 0 THEN
+        SET v_collab_count = JSON_LENGTH(p_collaborators);
+        SET i = 0;
+        WHILE i < v_collab_count DO
+            SET v_collab_org_id = CAST(JSON_UNQUOTE(JSON_EXTRACT(p_collaborators, CONCAT('$[', i, ']'))) AS UNSIGNED);
+            IF v_collab_org_id IS NOT NULL THEN
+                INSERT IGNORE INTO tbl_event_collaborator (event_id, organization_id)
+                VALUES (v_event_id, v_collab_org_id);
+            END IF;
+            SET i = i + 1;
+        END WHILE;
     END IF;
 
     -- Get all active user emails for notification (for SDAO events)
@@ -3266,7 +3247,6 @@ BEGIN
 END $$
 DELIMITER ;
 
-
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetEvents()
 BEGIN
@@ -3291,7 +3271,19 @@ BEGIN
         e.status,
         e.type,
         e.user_id,
-        e.created_at
+        e.created_at,
+        -- Collaborators as JSON array
+        (
+            SELECT JSON_ARRAYAGG(
+                JSON_OBJECT(
+                    'organization_id', ec.organization_id,
+                    'organization_name', co.name
+                )
+            )
+            FROM tbl_event_collaborator ec
+            LEFT JOIN tbl_organization co ON ec.organization_id = co.organization_id
+            WHERE ec.event_id = e.event_id
+        ) AS collaborators
     FROM tbl_event e
     LEFT JOIN tbl_organization o ON e.organization_id = o.organization_id
     LEFT JOIN tbl_renewal_cycle rc ON e.organization_id = rc.organization_id AND e.cycle_number = rc.cycle_number;
@@ -3402,7 +3394,18 @@ BEGIN
         e.created_at,
         e.certificate,
         o.name AS organization_name,
-        rc.cycle_number AS renewal_cycle_number
+        rc.cycle_number AS renewal_cycle_number,
+        (
+            SELECT JSON_ARRAYAGG(
+                JSON_OBJECT(
+                    'organization_id', ec.organization_id,
+                    'organization_name', co.name
+                )
+            )
+            FROM tbl_event_collaborator ec
+            LEFT JOIN tbl_organization co ON ec.organization_id = co.organization_id
+            WHERE ec.event_id = e.event_id
+        ) AS collaborators
     FROM tbl_event e
     LEFT JOIN tbl_organization o ON e.organization_id = o.organization_id
     LEFT JOIN tbl_renewal_cycle rc ON e.organization_id = rc.organization_id AND e.cycle_number = rc.cycle_number
@@ -3472,7 +3475,18 @@ BEGIN
             e.status,
             e.type,
             e.user_id,
-            e.created_at
+            e.created_at,
+            (
+                SELECT JSON_ARRAYAGG(
+                    JSON_OBJECT(
+                        'organization_id', ec.organization_id,
+                        'organization_name', co.name
+                    )
+                )
+                FROM tbl_event_collaborator ec
+                LEFT JOIN tbl_organization co ON ec.organization_id = co.organization_id
+                WHERE ec.event_id = e.event_id
+            ) AS collaborators
         FROM tbl_event e
         LEFT JOIN tbl_organization o ON e.organization_id = o.organization_id
         LEFT JOIN tbl_renewal_cycle rc ON e.organization_id = rc.organization_id AND e.cycle_number = rc.cycle_number
@@ -3504,7 +3518,18 @@ BEGIN
             e.status,
             e.type,
             e.user_id,
-            e.created_at
+            e.created_at,
+            (
+                SELECT JSON_ARRAYAGG(
+                    JSON_OBJECT(
+                        'organization_id', ec.organization_id,
+                        'organization_name', co.name
+                    )
+                )
+                FROM tbl_event_collaborator ec
+                LEFT JOIN tbl_organization co ON ec.organization_id = co.organization_id
+                WHERE ec.event_id = e.event_id
+            ) AS collaborators
         FROM tbl_event e
         LEFT JOIN tbl_organization o ON e.organization_id = o.organization_id
         LEFT JOIN tbl_renewal_cycle rc ON e.organization_id = rc.organization_id AND e.cycle_number = rc.cycle_number
@@ -5219,7 +5244,8 @@ CREATE DEFINER='admin'@'%' PROCEDURE CreateEventApplication(
     IN p_cycle_number INT,
     IN p_applicant_user_id VARCHAR(200),
     IN p_event JSON,
-    IN p_requirements JSON
+    IN p_requirements JSON,
+    IN p_collaborators JSON -- <-- NEW PARAMETER, can be null
 )
 BEGIN
     DECLARE v_event_application_id INT;
@@ -5234,6 +5260,9 @@ BEGIN
     DECLARE v_organization_name VARCHAR(100);
     DECLARE v_cycle_number INT;
 
+    DECLARE v_collab_count INT DEFAULT 0;
+    DECLARE v_collab_org_id INT;
+
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
         ROLLBACK;
@@ -5247,14 +5276,13 @@ BEGIN
     FROM tbl_organization
     WHERE organization_id = p_organization_id;
 
-    
-        -- Get current president for the organization
-        SELECT cycle_number INTO v_cycle_number
-        FROM tbl_renewal_cycle
-        WHERE organization_id = p_organization_id
-        ORDER BY cycle_number DESC
-        LIMIT 1;
-        
+    -- Get current president for the organization
+    SELECT cycle_number INTO v_cycle_number
+    FROM tbl_renewal_cycle
+    WHERE organization_id = p_organization_id
+    ORDER BY cycle_number DESC
+    LIMIT 1;
+
     -- Create event record
     INSERT INTO tbl_event (
         organization_id,
@@ -5308,6 +5336,20 @@ BEGIN
 
     SET v_event_id = LAST_INSERT_ID();
 
+    -- Insert collaborators if provided
+    IF p_collaborators IS NOT NULL AND JSON_LENGTH(p_collaborators) > 0 THEN
+        SET v_collab_count = JSON_LENGTH(p_collaborators);
+        SET i = 0;
+        WHILE i < v_collab_count DO
+            SET v_collab_org_id = CAST(JSON_UNQUOTE(JSON_EXTRACT(p_collaborators, CONCAT('$[', i, ']'))) AS UNSIGNED);
+            IF v_collab_org_id IS NOT NULL THEN
+                INSERT IGNORE INTO tbl_event_collaborator (event_id, organization_id)
+                VALUES (v_event_id, v_collab_org_id);
+            END IF;
+            SET i = i + 1;
+        END WHILE;
+    END IF;
+
     -- Create event application record
     INSERT INTO tbl_event_application (
         organization_id,
@@ -5328,25 +5370,24 @@ BEGIN
     -- Handle requirements
     SET v_requirement_count = JSON_LENGTH(p_requirements);
     SET i = 0;
-    
     WHILE i < v_requirement_count DO
         BEGIN
             DECLARE v_requirement_exists TINYINT(1);
-            
+
             SET v_req_id = CAST(JSON_UNQUOTE(JSON_EXTRACT(p_requirements, CONCAT('$[', i, '].requirement_id'))) AS UNSIGNED);
             SET v_file_path = JSON_UNQUOTE(JSON_EXTRACT(p_requirements, CONCAT('$[', i, '].file_path')));
-            
+
             -- Validate requirement exists
             SELECT EXISTS(
                 SELECT 1 FROM tbl_event_application_requirement 
                 WHERE requirement_id = v_req_id
             ) INTO v_requirement_exists;
-            
+
             IF NOT v_requirement_exists THEN
                 SET v_error_msg = CONCAT('Invalid requirement ID: ', v_req_id);
                 SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = v_error_msg;
             END IF;
-            
+
             -- Store requirement submission
             INSERT INTO tbl_event_requirement_submissions (
                 event_id,
@@ -6668,67 +6709,6 @@ BEGIN
 END$$
 DELIMITER ;
 
-DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationDashboardStats(
-    IN p_organization_id INT
-)
-BEGIN
-    DECLARE v_current_cycle INT;
-
-    -- Get current cycle
-    SELECT MAX(cycle_number) INTO v_current_cycle
-    FROM tbl_renewal_cycle
-    WHERE organization_id = p_organization_id;
-
-    -- Total members (excluding executives and committee members)
-    SELECT COUNT(*) INTO @total_members
-    FROM tbl_organization_members om
-    WHERE om.organization_id = p_organization_id
-      AND om.cycle_number = v_current_cycle
-      AND om.member_type = 'Member'
-      AND NOT EXISTS (
-          SELECT 1
-          FROM tbl_committee_members cm
-          JOIN tbl_committee c ON cm.committee_id = c.committee_id
-          WHERE c.organization_id = p_organization_id
-            AND c.cycle_number = v_current_cycle
-            AND cm.user_id = om.user_id
-      );
-
-    -- Total events
-    SELECT COUNT(*) INTO @total_events
-    FROM tbl_event
-    WHERE organization_id = p_organization_id;
-
-    -- Total upcoming events
-    SELECT COUNT(*) INTO @total_upcoming_events
-    FROM tbl_event
-    WHERE organization_id = p_organization_id
-      AND start_date >= CURDATE();
-
-    -- Total post-event reports submitted
-    SELECT COUNT(*) INTO @total_reports
-    FROM tbl_event_requirement_submissions ers
-    JOIN tbl_event_application_requirement ear ON ers.requirement_id = ear.requirement_id
-    WHERE ers.organization_id = p_organization_id
-      AND ear.is_applicable_to = 'post-event';
-
-    -- Total pre-event requirements submitted
-    SELECT COUNT(*) INTO @pre_event_requirements_submitted
-    FROM tbl_event_requirement_submissions ers
-    JOIN tbl_event_application_requirement ear ON ers.requirement_id = ear.requirement_id
-    WHERE ers.organization_id = p_organization_id
-      AND ear.is_applicable_to = 'pre-event';
-
-    -- Return as one row
-    SELECT
-        @total_members AS total_members,
-        @total_events AS total_events,
-        @total_reports AS total_reports,
-        @pre_event_requirements_submitted AS pre_event_requirements_submitted,
-        @total_upcoming_events AS total_upcoming_events;
-END$$
-DELIMITER ;
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE CreateExecutiveMember(
     IN p_organization_id INT,
@@ -13455,6 +13435,100 @@ BEGIN
 
   END IF;
 
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationDashboardOverview(
+    IN p_organization_id INT
+)
+BEGIN
+    DECLARE v_current_cycle INT;
+
+    -- Get the latest cycle number for the organization
+    SELECT MAX(cycle_number) INTO v_current_cycle
+    FROM tbl_renewal_cycle
+    WHERE organization_id = p_organization_id;
+
+    -- Total members (including executives, committee, and regular members, unique users)
+    SELECT COUNT(DISTINCT user_id) INTO @total_members
+    FROM tbl_organization_members
+    WHERE organization_id = p_organization_id
+      AND cycle_number = v_current_cycle
+      AND status = 'Active';
+
+    -- Total approved events
+    SELECT COUNT(*) INTO @total_approved_events
+    FROM tbl_event
+    WHERE organization_id = p_organization_id
+      AND status = 'Approved';
+
+    -- Total upcoming events (approved and ongoing/upcoming, not completed/past)
+    SELECT COUNT(*) INTO @total_upcoming_events
+    FROM tbl_event
+    WHERE organization_id = p_organization_id
+      AND status = 'Approved'
+      AND (
+            (end_date > CURDATE())
+         OR (end_date = CURDATE() AND end_time >= CURTIME())
+         OR (end_date IS NULL AND start_date >= CURDATE())
+      );
+
+    -- Total post-event requirements submitted (approved)
+    SELECT COUNT(*) INTO @total_post_event_requirements_submitted
+    FROM tbl_event_requirement_submissions ers
+    JOIN tbl_event_application_requirement ear ON ers.requirement_id = ear.requirement_id
+    WHERE ers.organization_id = p_organization_id
+      AND ear.is_applicable_to = 'post-event'
+      AND ers.status = 'Approved';
+
+    -- Total event applications (all statuses)
+    SELECT COUNT(*) INTO @total_event_applications
+    FROM tbl_event_application
+    WHERE organization_id = p_organization_id;
+
+    -- Total organization applications (all statuses, new and renewal)
+    SELECT COUNT(*) INTO @total_org_applications
+    FROM tbl_application
+    WHERE organization_id = p_organization_id
+      AND application_type IN ('new', 'renewal');
+
+    -- Return all as a single row
+    SELECT
+        @total_members AS total_members,
+        @total_approved_events AS total_approved_events,
+        @total_upcoming_events AS total_upcoming_events,
+        @total_post_event_requirements_submitted AS total_post_event_requirements_submitted,
+        @total_event_applications AS total_event_applications,
+        @total_org_applications AS total_org_applications;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetAllApplicationsByOrganization(
+    IN p_organization_id INT
+)
+BEGIN
+    SELECT 
+        a.application_id,
+        a.organization_id,
+        a.cycle_number,
+        a.org_version_id,
+        a.submitted_org_name,
+        a.submitted_org_logo,
+        a.application_type,
+        a.period_id,
+        a.applicant_user_id,
+        u.f_name AS applicant_first_name,
+        u.l_name AS applicant_last_name,
+        u.email AS applicant_email,
+        a.status,
+        a.created_at,
+        a.updated_at
+    FROM tbl_application a
+    LEFT JOIN tbl_user u ON a.applicant_user_id = u.user_id
+    WHERE a.organization_id = p_organization_id
+    ORDER BY a.created_at DESC;
 END$$
 DELIMITER ;
 

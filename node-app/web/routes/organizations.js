@@ -188,4 +188,22 @@ router.get(
     organizationsController.getApprovedOrganizationLogos
 );
 
+router.get(
+    '/organization-dashboard-overview',
+    middleware.validateAzureJWT,
+    organizationsController.getOrganizationDashboardOverview
+);
+
+router.get(
+    '/all-organizations',
+    middleware.validateAzureJWT, // or remove if you want public access
+    organizationsController.getAllOrganizations
+);
+
+router.get(
+    '/all-applications-by-organization',
+    middleware.validateAzureJWT,
+    organizationsController.getAllApplicationsByOrganization
+);
+
 module.exports = router
