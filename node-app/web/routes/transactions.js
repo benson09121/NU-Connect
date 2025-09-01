@@ -10,7 +10,7 @@ const MANAGE = 'MANAGE_TRANSACTIONS';
 router.post(
   '/transactions',
   middleware.validateAzureJWT,
-  middleware.hasPermission([MANAGE]),
+  middleware.hasPermission(['MANAGE_TRANSACTIONS']),
   controller.create
 );
 
@@ -20,6 +20,9 @@ router.put(
   middleware.hasPermission([MANAGE]),
   controller.update
 );
+
+
+
 
 router.post(
   '/transactions/archive',
@@ -61,6 +64,20 @@ router.get(
   middleware.validateAzureJWT,
   middleware.hasPermission([VIEW, MANAGE]),
   controller.getPaymentTypes
+);
+
+router.get(
+  '/financial-categories',
+  middleware.validateAzureJWT,
+  middleware.hasPermission([VIEW, MANAGE]),
+  controller.getFinancialCategories
+);
+
+router.get(
+  '/transactions/:organization_id/files/:filename',
+  middleware.validateAzureJWT,
+  middleware.hasPermission([VIEW, MANAGE]),
+  controller.getTransactionFile
 );
 
 module.exports = router;

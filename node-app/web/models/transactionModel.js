@@ -10,27 +10,26 @@ function firstRowFromSP(rows) {
   return rows;
 }
 
-async function createTransaction(data){
+async function createTransaction(data, proofImagePath = null) {
   const conn = await pool.getConnection();
-  try{
+  try {
     const {
       user_email,
       payer_name,
       payee_name,
-      transaction_type_code='INCOME',
+      transaction_type_code = 'INCOME',
       payment_type_code,
       payment_description,
       amount,
       status,
       transaction_date,
-      proof_image,
-      meta,
+      receipt_no,
+      category_code,
       event_id,
       payer_name_override,
+      event_remarks,
       organization_id,
-      cycle_number,
-      expense_category,
-      reference_doc
+      cycle_number
     } = data;
 
     const [rows] = await conn.query(
@@ -45,14 +44,14 @@ async function createTransaction(data){
         amount,
         status || null,
         transaction_date,
-        proof_image || null,
-        meta ? JSON.stringify(meta) : null,
+        proofImagePath || null,
+        receipt_no || null,
+        category_code || null,
         event_id || null,
         payer_name_override || null,
+        event_remarks || null,
         organization_id || null,
-        cycle_number || null,
-        expense_category || null,
-        reference_doc || null
+        cycle_number || null
       ]
     );
     return firstRowFromSP(rows);
@@ -71,12 +70,12 @@ async function updateTransaction(data){
       amount,
       status,
       proof_image,
-      meta,
+      receipt_no,
+      category_code,
       payer_name,
       payee_name,
       payer_name_override,
-      expense_category,
-      reference_doc
+      event_remarks
     } = data;
 
     const safeProof = (proof_image === undefined || proof_image === '') ? null : proof_image;
@@ -90,35 +89,35 @@ async function updateTransaction(data){
         amount ?? null,
         status ?? null,
         safeProof,
-        meta ? JSON.stringify(meta) : null,
+        receipt_no ?? null,
+        category_code ?? null,
         payer_name ?? null,
         payee_name ?? null,
         payer_name_override ?? null,
-        expense_category ?? null,
-        reference_doc ?? null
+        event_remarks ?? null
       ]
     );
     return firstRowFromSP(rows);
   } finally { conn.release(); }
 }
 
-async function archiveTransaction({ transaction_id, user_email, reason, meta }){
+async function archiveTransaction({ transaction_id, user_email, reason }){
   const conn = await pool.getConnection();
   try{
     const [rows] = await conn.query(
-      'CALL ArchiveTransaction(?,?,?,?);',
-      [transaction_id, user_email, reason || 'No reason provided', meta ? JSON.stringify(meta) : null]
+      'CALL ArchiveTransaction(?,?,?);',
+      [transaction_id, user_email, reason || 'No reason provided']
     );
     return firstRowFromSP(rows);
   } finally { conn.release(); }
 }
 
-async function unarchiveTransaction({ transaction_id, user_email, meta }){
+async function unarchiveTransaction({ transaction_id, user_email }){
   const conn = await pool.getConnection();
   try{
     const [rows] = await conn.query(
-      'CALL UnarchiveTransaction(?,?,?);',
-      [transaction_id, user_email, meta ? JSON.stringify(meta) : null]
+      'CALL UnarchiveTransaction(?,?);',
+      [transaction_id, user_email]
     );
     return firstRowFromSP(rows);
   } finally { conn.release(); }
@@ -139,24 +138,36 @@ async function getTransactions(filters){
     include_archived=false,
     event_id=null,
     organization_id=null,
-    transaction_type_code=null
+    transaction_type_code=null,
+    category_code=null
   } = filters;
   const conn = await pool.getConnection();
   try{
     const [rows] = await conn.query(
-      'CALL GetTransactions(?,?,?,?,?,?);',
+      'CALL GetTransactions(?,?,?,?,?,?,?);',
       [
         user_email || null,
         status || null,
         include_archived ? 1 : 0,
         event_id || null,
         organization_id || null,
-        transaction_type_code || null
+        transaction_type_code || null,
+        category_code || null
       ]
     );
     // list API returns array of rows (keep as array)
     return rows[0] || rows || [];
   } finally { conn.release(); }
+}
+
+async function getTransactionsByOrganization(organization_id) {
+  const conn = await pool.getConnection();
+  try {
+    const [rows] = await conn.query('CALL GetTransactionsByOrganization(?);', [organization_id]);
+    return rows[0];
+  } finally {
+    conn.release();
+  }
 }
 
 async function getTransactionTypes(){
@@ -175,6 +186,14 @@ async function getPaymentTypes(){
   } finally { conn.release(); }
 }
 
+async function getFinancialCategories(){
+  const conn = await pool.getConnection();
+  try{
+    const [rows] = await conn.query('CALL GetFinancialCategories();');
+    return rows[0] || rows || [];
+  } finally { conn.release(); }
+}
+
 module.exports = {
   createTransaction,
   updateTransaction,
@@ -183,5 +202,7 @@ module.exports = {
   getTransaction,
   getTransactions,
   getPaymentTypes,
-  getTransactionTypes
+  getFinancialCategories,
+  getTransactionTypes,
+  getTransactionsByOrganization
 };

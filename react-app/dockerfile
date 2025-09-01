@@ -41,5 +41,10 @@ RUN mkdir -p /usr/share/nginx/html/events && \
     chown -R nginx:nginx /usr/share/nginx/html/events && \
     chmod -R 755 /usr/share/nginx/html/events
 
+# Organizations directory for transactions files
+RUN mkdir -p /usr/share/nginx/html/organizations && \
+    chown -R nginx:nginx /usr/share/nginx/html/organizations && \
+    chmod -R 755 /usr/share/nginx/html/organizations
+
 # Ensure root directory permissions
 RUN chmod -R 755 /usr/share/nginx/html
