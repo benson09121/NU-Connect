@@ -937,6 +937,33 @@ async function getOrganizationDashboardOverview(organization_id) {
     }
 }
 
+async function getAllOrganizations() {
+    const connection = await pool.getConnection();
+    try {
+        // Call the stored procedure with NULL to ignore user filtering
+        const [rows] = await connection.query('CALL GetOrganizations(NULL);');
+        return rows[0];
+    } catch (error) {
+        console.error('Error fetching all organizations:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function getAllApplicationsByOrganization(organization_id) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetAllApplicationsByOrganization(?);', [organization_id]);
+        return rows[0];
+    } catch (error) {
+        console.error('Error fetching applications by organization:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
 module.exports = {
     createOrganizationApplication,
     getSpecificApplication,
@@ -993,5 +1020,7 @@ module.exports = {
     sendApprovalNotification,
     getApprovedOrganizationLogos,
     checkOrgRenewalStatus,
-    getOrganizationDashboardOverview
+    getOrganizationDashboardOverview,
+    getAllOrganizations,
+    getAllApplicationsByOrganization,
 };

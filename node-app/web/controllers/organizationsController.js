@@ -1242,7 +1242,42 @@ async function getOrganizationDashboardOverview(req, res) {
     }
 }
 
+async function getAllOrganizations(req, res) {
+    try {
+        const organizations = await organizationsModel.getAllOrganizations();
+        res.status(200).json(organizations);
+    } catch (error) {
+        res.status(500).json({
+            error: error.message || "An error occurred while fetching all organizations.",
+        });
+    }
+}
 
+async function getAllApplicationsByOrganization(req, res) {
+    try {
+        let organization_id = parseInt(req.query.organization_id);
+        const org_name = req.query.org_name;
+
+        // If org_name is provided, look up organization_id using the model function
+        if (!organization_id && org_name) {
+            organization_id = await organizationsModel.getOrganizationIdByName(org_name);
+            if (!organization_id) {
+                return res.status(404).json({ message: 'Organization not found.' });
+            }
+        }
+
+        if (!organization_id) {
+            return res.status(400).json({ message: 'organization_id or org_name is required.' });
+        }
+
+        const applications = await organizationsModel.getAllApplicationsByOrganization(organization_id);
+        res.status(200).json(applications);
+    } catch (error) {
+        res.status(500).json({
+            error: error.message || "An error occurred while fetching applications by organization.",
+        });
+    }
+}
 
 module.exports = {
     getOrganizations,
@@ -1292,4 +1327,6 @@ module.exports = {
     getApprovedOrganizationLogos,
     checkOrgRenewalStatus,
     getOrganizationDashboardOverview,
+    getAllOrganizations,
+    getAllApplicationsByOrganization,
 };

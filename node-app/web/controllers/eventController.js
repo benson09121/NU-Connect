@@ -8,6 +8,18 @@ const { get } = require('http');
 const Docxtemplater = require('docxtemplater');
 const PizZip = require('pizzip');
 
+function parseCollaboratorsField(event) {
+  if (event && typeof event.collaborators === 'string') {
+    try {
+      event.collaborators = JSON.parse(event.collaborators) || [];
+    } catch {
+      event.collaborators = [];
+    }
+  }
+  if (!Array.isArray(event.collaborators)) event.collaborators = [];
+  return event;
+}
+
 async function addEvent(req, res) {
   try {
     const event = req.body;
@@ -68,7 +80,8 @@ async function saveEventRequirements(req, res) {
 async function getEvents(req, res) {
   const { sessionId } = req.query;
   try {
-    const events = await eventModel.getEvents();
+    let events = await eventModel.getEvents();
+    events = events.map(parseCollaboratorsField);
 
     if (sessionId) {
       subscribeToChannel(sessionId, "events");
@@ -113,10 +126,11 @@ async function getaddEventStatus(req, res){
 async function getEventById(req, res) {
   try {
     const { sessionId, event_id } = req.query;
-    const event = await eventModel.getEventById(event_id);
+    let event = await eventModel.getEventById(event_id);
     if (!event) {
       return res.status(404).json({ message: 'Event not found' });
     }
+    event = parseCollaboratorsField(event);
 
     if (sessionId) {
       const ch = `event_${event_id}`;
@@ -163,7 +177,8 @@ async function getAttendeesbyEventId(req, res) {
 async function getEventsByStatus(req, res) {
   try {
     const status = req.params.status;
-    const events = await eventModel.getEventsByStatus(status);
+    let events = await eventModel.getEventsByStatus(status);
+    events = events.map(parseCollaboratorsField);
     if (events.length === 0) {
       return res.status(404).json({ message: 'No events found with the specified status' });
     }

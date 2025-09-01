@@ -3247,7 +3247,6 @@ BEGIN
 END $$
 DELIMITER ;
 
-
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetEvents()
 BEGIN
@@ -3272,7 +3271,19 @@ BEGIN
         e.status,
         e.type,
         e.user_id,
-        e.created_at
+        e.created_at,
+        -- Collaborators as JSON array
+        (
+            SELECT JSON_ARRAYAGG(
+                JSON_OBJECT(
+                    'organization_id', ec.organization_id,
+                    'organization_name', co.name
+                )
+            )
+            FROM tbl_event_collaborator ec
+            LEFT JOIN tbl_organization co ON ec.organization_id = co.organization_id
+            WHERE ec.event_id = e.event_id
+        ) AS collaborators
     FROM tbl_event e
     LEFT JOIN tbl_organization o ON e.organization_id = o.organization_id
     LEFT JOIN tbl_renewal_cycle rc ON e.organization_id = rc.organization_id AND e.cycle_number = rc.cycle_number;
@@ -3383,7 +3394,18 @@ BEGIN
         e.created_at,
         e.certificate,
         o.name AS organization_name,
-        rc.cycle_number AS renewal_cycle_number
+        rc.cycle_number AS renewal_cycle_number,
+        (
+            SELECT JSON_ARRAYAGG(
+                JSON_OBJECT(
+                    'organization_id', ec.organization_id,
+                    'organization_name', co.name
+                )
+            )
+            FROM tbl_event_collaborator ec
+            LEFT JOIN tbl_organization co ON ec.organization_id = co.organization_id
+            WHERE ec.event_id = e.event_id
+        ) AS collaborators
     FROM tbl_event e
     LEFT JOIN tbl_organization o ON e.organization_id = o.organization_id
     LEFT JOIN tbl_renewal_cycle rc ON e.organization_id = rc.organization_id AND e.cycle_number = rc.cycle_number
@@ -3453,7 +3475,18 @@ BEGIN
             e.status,
             e.type,
             e.user_id,
-            e.created_at
+            e.created_at,
+            (
+                SELECT JSON_ARRAYAGG(
+                    JSON_OBJECT(
+                        'organization_id', ec.organization_id,
+                        'organization_name', co.name
+                    )
+                )
+                FROM tbl_event_collaborator ec
+                LEFT JOIN tbl_organization co ON ec.organization_id = co.organization_id
+                WHERE ec.event_id = e.event_id
+            ) AS collaborators
         FROM tbl_event e
         LEFT JOIN tbl_organization o ON e.organization_id = o.organization_id
         LEFT JOIN tbl_renewal_cycle rc ON e.organization_id = rc.organization_id AND e.cycle_number = rc.cycle_number
@@ -3485,7 +3518,18 @@ BEGIN
             e.status,
             e.type,
             e.user_id,
-            e.created_at
+            e.created_at,
+            (
+                SELECT JSON_ARRAYAGG(
+                    JSON_OBJECT(
+                        'organization_id', ec.organization_id,
+                        'organization_name', co.name
+                    )
+                )
+                FROM tbl_event_collaborator ec
+                LEFT JOIN tbl_organization co ON ec.organization_id = co.organization_id
+                WHERE ec.event_id = e.event_id
+            ) AS collaborators
         FROM tbl_event e
         LEFT JOIN tbl_organization o ON e.organization_id = o.organization_id
         LEFT JOIN tbl_renewal_cycle rc ON e.organization_id = rc.organization_id AND e.cycle_number = rc.cycle_number
@@ -6646,68 +6690,6 @@ BEGIN
     LEFT JOIN tbl_user u ON ers.submitted_by = u.user_id
     WHERE ers.organization_id = p_organization_id
     ORDER BY ers.submitted_at DESC;
-END$$
-DELIMITER ;
-
-DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationDashboardStats(
-    IN p_organization_id INT
-)
-BEGIN
-    DECLARE v_current_cycle INT;
-
-    -- Get current cycle
-    SELECT MAX(cycle_number) INTO v_current_cycle
-    FROM tbl_renewal_cycle
-    WHERE organization_id = p_organization_id;
-
-    -- Total members (excluding executives and committee members)
-    SELECT COUNT(*) INTO @total_members
-    FROM tbl_organization_members om
-    WHERE om.organization_id = p_organization_id
-      AND om.cycle_number = v_current_cycle
-      AND om.member_type = 'Member'
-      AND NOT EXISTS (
-          SELECT 1
-          FROM tbl_committee_members cm
-          JOIN tbl_committee c ON cm.committee_id = c.committee_id
-          WHERE c.organization_id = p_organization_id
-            AND c.cycle_number = v_current_cycle
-            AND cm.user_id = om.user_id
-      );
-
-    -- Total events
-    SELECT COUNT(*) INTO @total_events
-    FROM tbl_event
-    WHERE organization_id = p_organization_id;
-
-    -- Total upcoming events
-    SELECT COUNT(*) INTO @total_upcoming_events
-    FROM tbl_event
-    WHERE organization_id = p_organization_id
-      AND start_date >= CURDATE();
-
-    -- Total post-event reports submitted
-    SELECT COUNT(*) INTO @total_reports
-    FROM tbl_event_requirement_submissions ers
-    JOIN tbl_event_application_requirement ear ON ers.requirement_id = ear.requirement_id
-    WHERE ers.organization_id = p_organization_id
-      AND ear.is_applicable_to = 'post-event';
-
-    -- Total pre-event requirements submitted
-    SELECT COUNT(*) INTO @pre_event_requirements_submitted
-    FROM tbl_event_requirement_submissions ers
-    JOIN tbl_event_application_requirement ear ON ers.requirement_id = ear.requirement_id
-    WHERE ers.organization_id = p_organization_id
-      AND ear.is_applicable_to = 'pre-event';
-
-    -- Return as one row
-    SELECT
-        @total_members AS total_members,
-        @total_events AS total_events,
-        @total_reports AS total_reports,
-        @pre_event_requirements_submitted AS pre_event_requirements_submitted,
-        @total_upcoming_events AS total_upcoming_events;
 END$$
 DELIMITER ;
 
@@ -13465,12 +13447,16 @@ BEGIN
     WHERE organization_id = p_organization_id
       AND status = 'Approved';
 
-    -- Total upcoming events (approved and end_date >= today)
+    -- Total upcoming events (approved and ongoing/upcoming, not completed/past)
     SELECT COUNT(*) INTO @total_upcoming_events
     FROM tbl_event
     WHERE organization_id = p_organization_id
       AND status = 'Approved'
-      AND end_date >= CURDATE();
+      AND (
+            (end_date > CURDATE())
+         OR (end_date = CURDATE() AND end_time >= CURTIME())
+         OR (end_date IS NULL AND start_date >= CURDATE())
+      );
 
     -- Total post-event requirements submitted (approved)
     SELECT COUNT(*) INTO @total_post_event_requirements_submitted
@@ -13485,12 +13471,11 @@ BEGIN
     FROM tbl_event_application
     WHERE organization_id = p_organization_id;
 
-    -- Total organization applications (new and renewal, both rejected and approved)
+    -- Total organization applications (all statuses, new and renewal)
     SELECT COUNT(*) INTO @total_org_applications
     FROM tbl_application
     WHERE organization_id = p_organization_id
-      AND application_type IN ('new', 'renewal')
-      AND status IN ('Approved', 'Rejected');
+      AND application_type IN ('new', 'renewal');
 
     -- Return all as a single row
     SELECT
@@ -13500,6 +13485,34 @@ BEGIN
         @total_post_event_requirements_submitted AS total_post_event_requirements_submitted,
         @total_event_applications AS total_event_applications,
         @total_org_applications AS total_org_applications;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetAllApplicationsByOrganization(
+    IN p_organization_id INT
+)
+BEGIN
+    SELECT 
+        a.application_id,
+        a.organization_id,
+        a.cycle_number,
+        a.org_version_id,
+        a.submitted_org_name,
+        a.submitted_org_logo,
+        a.application_type,
+        a.period_id,
+        a.applicant_user_id,
+        u.f_name AS applicant_first_name,
+        u.l_name AS applicant_last_name,
+        u.email AS applicant_email,
+        a.status,
+        a.created_at,
+        a.updated_at
+    FROM tbl_application a
+    LEFT JOIN tbl_user u ON a.applicant_user_id = u.user_id
+    WHERE a.organization_id = p_organization_id
+    ORDER BY a.created_at DESC;
 END$$
 DELIMITER ;
 
