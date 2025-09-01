@@ -1,5 +1,7 @@
 const transactionModel = require('../models/transactionModel');
 const { publishToChannel, subscribeToChannel } = require('./sseController');
+const path = require('path');
+const fs = require('fs');
 
 function unwrapSPResult(row) {
   if (row == null) return null;
@@ -11,72 +13,77 @@ function unwrapSPResult(row) {
   return row;
 }
 
-async function create(req,res){
-  try{
-    // Accept both snake_case and camelCase
+async function create(req, res) {
+  try {
     const {
-      transaction_type_code = req.body.transactionTypeCode || 'INCOME',
-      payment_type_code = req.body.paymentTypeCode,
-      payment_description = req.body.paymentDescription,
-      amount = req.body.amount,
-      status = req.body.status,
-      transaction_date = req.body.transactionDate,
-      payer_name = req.body.payerName,
-      payee_name = req.body.payeeName,
-      event_id = req.body.eventId,
-      payer_name_override = req.body.payerNameOverride,
-      organization_id = req.body.organizationId,
-      cycle_number = req.body.cycleNumber,
-      proof_image = req.body.proofImage,
-      expense_category = req.body.expenseCategory,
-      reference_doc = req.body.referenceDoc
-    } = req.body;
-
-    const missing = [];
-    if(!payment_type_code) missing.push('payment_type_code');
-    if(!payment_description) missing.push('payment_description');
-    if(amount == null || amount === '') missing.push('amount');
-    if(!transaction_date) missing.push('transaction_date');
-    if(transaction_type_code === 'EXPENSE' && !expense_category) missing.push('expense_category');
-    if(missing.length) return res.status(400).json({ message:'Missing required fields', missing });
-
-    const raw = await transactionModel.createTransaction({
-      user_email: req.user?.email || null,
-      payer_name: transaction_type_code === 'INCOME' ? (payer_name || null) : null,
-      payee_name: transaction_type_code === 'EXPENSE' ? (payee_name || null) : null,
+      payer_name,
+      payee_name,
       transaction_type_code,
       payment_type_code,
       payment_description,
-      amount: Number(amount),
+      amount,
       status,
       transaction_date,
-      proof_image: proof_image || null,
-      meta:{ origin:'web', action:'create' },
-      event_id: transaction_type_code === 'INCOME' ? (event_id || null) : null,
-      payer_name_override: transaction_type_code === 'INCOME' ? (payer_name_override || null) : null,
-      organization_id: transaction_type_code === 'INCOME' ? (organization_id || null) : null,
-      cycle_number: transaction_type_code === 'INCOME' ? (cycle_number || null) : null,
-      expense_category: transaction_type_code === 'EXPENSE' ? (expense_category || null) : null,
-      reference_doc: transaction_type_code === 'EXPENSE' ? (reference_doc || null) : null
-    });
+      receipt_no,
+      category_code,
+      event_id,
+      payer_name_override,
+      event_remarks,
+      organization_id,
+      cycle_number
+    } = req.body;
 
-    const payload = unwrapSPResult(raw);
-
-    // Publish real-time event
-    try {
-      publishToChannel('transactions', {
-        operation: 'CREATE',
-        data: payload,
-        user: req.user?.email || null,
-        timestamp: new Date()
-      });
-    } catch (pubErr) {
-      console.warn('[transactions.create] publish error:', pubErr.message);
+    // Handle file upload (proof_image)
+    let proofImagePath = null;
+    if (req.files && req.files.proof_image) {
+      const file = req.files.proof_image;
+      const ext = path.extname(file.name).toLowerCase();
+      const safeName = `proof-${Date.now()}${ext}`;
+      const orgDir = path.join('/app/organizations', String(organization_id), 'transactions');
+      if (!fs.existsSync(orgDir)) fs.mkdirSync(orgDir, { recursive: true });
+      proofImagePath = path.join(orgDir, safeName);
+      fs.writeFileSync(proofImagePath, file.data);
     }
 
-    res.status(201).json(payload);
-  } catch(e){
+    const txn = await transactionModel.createTransaction({
+      user_email: req.user?.email || null,
+      payer_name,
+      payee_name,
+      transaction_type_code,
+      payment_type_code,
+      payment_description,
+      amount,
+      status,
+      transaction_date,
+      receipt_no, // can be blank/null, SP will generate if needed
+      category_code,
+      event_id,
+      payer_name_override,
+      event_remarks,
+      organization_id,
+      cycle_number
+    }, proofImagePath);
+
+    // Real-time publish
+    publishToChannel('transactions', { type: 'created', data: txn });
+    if (txn && txn.transaction_id) {
+      publishToChannel(`transactions:${txn.transaction_id}`, { type: 'created', data: txn });
+    }
+
+    res.status(201).json(txn);
+  } catch (e) {
     console.error('[transactions.create]', e);
+    res.status(500).json({ message: e.sqlMessage || e.message });
+  }
+}
+
+async function getByOrganization(req, res) {
+  try {
+    const { organization_id } = req.query;
+    if (!organization_id) return res.status(400).json({ message: 'organization_id is required' });
+    const txns = await transactionModel.getTransactionsByOrganization(organization_id);
+    res.json(txns);
+  } catch (e) {
     res.status(500).json({ message: e.sqlMessage || e.message });
   }
 }
@@ -89,11 +96,12 @@ async function update(req,res){
       amount,
       status,
       proof_image,
+      receipt_no,
+      category_code,
       payer_name,
       payee_name,
       payer_name_override,
-      expense_category,
-      reference_doc
+      event_remarks
     } = req.body;
     if(!transaction_id) return res.status(400).json({ message:'transaction_id required' });
 
@@ -104,12 +112,12 @@ async function update(req,res){
       amount,
       status,
       proof_image,
-      meta:{ origin:'web', action:'update' },
+      receipt_no,
+      category_code,
       payer_name,
       payee_name,
       payer_name_override,
-      expense_category,
-      reference_doc
+      event_remarks
     });
 
     const payload = unwrapSPResult(raw);
@@ -140,8 +148,7 @@ async function archive(req,res){
     const raw = await transactionModel.archiveTransaction({
       transaction_id,
       user_email: req.user.email,
-      reason,
-      meta:{ origin:'web', action:'archive' }
+      reason
     });
 
     const payload = unwrapSPResult(raw);
@@ -171,8 +178,7 @@ async function unarchive(req,res){
     if(!transaction_id) return res.status(400).json({ message:'transaction_id required' });
     const raw = await transactionModel.unarchiveTransaction({
       transaction_id,
-      user_email: req.user.email,
-      meta:{ origin:'web', action:'unarchive' }
+      user_email: req.user.email
     });
 
     const payload = unwrapSPResult(raw);
@@ -224,6 +230,7 @@ async function list(req,res){
       event_id,
       organization_id,
       transaction_type_code,
+      category_code,
       sessionId
     } = req.query;
 
@@ -238,7 +245,8 @@ async function list(req,res){
       include_archived: include_archived === 'true',
       event_id: event_id ? Number(event_id) : null,
       organization_id: organization_id ? Number(organization_id) : null,
-      transaction_type_code: transaction_type_code || null
+      transaction_type_code: transaction_type_code || null,
+      category_code: category_code || null
     });
     res.json(rows);
   } catch(e){
@@ -267,6 +275,39 @@ async function getPaymentTypes(req,res){
   }
 }
 
+async function getFinancialCategories(req,res){
+  try{
+    const rows = await transactionModel.getFinancialCategories();
+    res.json(rows);
+  } catch(e){
+    console.error('[transactions.getFinancialCategories]', e);
+    res.status(500).json({ message: e.sqlMessage || e.message });
+  }
+}
+
+async function getTransactionFile(req, res) {
+  try {
+    const { organization_id, filename } = req.params;
+    
+    if (!organization_id || !filename) {
+      return res.status(400).json({ message: 'Organization ID and filename are required' });
+    }
+
+    // Security: validate filename to prevent directory traversal
+    if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
+      return res.status(400).json({ message: 'Invalid filename' });
+    }
+
+    // Use NGINX internal redirect for protected file serving
+    const protectedPath = `/protected-transactions/${organization_id}/transactions/${filename}`;
+    res.set('X-Accel-Redirect', protectedPath);
+    res.end();
+  } catch (e) {
+    console.error('[transactions.getTransactionFile]', e);
+    res.status(500).json({ message: e.message });
+  }
+}
+
 module.exports = {
   create,
   update,
@@ -275,5 +316,7 @@ module.exports = {
   getOne,
   list,
   getPaymentTypes,
-  getTransactionTypes
+  getFinancialCategories,
+  getTransactionTypes,
+  getTransactionFile
 };
