@@ -1758,18 +1758,18 @@ BEGIN
                     'logo', orgs.logo,
                     'status', orgs.status,
                     'organization_id', orgs.organization_id,
-                    'current_org_version_id', orgs.current_org_version_id
+                    'current_org_version_id', orgs.current_org_version_id,
+                    'cycle_number', orgs.cycle_number
                 ))
                 FROM (
-
-
-                    SELECT o.name, o.logo, o.status, o.organization_id, o.current_org_version_id
+                    SELECT o.name, o.logo, o.status, o.organization_id, o.current_org_version_id, rc.cycle_number
                     FROM tbl_organization o
+                    JOIN tbl_renewal_cycle rc ON o.organization_id = rc.organization_id
                     WHERE o.adviser_id = u.user_id
 
                     UNION
 
-                    SELECT o.name, o.logo, o.status, o.organization_id, o.current_org_version_id
+                    SELECT o.name, o.logo, o.status, o.organization_id, o.current_org_version_id, rc.cycle_number
                     FROM tbl_organization_members om
                     JOIN tbl_renewal_cycle rc ON om.organization_id = rc.organization_id 
                         AND om.cycle_number = rc.cycle_number
