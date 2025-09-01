@@ -401,6 +401,18 @@ async function createEventApplication(req, res) {
     const event = JSON.parse(req.body.event);
     const requirements = JSON.parse(req.body.requirements);
     const publicationImage = req.files?.publicationImage;
+    let collaborators = [];
+
+    // Accept collaborators from body if provided
+    if (req.body.collaborators) {
+      try {
+        collaborators = typeof req.body.collaborators === 'string'
+          ? JSON.parse(req.body.collaborators)
+          : req.body.collaborators;
+      } catch {
+        collaborators = [];
+      }
+    }
 
     let applicant_user_id = req.user?.user_id;
 
@@ -459,7 +471,8 @@ async function createEventApplication(req, res) {
       cycle_number,
       applicant_user_id,
       event,
-      requirementFilePaths
+      requirementFilePaths,
+      collaborators // <-- pass collaborators
     );
 
     const orgDir = path.join('/app/organizations', String(dbResult[0].organization_name), String(dbResult[0].cycle_number), 'events', String(dbResult[0].event_id));

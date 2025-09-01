@@ -17,6 +17,12 @@ async function addRequirement(req, res) {
     let filename = null;
     if (req.files && req.files.template) {
       const uploadedFile = req.files.template;
+      console.log('Raw uploaded file details:', {
+        name: uploadedFile.name,
+        size: uploadedFile.size,
+        mimetype: uploadedFile.mimetype
+      });
+      
       const requirementsDir = '/app/requirements';
       if (!fs.existsSync(requirementsDir)) fs.mkdirSync(requirementsDir, { recursive: true });
 
@@ -29,6 +35,7 @@ async function addRequirement(req, res) {
       }
 
       const baseName = path.basename(uploadedFile.name, ext).replace(/[^a-zA-Z0-9_\-\.]/g, '_');
+      console.log('Processed filename components:', { originalName: uploadedFile.name, ext, baseName });
       filename = `requirement-${Date.now()}-${baseName}${ext}`;
       fs.writeFileSync(path.join(requirementsDir, filename), uploadedFile.data);
     }
@@ -103,7 +110,9 @@ async function getRequirements(req, res) {
 async function downloadTemplate(req, res) {
   try {
     const raw = req.query.template_name;
-    console.log('[downloadTemplate] raw query:', raw);
+    const view = req.query.view === '1' || req.query.view === 'true';
+    console.log('[downloadTemplate] raw query:', raw, 'view:', view);
+
     if (!raw) return res.status(400).json({ message: 'template_name is required' });
 
     const template_name = decodeURIComponent(raw);
@@ -125,12 +134,33 @@ async function downloadTemplate(req, res) {
 
     const userFilename = template_name.replace(/^requirement-\d+-?/, '');
 
+    // Use X-Accel for NGINX if enabled
     if (process.env.USE_X_ACCEL === '1') {
-      res.setHeader('Content-Disposition', `attachment; filename="${userFilename}"`);
+      res.setHeader(
+        'Content-Disposition',
+        view
+          ? `inline; filename="${userFilename}"`
+          : `attachment; filename="${userFilename}"`
+      );
       res.setHeader('X-Accel-Redirect', `/protected-requirements/${template_name}`);
       return res.end();
     }
 
+    // For direct serving, set Content-Disposition based on view param
+    if (view) {
+      res.setHeader('Content-Disposition', `inline; filename="${userFilename}"`);
+      // Optionally set Content-Type based on file extension
+      const ext = path.extname(userFilename).toLowerCase();
+      const mimeTypes = {
+        '.pdf': 'application/pdf',
+        '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        '.doc': 'application/msword',
+        '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        '.xls': 'application/vnd.ms-excel',
+        '.txt': 'text/plain'
+      };
+      if (mimeTypes[ext]) res.setHeader('Content-Type', mimeTypes[ext]);
+    }
     return res.download(filePath, userFilename, (err) => {
       if (err) {
         console.error('[downloadTemplate] download error:', err);
@@ -220,7 +250,23 @@ async function updateRequirement(req, res) {
         }
       }
       const uploadedFile = req.files.template;
-      newFileName = `requirement-${Date.now()}-${uploadedFile.name}`;
+      console.log('Update - Raw uploaded file details:', {
+        name: uploadedFile.name,
+        size: uploadedFile.size,
+        mimetype: uploadedFile.mimetype
+      });
+      
+      const ext = path.extname(uploadedFile.name).toLowerCase();
+      console.log('Update - Uploaded file extension:', ext);
+
+      const allowed = ['.pdf', '.docx', '.xlsx', '.doc', '.xls', '.txt'];
+      if (!allowed.includes(ext)) {
+        return res.status(400).json({ message: 'Invalid file type. Allowed: pdf, docx, xlsx, doc, xls, txt' });
+      }
+
+      const baseName = path.basename(uploadedFile.name, ext).replace(/[^a-zA-Z0-9_\-\.]/g, '_');
+      console.log('Update - Processed filename components:', { originalName: uploadedFile.name, ext, baseName });
+      newFileName = `requirement-${Date.now()}-${baseName}${ext}`;
       fs.writeFileSync(path.join('/app/requirements', newFileName), uploadedFile.data);
     }
 
@@ -467,7 +513,16 @@ async function addEventRequirement(req, res) {
       const requirementsDir = '/app/requirements';
       if (!fs.existsSync(requirementsDir)) fs.mkdirSync(requirementsDir, { recursive: true });
 
-      filename = `requirement-${Date.now()}-${uploadedFile.name}`;
+      const ext = path.extname(uploadedFile.name).toLowerCase();
+      console.log('Event req - Uploaded file extension:', ext);
+
+      const allowed = ['.pdf', '.docx', '.xlsx', '.doc', '.xls', '.txt'];
+      if (!allowed.includes(ext)) {
+        return res.status(400).json({ message: 'Invalid file type. Allowed: pdf, docx, xlsx, doc, xls, txt' });
+      }
+
+      const baseName = path.basename(uploadedFile.name, ext).replace(/[^a-zA-Z0-9_\-\.]/g, '_');
+      filename = `requirement-${Date.now()}-${baseName}${ext}`;
       const savePath = path.join(requirementsDir, filename);
       try {
         fs.writeFileSync(savePath, uploadedFile.data);
@@ -537,7 +592,18 @@ async function batchUpdateEventRequirements(req, res) {
 
       if (req.files && req.files[fileKey]) {
         const uploadedFile = req.files[fileKey];
-        filename = `requirement-${Date.now()}-${uploadedFile.name}`;
+        
+        const ext = path.extname(uploadedFile.name).toLowerCase();
+        console.log('Batch ADD - Uploaded file extension:', ext);
+
+        const allowed = ['.pdf', '.docx', '.xlsx', '.doc', '.xls', '.txt'];
+        if (!allowed.includes(ext)) {
+          console.error(`Invalid file type for ADD item: ${ext}. Allowed: pdf, docx, xlsx, doc, xls, txt`);
+          continue;
+        }
+
+        const baseName = path.basename(uploadedFile.name, ext).replace(/[^a-zA-Z0-9_\-\.]/g, '_');
+        filename = `requirement-${Date.now()}-${baseName}${ext}`;
         const savePath = path.join(requirementsDir, filename);
         try {
           fs.writeFileSync(savePath, uploadedFile.data);
@@ -581,6 +647,15 @@ async function batchUpdateEventRequirements(req, res) {
 
       if (req.files && req.files[fileKey]) {
         const uploadedFile = req.files[fileKey];
+        
+        const ext = path.extname(uploadedFile.name).toLowerCase();
+        console.log('Batch UPDATE - Uploaded file extension:', ext);
+
+        const allowed = ['.pdf', '.docx', '.xlsx', '.doc', '.xls', '.txt'];
+        if (!allowed.includes(ext)) {
+          console.error(`Invalid file type for UPDATE item: ${ext}. Allowed: pdf, docx, xlsx, doc, xls, txt`);
+          continue;
+        }
 
         if (currentRequirement.file_path) {
           const oldFilePath = path.join(requirementsDir, currentRequirement.file_path);
@@ -591,7 +666,8 @@ async function batchUpdateEventRequirements(req, res) {
           }
         }
 
-        const filename = `requirement-${Date.now()}-${uploadedFile.name}`;
+        const baseName = path.basename(uploadedFile.name, ext).replace(/[^a-zA-Z0-9_\-\.]/g, '_');
+        const filename = `requirement-${Date.now()}-${baseName}${ext}`;
         const savePath = path.join(requirementsDir, filename);
         try {
           fs.writeFileSync(savePath, uploadedFile.data);

@@ -221,18 +221,20 @@ async function createEventApplication(
   cycle_number,
   applicant_user_id,
   event,
-  requirements
+  requirements,
+  collaborators // <-- new param
 ) {
   const connection = await pool.getConnection();
   try {
     const [result] = await connection.query(
-      'CALL CreateEventApplication(?, ?, ?, ?, ?);',
+      'CALL CreateEventApplication(?, ?, ?, ?, ?, ?);',
       [
         organization_id,
         cycle_number,
         applicant_user_id,
         JSON.stringify(event),
-        JSON.stringify(requirements)
+        JSON.stringify(requirements),
+        collaborators ? JSON.stringify(collaborators) : null
       ]
     );
     return result[0];

@@ -5244,7 +5244,8 @@ CREATE DEFINER='admin'@'%' PROCEDURE CreateEventApplication(
     IN p_cycle_number INT,
     IN p_applicant_user_id VARCHAR(200),
     IN p_event JSON,
-    IN p_requirements JSON
+    IN p_requirements JSON,
+    IN p_collaborators JSON -- <-- NEW PARAMETER, can be null
 )
 BEGIN
     DECLARE v_event_application_id INT;
@@ -5259,6 +5260,9 @@ BEGIN
     DECLARE v_organization_name VARCHAR(100);
     DECLARE v_cycle_number INT;
 
+    DECLARE v_collab_count INT DEFAULT 0;
+    DECLARE v_collab_org_id INT;
+
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
         ROLLBACK;
@@ -5272,14 +5276,13 @@ BEGIN
     FROM tbl_organization
     WHERE organization_id = p_organization_id;
 
-    
-        -- Get current president for the organization
-        SELECT cycle_number INTO v_cycle_number
-        FROM tbl_renewal_cycle
-        WHERE organization_id = p_organization_id
-        ORDER BY cycle_number DESC
-        LIMIT 1;
-        
+    -- Get current president for the organization
+    SELECT cycle_number INTO v_cycle_number
+    FROM tbl_renewal_cycle
+    WHERE organization_id = p_organization_id
+    ORDER BY cycle_number DESC
+    LIMIT 1;
+
     -- Create event record
     INSERT INTO tbl_event (
         organization_id,
@@ -5333,6 +5336,20 @@ BEGIN
 
     SET v_event_id = LAST_INSERT_ID();
 
+    -- Insert collaborators if provided
+    IF p_collaborators IS NOT NULL AND JSON_LENGTH(p_collaborators) > 0 THEN
+        SET v_collab_count = JSON_LENGTH(p_collaborators);
+        SET i = 0;
+        WHILE i < v_collab_count DO
+            SET v_collab_org_id = CAST(JSON_UNQUOTE(JSON_EXTRACT(p_collaborators, CONCAT('$[', i, ']'))) AS UNSIGNED);
+            IF v_collab_org_id IS NOT NULL THEN
+                INSERT IGNORE INTO tbl_event_collaborator (event_id, organization_id)
+                VALUES (v_event_id, v_collab_org_id);
+            END IF;
+            SET i = i + 1;
+        END WHILE;
+    END IF;
+
     -- Create event application record
     INSERT INTO tbl_event_application (
         organization_id,
@@ -5353,25 +5370,24 @@ BEGIN
     -- Handle requirements
     SET v_requirement_count = JSON_LENGTH(p_requirements);
     SET i = 0;
-    
     WHILE i < v_requirement_count DO
         BEGIN
             DECLARE v_requirement_exists TINYINT(1);
-            
+
             SET v_req_id = CAST(JSON_UNQUOTE(JSON_EXTRACT(p_requirements, CONCAT('$[', i, '].requirement_id'))) AS UNSIGNED);
             SET v_file_path = JSON_UNQUOTE(JSON_EXTRACT(p_requirements, CONCAT('$[', i, '].file_path')));
-            
+
             -- Validate requirement exists
             SELECT EXISTS(
                 SELECT 1 FROM tbl_event_application_requirement 
                 WHERE requirement_id = v_req_id
             ) INTO v_requirement_exists;
-            
+
             IF NOT v_requirement_exists THEN
                 SET v_error_msg = CONCAT('Invalid requirement ID: ', v_req_id);
                 SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = v_error_msg;
             END IF;
-            
+
             -- Store requirement submission
             INSERT INTO tbl_event_requirement_submissions (
                 event_id,
