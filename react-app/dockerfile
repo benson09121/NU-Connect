@@ -20,7 +20,6 @@ RUN mkdir -p /usr/share/nginx/html/.well-known && \
 # Copy Microsoft verification file with explicit permissions
 COPY --chown=nginx:nginx microsoft-identity-association.json /usr/share/nginx/html/.well-known/
 
-
 # Optional certificates directory setup
 RUN mkdir -p /usr/share/nginx/html/certificates && \
     chown -R nginx:nginx /usr/share/nginx/html/certificates && \
@@ -40,6 +39,11 @@ RUN mkdir -p /usr/share/nginx/html/applications && \
 RUN mkdir -p /usr/share/nginx/html/events && \
     chown -R nginx:nginx /usr/share/nginx/html/events && \
     chmod -R 755 /usr/share/nginx/html/events
+
+# Organizations directory for transactions files
+RUN mkdir -p /usr/share/nginx/html/organizations && \
+    chown -R nginx:nginx /usr/share/nginx/html/organizations && \
+    chmod -R 755 /usr/share/nginx/html/organizations
 
 # Ensure root directory permissions
 RUN chmod -R 755 /usr/share/nginx/html

@@ -38,4 +38,18 @@ router.delete(
     programsController.deleteProgram
 );
 
+router.post(
+    '/programs/archive',
+    middleware.validateAzureJWT,
+    middleware.hasPermission("MANAGE_PROGRAMS"),
+    programsController.archiveProgram
+);
+
+router.post(
+    '/programs/unarchive',
+    middleware.validateAzureJWT,
+    middleware.hasPermission("MANAGE_PROGRAMS"),
+    programsController.unarchiveProgram
+);
+
 module.exports = router;

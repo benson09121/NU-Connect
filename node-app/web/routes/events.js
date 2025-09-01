@@ -137,4 +137,11 @@ router.get(
   eventController.checkAllPostEventRequirementsSubmitted
 );
 
+router.get(
+  '/event-applications/publication-image',
+  middleware.validateAzureJWT,
+  middleware.hasPermission("VIEW_EVENT"),
+  eventController.getEventApplicationPublicationImage
+);
+
 module.exports = router;
