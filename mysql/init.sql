@@ -4758,34 +4758,65 @@ END $$
 DELIMITER ;
 
 DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationUsers(IN p_org_name VARCHAR(255))
+CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationUsers(
+  IN p_organization_id INT,
+  IN p_org_version_id INT
+)
 BEGIN
-SELECT DISTINCT
-    u.user_id,
-    u.email,
-    u.f_name,
-    u.l_name,
-    p.name AS program_name,
-    COALESCE(er.role_title, 'Member') as role,
+  DECLARE v_cycle_number INT;
 
-    (om.member_type = 'Executive') AS is_executive,
+  -- Find the cycle that is explicitly linked to the provided org_version_id
+  SELECT rc.cycle_number
+    INTO v_cycle_number
+  FROM tbl_renewal_cycle rc
+  WHERE rc.organization_id = p_organization_id
+    AND rc.org_version_id = p_org_version_id
+  ORDER BY rc.cycle_number DESC
+  LIMIT 1;
 
-    EXISTS (
-        SELECT 1
-        FROM tbl_committee_members cm
-        JOIN tbl_committee c ON cm.committee_id = c.committee_id
-        WHERE cm.user_id = u.user_id
-          AND c.organization_id = o.organization_id
-          AND c.cycle_number = om.cycle_number
-    ) AS is_committee
-FROM tbl_user u
-JOIN tbl_organization_members om ON u.user_id = om.user_id
-JOIN tbl_organization o ON om.organization_id = o.organization_id
-LEFT JOIN tbl_executive_role er ON om.executive_role_id = er.executive_role_id
-LEFT JOIN tbl_program p ON u.program_id = p.program_id
-WHERE o.name = p_org_name
-  AND om.status = 'Active'
-ORDER BY u.f_name, u.l_name;
+  -- If no cycle is found for that version, return an empty result (correct columns, no rows)
+  IF v_cycle_number IS NULL THEN
+    SELECT 
+      CAST(NULL AS CHAR(200)) AS user_id,
+      CAST(NULL AS CHAR(100)) AS email,
+      CAST(NULL AS CHAR(50))  AS f_name,
+      CAST(NULL AS CHAR(50))  AS l_name,
+      CAST(NULL AS CHAR(200)) AS program_name,
+      CAST(NULL AS CHAR(100)) AS role,
+      CAST(NULL AS UNSIGNED)  AS is_executive,
+      CAST(NULL AS UNSIGNED)  AS is_committee
+    WHERE 1 = 0;
+  ELSE
+    SELECT DISTINCT
+        u.user_id,
+        u.email,
+        u.f_name,
+        u.l_name,
+        p.name AS program_name,
+        COALESCE(er.role_title, 'Member') AS role,
+        (om.member_type = 'Executive') AS is_executive,
+        EXISTS (
+            SELECT 1
+            FROM tbl_committee_members cm
+            JOIN tbl_committee c 
+              ON cm.committee_id = c.committee_id
+            WHERE cm.user_id = u.user_id
+              AND c.organization_id = om.organization_id
+              AND c.cycle_number = om.cycle_number
+        ) AS is_committee
+    FROM tbl_user u
+    JOIN tbl_organization_members om 
+      ON u.user_id = om.user_id
+     AND om.organization_id = p_organization_id
+     AND om.cycle_number   = v_cycle_number
+    LEFT JOIN tbl_executive_role er 
+      ON om.executive_role_id = er.executive_role_id
+    LEFT JOIN tbl_program p 
+      ON u.program_id = p.program_id
+    WHERE om.status = 'Active'
+      AND u.status  = 'Active'
+    ORDER BY u.f_name, u.l_name;
+  END IF;
 END$$
 DELIMITER ;
 
@@ -6745,13 +6776,76 @@ END$$
 DELIMITER ;
 
 DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationDashboardStats(
+    IN p_organization_id INT
+)
+BEGIN
+    DECLARE v_current_cycle INT;
+
+    -- Get current cycle
+    SELECT MAX(cycle_number) INTO v_current_cycle
+    FROM tbl_renewal_cycle
+    WHERE organization_id = p_organization_id;
+
+    -- Total members (excluding executives and committee members)
+    SELECT COUNT(*) INTO @total_members
+    FROM tbl_organization_members om
+    WHERE om.organization_id = p_organization_id
+      AND om.cycle_number = v_current_cycle
+      AND om.member_type = 'Member'
+      AND NOT EXISTS (
+          SELECT 1
+          FROM tbl_committee_members cm
+          JOIN tbl_committee c ON cm.committee_id = c.committee_id
+          WHERE c.organization_id = p_organization_id
+            AND c.cycle_number = v_current_cycle
+            AND cm.user_id = om.user_id
+      );
+
+    -- Total events
+    SELECT COUNT(*) INTO @total_events
+    FROM tbl_event
+    WHERE organization_id = p_organization_id;
+
+    -- Total upcoming events
+    SELECT COUNT(*) INTO @total_upcoming_events
+    FROM tbl_event
+    WHERE organization_id = p_organization_id
+      AND start_date >= CURDATE();
+
+    -- Total post-event reports submitted
+    SELECT COUNT(*) INTO @total_reports
+    FROM tbl_event_requirement_submissions ers
+    JOIN tbl_event_application_requirement ear ON ers.requirement_id = ear.requirement_id
+    WHERE ers.organization_id = p_organization_id
+      AND ear.is_applicable_to = 'post-event';
+
+    -- Total pre-event requirements submitted
+    SELECT COUNT(*) INTO @pre_event_requirements_submitted
+    FROM tbl_event_requirement_submissions ers
+    JOIN tbl_event_application_requirement ear ON ers.requirement_id = ear.requirement_id
+    WHERE ers.organization_id = p_organization_id
+      AND ear.is_applicable_to = 'pre-event';
+
+    -- Return as one row
+    SELECT
+        @total_members AS total_members,
+        @total_events AS total_events,
+        @total_reports AS total_reports,
+        @pre_event_requirements_submitted AS pre_event_requirements_submitted,
+        @total_upcoming_events AS total_upcoming_events;
+END$$
+DELIMITER ;
+
+DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE CreateExecutiveMember(
     IN p_organization_id INT,
     IN p_email VARCHAR(100),
     IN p_program_name VARCHAR(200),
     IN p_role_title VARCHAR(100),
     IN p_rank_level INT,
-    IN p_action_by_email VARCHAR(100)
+    IN p_action_by_email VARCHAR(100),
+    IN p_organization_version_id INT
 )
 BEGIN
     DECLARE v_action_by_user_id VARCHAR(200);
@@ -6905,7 +6999,7 @@ BEGIN
     -- Log the action
     INSERT INTO tbl_logs (
         user_id, 
-        action, 
+        action_type, 
         type, 
         meta_data,
         timestamp
@@ -6952,7 +7046,8 @@ CREATE DEFINER='admin'@'%' PROCEDURE UpdateExecutiveMember(
     IN p_program_name VARCHAR(200),
     IN p_role_title VARCHAR(100),
     IN p_rank_level INT,
-    IN p_action_by_email VARCHAR(100)
+    IN p_action_by_email VARCHAR(100),
+    IN p_org_version_id INT
 )
 BEGIN
     DECLARE v_user_id VARCHAR(200);
@@ -7065,7 +7160,7 @@ BEGIN
     -- Log the action
     INSERT INTO tbl_logs (
         user_id,
-        action,
+        action_type,
         type,
         meta_data,
         timestamp
@@ -7206,7 +7301,7 @@ BEGIN
     -- Log the action
     INSERT INTO tbl_logs (
         user_id,
-        action,
+        action_type,
         type,
         meta_data,
         timestamp
@@ -7236,7 +7331,7 @@ DELIMITER ;
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE CreateCommittee(
-    IN p_org_name VARCHAR(100),
+    IN p_org_id INT,
     IN p_committee_name VARCHAR(100),
     IN p_description TEXT,
     IN p_action_by_email VARCHAR(100)
@@ -7248,29 +7343,30 @@ BEGIN
     DECLARE v_new_committee_id INT;
 
 
-    SET @org_id = (SELECT organization_id FROM tbl_organization WHERE name = p_org_name);
-    SET @current_cycle = (
-        SELECT MAX(cycle_number)
-        FROM tbl_renewal_cycle
-        WHERE organization_id = @org_id
-    );
+    DECLARE v_current_cycle INT;
+
+    -- Get current cycle for the organization
+    SELECT MAX(cycle_number) INTO v_current_cycle
+    FROM tbl_renewal_cycle
+    WHERE organization_id = p_org_id;
+
     -- Validate organization exists and is active
     SELECT COUNT(*) INTO v_organization_exists 
     FROM tbl_organization 
-    WHERE organization_id = @org_id
+    WHERE organization_id = p_org_id
     AND status IN ('Approved', 'Renewal');
-    
+
     IF v_organization_exists = 0 THEN
         SIGNAL SQLSTATE '45000' 
         SET MESSAGE_TEXT = 'Organization not found or not active';
     END IF;
-    
+
     SELECT COUNT(*) INTO v_committee_exists
     FROM tbl_committee
-    WHERE organization_id = @org_id
-    AND cycle_number = @current_cycle
+    WHERE organization_id = p_org_id
+    AND cycle_number = v_current_cycle
     AND name = p_committee_name;
-    
+
     IF v_committee_exists > 0 THEN
         SIGNAL SQLSTATE '45000' 
         SET MESSAGE_TEXT = 'Committee with this name already exists';
@@ -7292,18 +7388,18 @@ BEGIN
         name,
         description
     ) VALUES (
-        @org_id,
-        @current_cycle,
+        p_org_id,
+        v_current_cycle,
         p_committee_name,
         p_description
     );
-    
+
     SET v_new_committee_id = LAST_INSERT_ID();
 
     -- Log the action
     INSERT INTO tbl_logs (
         user_id, 
-        action, 
+        action_type, 
         type, 
         meta_data,
         timestamp
@@ -7312,14 +7408,14 @@ BEGIN
         CONCAT('Created committee: ', p_committee_name),
         'committee_creation',
         JSON_OBJECT(
-            'organization_id', @org_id,
-            'cycle_number', @current_cycle,
+            'organization_id', p_org_id,
+            'cycle_number', v_current_cycle,
             'committee_id', v_new_committee_id,
             'committee_name', p_committee_name
         ),
         CURRENT_TIMESTAMP
     );
-    
+
     -- Return the new committee ID
     SELECT
         c.committee_id as id,
@@ -7400,7 +7496,7 @@ BEGIN
     -- Log the action
     INSERT INTO tbl_logs (
         user_id, 
-        action, 
+        action_type, 
         type, 
         meta_data,
         timestamp
@@ -7557,7 +7653,7 @@ BEGIN
     -- Log the action
     INSERT INTO tbl_logs (
         user_id, 
-        action, 
+        action_type, 
         type, 
         meta_data,
         timestamp
@@ -7735,26 +7831,26 @@ DELIMITER ;
         SET v_new_member_id = LAST_INSERT_ID();
 
         -- Log the action
-        INSERT INTO tbl_logs (
-            user_id, 
-            action, 
-            type, 
-            meta_data,
-            timestamp
-        ) VALUES (
-            v_action_by_user_id,
-            CONCAT('Added member to committee: ', 
-                (SELECT name FROM tbl_committee WHERE committee_id = p_committee_id)),
-            'committee_member_add',
-            JSON_OBJECT(
-                'committee_id', p_committee_id,
-                'user_id', v_user_id,
-                'role', p_role,
-                'organization_id', v_organization_id,
-                'cycle_number', v_cycle_number
-            ),
-            CURRENT_TIMESTAMP
-        );
+            INSERT INTO tbl_logs (
+                user_id, 
+                action_type, 
+                type, 
+                meta_data,
+                timestamp
+            ) VALUES (
+                v_action_by_user_id,
+                CONCAT('Added member to committee: ', 
+                    (SELECT name FROM tbl_committee WHERE committee_id = p_committee_id)),
+                'committee_member_add',
+                JSON_OBJECT(
+                    'committee_id', p_committee_id,
+                    'user_id', v_user_id,
+                    'role', p_role,
+                    'organization_id', v_organization_id,
+                    'cycle_number', v_cycle_number
+                ),
+                CURRENT_TIMESTAMP
+            );
         
         SELECT 
             c.committee_id,
@@ -8069,7 +8165,8 @@ DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE UpdateCommitteeMember(
     IN p_committee_member_id INT,
     IN p_new_role ENUM('Committee Head', 'Committee Officer'),
-    IN p_action_by_email VARCHAR(100)
+    IN p_action_by_email VARCHAR(100),
+    IN p_new_committee_id INT
 )
 BEGIN
     DECLARE v_action_by_user_id VARCHAR(200);
@@ -8098,25 +8195,27 @@ BEGIN
         SET MESSAGE_TEXT = 'Committee member not found';
     END IF;
 
-    -- Update the role
+    -- Update the committee and role
     UPDATE tbl_committee_members
-    SET role = p_new_role
+    SET committee_id = p_new_committee_id,
+        role = p_new_role
     WHERE committee_member_id = p_committee_member_id;
 
     -- Log the action
     INSERT INTO tbl_logs (
         user_id,
-        action,
+        action_type,
         type,
         meta_data,
         timestamp
     ) VALUES (
         v_action_by_user_id,
-        CONCAT('Updated committee member role: ', v_user_id, ' in committee ', v_committee_id, ' from ', v_old_role, ' to ', p_new_role),
+        CONCAT('Updated committee member: ', v_user_id, ' moved from committee ', v_committee_id, ' to ', p_new_committee_id, ' and role from ', v_old_role, ' to ', p_new_role),
         'committee_member_update',
         JSON_OBJECT(
             'committee_member_id', p_committee_member_id,
-            'committee_id', v_committee_id,
+            'old_committee_id', v_committee_id,
+            'new_committee_id', p_new_committee_id,
             'user_id', v_user_id,
             'old_role', v_old_role,
             'new_role', p_new_role
@@ -8222,14 +8321,13 @@ BEGIN
     JOIN tbl_user u ON cm.user_id = u.user_id
     LEFT JOIN tbl_program p ON u.program_id = p.program_id
     WHERE cm.committee_member_id = p_committee_member_id;
-
     DELETE FROM tbl_committee_members
     WHERE committee_member_id = p_committee_member_id;
 
     -- Log the action
     INSERT INTO tbl_logs (
         user_id,
-        action,
+        action_type,
         type,
         meta_data,
         timestamp
@@ -8596,30 +8694,24 @@ DELIMITER ;
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetSingleOrganizationMember(
      IN p_member_id INT,
-     IN p_org_name VARCHAR(100) 
+     IN p_org_id INT
 )
 BEGIN
-
-SET @org_id = (SELECT organization_id FROM tbl_organization WHERE name = p_org_name);
-    
-    SET @current_cycle = (
-        SELECT MAX(cycle_number)
-        FROM tbl_renewal_cycle
-        WHERE organization_id = @org_id
-    );
+    DECLARE v_current_cycle INT;
+    SELECT MAX(cycle_number) INTO v_current_cycle FROM tbl_renewal_cycle WHERE organization_id = p_org_id;
     SELECT 
-                om.member_id as id,
-                u.f_name as first_name,
-                u.l_name as last_name,
-                u.email,
-                om.joined_at,
-                om.user_id as user
-            FROM tbl_organization_members om
-            JOIN tbl_user u ON om.user_id = u.user_id
-            WHERE om.organization_id = @org_id
-                AND om.cycle_number = @current_cycle
-                AND om.status = 'Active'
-                AND om.member_id = p_member_id;
+        om.member_id as id,
+        u.f_name as first_name,
+        u.l_name as last_name,
+        u.email,
+        om.joined_at,
+        om.user_id as user
+    FROM tbl_organization_members om
+    JOIN tbl_user u ON om.user_id = u.user_id
+    WHERE om.organization_id = p_org_id
+        AND om.cycle_number = v_current_cycle
+        AND om.status = 'Active'
+        AND om.member_id = p_member_id;
 END$$
 DELIMITER ;
 
@@ -8670,7 +8762,10 @@ DELIMITER ;
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE ArchiveOrganizationMember(
     IN p_member_id INT,
-    IN p_archived_by_email VARCHAR(100)
+    IN p_archived_by_email VARCHAR(100),
+    IN p_reason VARCHAR(255),
+    IN p_org_id INT,
+    IN p_org_version_id INT
 )
 BEGIN
     DECLARE v_archived_by VARCHAR(200);
@@ -8681,7 +8776,7 @@ BEGIN
     DECLARE v_executive_role_id INT;
     DECLARE v_committee_id INT;
     DECLARE v_committee_role ENUM('Committee Head', 'Committee Officer');
-
+	
     -- Get user_id of the archiver
     SELECT user_id INTO v_archived_by
     FROM tbl_user
@@ -8717,6 +8812,34 @@ BEGIN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'Organization member not found';
     END IF;
+    SELECT cycle_number INTO v_cycle_number
+    FROM tbl_renewal_cycle
+    WHERE org_version_id = p_org_version_id;
+
+    SELECT 
+        om.member_id as id,
+        u.f_name as first_name,
+        u.l_name as last_name,
+        u.email,
+        om.joined_at
+    FROM tbl_organization_members om
+    JOIN tbl_user u ON om.user_id = u.user_id
+    WHERE om.organization_id = p_org_id
+        AND om.cycle_number = v_cycle_number
+        -- Only include Active members
+        AND om.status = 'Active'
+        -- Exclude Executive members
+        AND om.member_type != 'Executive'
+        -- Exclude Committee members
+        AND om.member_id = p_member_id
+        AND NOT EXISTS (
+            SELECT 1
+            FROM tbl_committee_members cm
+            JOIN tbl_committee c ON cm.committee_id = c.committee_id
+            WHERE c.organization_id = p_org_id
+                AND c.cycle_number = v_cycle_number
+                AND cm.user_id = om.user_id
+        );
 
     -- Archive the member
     INSERT INTO tbl_archived_organization_members (
@@ -8750,7 +8873,7 @@ BEGIN
     -- Log the action
     INSERT INTO tbl_logs (
         user_id,
-        action,
+        action_type,
         type,
         meta_data,
         timestamp
@@ -8764,12 +8887,14 @@ BEGIN
             'cycle_number', v_cycle_number,
             'user_id', v_user_id,
             'member_type', v_member_type,
-            'executive_role_id', v_executive_role_id
+            'executive_role_id', v_executive_role_id,
+            'reason', p_reason
         ),
         CURRENT_TIMESTAMP
     );
 END$$
 DELIMITER ;
+
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetPrograms()
@@ -12481,17 +12606,13 @@ END$$
 DELIMITER ;
 
 DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationFinance(IN p_organization_id INT )
-
+CREATE DEFINER=`admin`@`%` PROCEDURE `GetOrganizationFinance`(IN p_organization_id INT)
 BEGIN
-  -- Ensure long JSON strings can be built
-  
+  -- Avoid JSON truncation
+
 
   DECLARE v_today DATE DEFAULT CURDATE();
   DECLARE v_curr_month_start DATE DEFAULT DATE_SUB(v_today, INTERVAL DAY(v_today)-1 DAY);
-  DECLARE v_curr_month_end   DATE DEFAULT LAST_DAY(v_today);
-  DECLARE v_prev_month_start DATE DEFAULT DATE_SUB(v_curr_month_start, INTERVAL 1 MONTH);
-  DECLARE v_prev_month_end   DATE DEFAULT LAST_DAY(v_prev_month_start);
 
   WITH RECURSIVE
   -- Organizations in scope
@@ -12502,7 +12623,7 @@ BEGIN
     WHERE o.status IN ('Approved','Renewal')
       AND (p_organization_id IS NULL OR o.organization_id = p_organization_id)
   ),
-  -- Current cycle (AY) per org
+  -- Latest cycle per org
   cycles AS (
     SELECT rc.organization_id, rc.cycle_number, rc.start_date AS cycle_start_date
     FROM tbl_renewal_cycle rc
@@ -12513,7 +12634,7 @@ BEGIN
     ) x ON x.organization_id = rc.organization_id AND x.max_cycle = rc.cycle_number
     WHERE rc.organization_id IN (SELECT organization_id FROM orgs)
   ),
-  -- Unified transactions bound to organizations (membership + event-linked), Completed only
+  -- Unified org-bound transactions (membership + event), Completed only
   org_tx AS (
     SELECT
       t.transaction_id,
@@ -12545,24 +12666,212 @@ BEGIN
     WHERE t.status = 'Completed'
       AND e.organization_id IS NOT NULL
   ),
-  -- This month and last month sums per org
-  sums_mtd_by_org AS (
-    SELECT
-      ot.organization_id,
-      SUM(CASE WHEN ot.tcode = 'INCOME' AND ot.transaction_date BETWEEN v_curr_month_start AND v_curr_month_end THEN ot.amount ELSE 0 END) AS income_mtd,
-      SUM(CASE WHEN ot.tcode = 'EXPENSE' AND ot.transaction_date BETWEEN v_curr_month_start AND v_curr_month_end THEN ot.amount ELSE 0 END) AS expense_mtd
-    FROM org_tx ot
-    GROUP BY ot.organization_id
+  -- Month grid (cycle-aligned) up to current calendar month
+  org_months AS (
+    SELECT c.organization_id,
+           DATE_SUB(c.cycle_start_date, INTERVAL DAY(c.cycle_start_date)-1 DAY) AS month_start,
+           c.cycle_number
+    FROM cycles c
+    UNION ALL
+    SELECT organization_id, DATE_ADD(month_start, INTERVAL 1 MONTH), cycle_number
+    FROM org_months
+    WHERE month_start < v_curr_month_start
   ),
-  sums_prev_by_org AS (
+  -- Monthly income/expense per org (cycle-aligned)
+  monthly_flow AS (
     SELECT
-      ot.organization_id,
-      SUM(CASE WHEN ot.tcode = 'INCOME' AND ot.transaction_date BETWEEN v_prev_month_start AND v_prev_month_end THEN ot.amount ELSE 0 END) AS income_prev,
-      SUM(CASE WHEN ot.tcode = 'EXPENSE' AND ot.transaction_date BETWEEN v_prev_month_start AND v_prev_month_end THEN ot.amount ELSE 0 END) AS expense_prev
-    FROM org_tx ot
-    GROUP BY ot.organization_id
+      om.organization_id,
+      om.month_start,
+      SUM(CASE WHEN ot.tcode = 'INCOME' AND ot.cycle_number = om.cycle_number THEN ot.amount ELSE 0 END) AS income_month,
+      SUM(CASE WHEN ot.tcode = 'EXPENSE' AND ot.cycle_number = om.cycle_number THEN ot.amount ELSE 0 END) AS expense_month
+    FROM org_months om
+    LEFT JOIN org_tx ot
+      ON ot.organization_id = om.organization_id
+     AND ot.transaction_date BETWEEN om.month_start AND LAST_DAY(om.month_start)
+    GROUP BY om.organization_id, om.month_start
   ),
-  -- Members (current cycle only)
+  -- Add monthly net and running balance (funds)
+  monthly_bal AS (
+    SELECT
+      mf.organization_id,
+      mf.month_start,
+      COALESCE(mf.income_month,0) AS income_month,
+      COALESCE(mf.expense_month,0) AS expense_month,
+      (COALESCE(mf.income_month,0) - COALESCE(mf.expense_month,0)) AS net_month,
+      SUM(COALESCE(mf.income_month,0) - COALESCE(mf.expense_month,0))
+        OVER (PARTITION BY mf.organization_id ORDER BY mf.month_start
+              ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS balance_to_month
+    FROM monthly_flow mf
+  ),
+
+  -- Use the last available month per-org (continuous running balance)
+  org_last_month AS (
+    SELECT organization_id, MAX(month_start) AS last_month_start
+    FROM monthly_bal
+    GROUP BY organization_id
+  ),
+  curr_by_org AS (
+    SELECT
+      mb.organization_id,
+      mb.income_month     AS income_this_month,
+      mb.expense_month    AS expense_this_month,
+      mb.net_month        AS net_this_month,
+      mb.balance_to_month AS funds_this_month
+    FROM monthly_bal mb
+    JOIN org_last_month lm
+      ON lm.organization_id = mb.organization_id
+     AND lm.last_month_start = mb.month_start
+  ),
+  prev_by_org AS (
+    SELECT
+      mb.organization_id,
+      mb.income_month     AS income_last_month,
+      mb.expense_month    AS expense_last_month,
+      mb.net_month        AS net_last_month,
+      mb.balance_to_month AS funds_last_month
+    FROM monthly_bal mb
+    JOIN org_last_month lm
+      ON lm.organization_id = mb.organization_id
+     AND mb.month_start = DATE_SUB(lm.last_month_start, INTERVAL 1 MONTH)
+  ),
+  -- JSON arrays per org (include running funds)
+  cash_flow_json_by_org AS (
+    SELECT
+      mb.organization_id,
+      CONCAT(
+        '[',
+        IFNULL(GROUP_CONCAT(
+          JSON_OBJECT(
+            'month', DATE_FORMAT(mb.month_start, '%Y-%m'),
+            'income', COALESCE(mb.income_month,0),
+            'expense', COALESCE(mb.expense_month,0),
+            'net', COALESCE(mb.net_month,0),
+            'funds', COALESCE(mb.balance_to_month,0)
+          )
+          ORDER BY mb.month_start SEPARATOR ','
+        ), ''),
+        ']'
+      ) AS cash_flow_over_time
+    FROM monthly_bal mb
+    GROUP BY mb.organization_id
+  ),
+  -- Event revenue per event (within current cycle to today)
+  event_sums AS (
+    SELECT
+      e.organization_id,
+      e.event_id,
+      e.title,
+      SUM(CASE WHEN tt.code = 'INCOME' THEN t.amount ELSE 0 END) AS income_event,
+      SUM(CASE WHEN tt.code = 'EXPENSE' THEN t.amount ELSE 0 END) AS expense_event
+    FROM tbl_event e
+    JOIN orgs o ON o.organization_id = e.organization_id
+    JOIN cycles c ON c.organization_id = e.organization_id AND c.cycle_number = e.cycle_number
+    LEFT JOIN tbl_transaction_event te ON te.event_id = e.event_id
+    LEFT JOIN tbl_transaction t ON t.transaction_id = te.transaction_id AND t.status = 'Completed'
+    LEFT JOIN tbl_transaction_type tt ON tt.transaction_type_id = t.transaction_type_id
+    WHERE e.start_date BETWEEN c.cycle_start_date AND v_today
+    GROUP BY e.organization_id, e.event_id, e.title
+  ),
+  event_revenue_json_by_org AS (
+    SELECT
+      es.organization_id,
+      CONCAT(
+        '[',
+        IFNULL(GROUP_CONCAT(
+          JSON_OBJECT(
+            'event_id', es.event_id,
+            'title', es.title,
+            'income', COALESCE(es.income_event,0),
+            'expense', COALESCE(es.expense_event,0),
+            'net', COALESCE(es.income_event,0) - COALESCE(es.expense_event,0)
+          )
+          ORDER BY (COALESCE(es.income_event,0) - COALESCE(es.expense_event,0)) DESC, es.title SEPARATOR ','
+        ), ''),
+        ']'
+      ) AS event_revenue
+    FROM event_sums es
+    GROUP BY es.organization_id
+  ),
+  -- Global monthly sums (across orgs)
+  global_monthly_flow AS (
+    SELECT
+      month_start,
+      SUM(income_month)  AS income_sum,
+      SUM(expense_month) AS expense_sum
+    FROM monthly_flow
+    GROUP BY month_start
+  ),
+  global_monthly_bal AS (
+    SELECT
+      gmf.month_start,
+      COALESCE(gmf.income_sum,0)  AS income_sum,
+      COALESCE(gmf.expense_sum,0) AS expense_sum,
+      (COALESCE(gmf.income_sum,0) - COALESCE(gmf.expense_sum,0)) AS net_sum,
+      SUM(COALESCE(gmf.income_sum,0) - COALESCE(gmf.expense_sum,0))
+        OVER (ORDER BY gmf.month_start ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS funds_to_month
+    FROM global_monthly_flow gmf
+  ),
+  -- Global JSONs
+  global_cash_flow_json AS (
+    SELECT CONCAT(
+             '[',
+             IFNULL(GROUP_CONCAT(
+               JSON_OBJECT(
+                 'month', DATE_FORMAT(gb.month_start, '%Y-%m'),
+                 'income', COALESCE(gb.income_sum,0),
+                 'expense', COALESCE(gb.expense_sum,0),
+                 'net', COALESCE(gb.net_sum,0),
+                 'funds', COALESCE(gb.funds_to_month,0)
+               )
+               ORDER BY gb.month_start SEPARATOR ','
+             ), ''),
+             ']'
+           ) AS cash_flow_over_time
+    FROM global_monthly_bal gb
+  ),
+  global_event_revenue_json AS (
+    SELECT CONCAT(
+             '[',
+             IFNULL(GROUP_CONCAT(
+               JSON_OBJECT(
+                 'event_id', es.event_id,
+                 'title', es.title,
+                 'income', COALESCE(es.income_event,0),
+                 'expense', COALESCE(es.expense_event,0),
+                 'net', COALESCE(es.income_event,0) - COALESCE(es.expense_event,0)
+               )
+               ORDER BY (COALESCE(es.income_event,0) - COALESCE(es.expense_event,0)) DESC, es.title SEPARATOR ','
+             ), ''),
+             ']'
+           ) AS event_revenue
+    FROM event_sums es
+  ),
+  -- Global snapshots use last available month
+  global_last_month AS (
+    SELECT MAX(month_start) AS last_month_start
+    FROM global_monthly_bal
+  ),
+  global_curr AS (
+    SELECT
+      gb.income_sum     AS income_this_month,
+      gb.expense_sum    AS expense_this_month,
+      gb.net_sum        AS net_this_month,
+      gb.funds_to_month AS funds_this_month
+    FROM global_monthly_bal gb
+    JOIN global_last_month lm
+      ON gb.month_start = lm.last_month_start
+  ),
+  global_prev AS (
+    SELECT
+      gb.income_sum     AS income_last_month,
+      gb.expense_sum    AS expense_last_month,
+      gb.net_sum        AS net_last_month,
+      gb.funds_to_month AS funds_last_month
+    FROM global_monthly_bal gb
+    JOIN global_last_month lm
+      ON gb.month_start = DATE_SUB(lm.last_month_start, INTERVAL 1 MONTH)
+  ),
+  -- Membership aggregates
   members_total_by_org AS (
     SELECT om.organization_id, COUNT(DISTINCT om.user_id) AS members_total
     FROM tbl_organization_members om
@@ -12580,137 +12889,6 @@ BEGIN
     JOIN orgs o ON o.organization_id = tm.organization_id
     GROUP BY tm.organization_id
   ),
-  -- Event revenue per event (within current cycle)
-  event_sums AS (
-    SELECT
-      e.organization_id,
-      e.event_id,
-      e.title,
-      SUM(CASE WHEN tt.code = 'INCOME' THEN t.amount ELSE 0 END) AS income_event,
-      SUM(CASE WHEN tt.code = 'EXPENSE' THEN t.amount ELSE 0 END) AS expense_event
-    FROM tbl_event e
-    JOIN orgs o ON o.organization_id = e.organization_id
-    JOIN cycles c ON c.organization_id = e.organization_id AND c.cycle_number = e.cycle_number
-    LEFT JOIN tbl_transaction_event te ON te.event_id = e.event_id
-    LEFT JOIN tbl_transaction t ON t.transaction_id = te.transaction_id AND t.status = 'Completed'
-    LEFT JOIN tbl_transaction_type tt ON tt.transaction_type_id = t.transaction_type_id
-    WHERE e.start_date BETWEEN c.cycle_start_date AND v_today
-    GROUP BY e.organization_id, e.event_id, e.title
-  ),
-  -- Monthly series per org aligned to current cycle (first day of month)
-  org_months AS (
-    SELECT c.organization_id,
-           DATE_SUB(c.cycle_start_date, INTERVAL DAY(c.cycle_start_date)-1 DAY) AS month_start,
-           c.cycle_number
-    FROM cycles c
-    UNION ALL
-    SELECT organization_id, DATE_ADD(month_start, INTERVAL 1 MONTH), cycle_number
-    FROM org_months
-    WHERE month_start < v_curr_month_start
-  ),
-  monthly_flow AS (
-    SELECT
-      om.organization_id,
-      om.month_start,
-      SUM(CASE WHEN ot.tcode = 'INCOME' AND ot.cycle_number = om.cycle_number THEN ot.amount ELSE 0 END) AS income_month,
-      SUM(CASE WHEN ot.tcode = 'EXPENSE' AND ot.cycle_number = om.cycle_number THEN ot.amount ELSE 0 END) AS expense_month
-    FROM org_months om
-    LEFT JOIN org_tx ot
-      ON ot.organization_id = om.organization_id
-     AND ot.transaction_date BETWEEN om.month_start AND LAST_DAY(om.month_start)
-    GROUP BY om.organization_id, om.month_start
-  ),
-  -- Build JSON strings via GROUP_CONCAT (ordered)
-  cash_flow_json_by_org AS (
-    SELECT
-      mf.organization_id,
-      CONCAT(
-        '[',
-        IFNULL(GROUP_CONCAT(
-          JSON_OBJECT(
-            'month', DATE_FORMAT(mf.month_start, '%Y-%m'),
-            'income', mf.income_month,
-            'expense', mf.expense_month,
-            'net', mf.income_month - mf.expense_month
-          )
-          ORDER BY mf.month_start SEPARATOR ','
-        ), ''),
-        ']'
-      ) AS cash_flow_over_time
-    FROM monthly_flow mf
-    GROUP BY mf.organization_id
-  ),
-  event_revenue_json_by_org AS (
-    SELECT
-      es.organization_id,
-      CONCAT(
-        '[',
-        IFNULL(GROUP_CONCAT(
-          JSON_OBJECT(
-            'event_id', es.event_id,
-            'title', es.title,
-            'income', es.income_event,
-            'expense', es.expense_event,
-            'net', es.income_event - es.expense_event
-          )
-          ORDER BY (es.income_event - es.expense_event) DESC, es.title SEPARATOR ','
-        ), ''),
-        ']'
-      ) AS event_revenue
-    FROM event_sums es
-    GROUP BY es.organization_id
-  ),
-  -- Global totals (all organizations)
-  totals_mtd_all AS (
-    SELECT COALESCE(SUM(income_mtd),0) AS income_mtd_sum,
-           COALESCE(SUM(expense_mtd),0) AS expense_mtd_sum
-    FROM sums_mtd_by_org
-  ),
-  totals_prev_all AS (
-    SELECT COALESCE(SUM(income_prev),0) AS income_prev_sum,
-           COALESCE(SUM(expense_prev),0) AS expense_prev_sum
-    FROM sums_prev_by_org
-  ),
-  global_monthly_flow AS (
-    SELECT month_start,
-           SUM(income_month) AS income_sum,
-           SUM(expense_month) AS expense_sum
-    FROM monthly_flow
-    GROUP BY month_start
-  ),
-  global_cash_flow_json AS (
-    SELECT CONCAT(
-             '[',
-             IFNULL(GROUP_CONCAT(
-               JSON_OBJECT(
-                 'month', DATE_FORMAT(gmf.month_start, '%Y-%m'),
-                 'income', gmf.income_sum,
-                 'expense', gmf.expense_sum,
-                 'net', gmf.income_sum - gmf.expense_sum
-               )
-               ORDER BY gmf.month_start SEPARATOR ','
-             ), ''),
-             ']'
-           ) AS cash_flow_over_time
-    FROM global_monthly_flow gmf
-  ),
-  global_event_revenue_json AS (
-    SELECT CONCAT(
-             '[',
-             IFNULL(GROUP_CONCAT(
-               JSON_OBJECT(
-                 'event_id', ev.event_id,
-                 'title', ev.title,
-                 'income', ev.income_event,
-                 'expense', ev.expense_event,
-                 'net', ev.income_event - ev.expense_event
-               )
-               ORDER BY (ev.income_event - ev.expense_event) DESC, ev.title SEPARATOR ','
-             ), ''),
-             ']'
-           ) AS event_revenue
-    FROM event_sums ev
-  ),
   membership_agg_all AS (
     SELECT
       COALESCE(SUM(mt.members_total),0) AS total_members,
@@ -12721,9 +12899,8 @@ BEGIN
     FROM orgs o
     LEFT JOIN members_total_by_org mt ON mt.organization_id = o.organization_id
     LEFT JOIN members_paid_by_org  mp ON mp.organization_id = o.organization_id
-    WHERE o.membership_fee_type <> 'Free'
   ),
-  -- SDAO (org_id IS NULL) aggregates
+  -- SDAO (events without org)
   sdao_tx AS (
     SELECT
       t.transaction_id,
@@ -12738,57 +12915,81 @@ BEGIN
     WHERE t.status = 'Completed'
       AND e.organization_id IS NULL
   ),
-  sdao_mtd AS (
-    SELECT
-      SUM(CASE WHEN tcode = 'INCOME' AND transaction_date BETWEEN v_curr_month_start AND v_curr_month_end THEN amount ELSE 0 END) AS income_mtd,
-      SUM(CASE WHEN tcode = 'EXPENSE' AND transaction_date BETWEEN v_curr_month_start AND v_curr_month_end THEN amount ELSE 0 END) AS expense_mtd
-    FROM sdao_tx
-  ),
-  sdao_prev AS (
-    SELECT
-      SUM(CASE WHEN tcode = 'INCOME' AND transaction_date BETWEEN v_prev_month_start AND v_prev_month_end THEN amount ELSE 0 END) AS income_prev,
-      SUM(CASE WHEN tcode = 'EXPENSE' AND transaction_date BETWEEN v_prev_month_start AND v_prev_month_end THEN amount ELSE 0 END) AS expense_prev
-    FROM sdao_tx
-  ),
-  sdao_start AS (
-    SELECT COALESCE(
-             DATE_SUB(MIN(transaction_date), INTERVAL DAY(MIN(transaction_date))-1 DAY),
-             v_curr_month_start
-           ) AS start_month
-    FROM sdao_tx
-  ),
   sdao_series AS (
-    SELECT start_month AS month_start FROM sdao_start
+    SELECT
+      COALESCE(
+        DATE_SUB(MIN(transaction_date), INTERVAL DAY(MIN(transaction_date)) - 1 DAY),
+        v_curr_month_start
+      ) AS month_start
+    FROM sdao_tx
+  ),
+  sdao_months AS (
+    SELECT month_start FROM sdao_series
     UNION ALL
     SELECT DATE_ADD(month_start, INTERVAL 1 MONTH)
-    FROM sdao_series
+    FROM sdao_months
     WHERE month_start < v_curr_month_start
   ),
   sdao_monthly AS (
     SELECT
-      ss.month_start,
-      SUM(CASE WHEN st.tcode = 'INCOME' AND st.transaction_date BETWEEN ss.month_start AND LAST_DAY(ss.month_start) THEN st.amount ELSE 0 END) AS income_sum,
-      SUM(CASE WHEN st.tcode = 'EXPENSE' AND st.transaction_date BETWEEN ss.month_start AND LAST_DAY(ss.month_start) THEN st.amount ELSE 0 END) AS expense_sum
-    FROM sdao_series ss
+      sm.month_start,
+      SUM(CASE WHEN st.tcode = 'INCOME'  AND st.transaction_date BETWEEN sm.month_start AND LAST_DAY(sm.month_start) THEN st.amount ELSE 0 END) AS income_sum,
+      SUM(CASE WHEN st.tcode = 'EXPENSE' AND st.transaction_date BETWEEN sm.month_start AND LAST_DAY(sm.month_start) THEN st.amount ELSE 0 END) AS expense_sum
+    FROM sdao_months sm
     LEFT JOIN sdao_tx st
-      ON st.transaction_date BETWEEN ss.month_start AND LAST_DAY(ss.month_start)
-    GROUP BY ss.month_start
+      ON st.transaction_date BETWEEN sm.month_start AND LAST_DAY(sm.month_start)
+    GROUP BY sm.month_start
+  ),
+  sdao_monthly_bal AS (
+    SELECT
+      sm.month_start,
+      COALESCE(sm.income_sum,0)  AS income_sum,
+      COALESCE(sm.expense_sum,0) AS expense_sum,
+      (COALESCE(sm.income_sum,0) - COALESCE(sm.expense_sum,0)) AS net_sum,
+      SUM(COALESCE(sm.income_sum,0) - COALESCE(sm.expense_sum,0))
+        OVER (ORDER BY sm.month_start ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS funds_to_month
+    FROM sdao_monthly sm
+  ),
+  sdao_last_month AS (
+    SELECT MAX(month_start) AS last_month_start
+    FROM sdao_monthly_bal
+  ),
+  sdao_curr AS (
+    SELECT
+      sb.income_sum     AS income_this_month,
+      sb.expense_sum    AS expense_this_month,
+      sb.net_sum        AS net_this_month,
+      sb.funds_to_month AS funds_this_month
+    FROM sdao_monthly_bal sb
+    JOIN sdao_last_month lm
+      ON sb.month_start = lm.last_month_start
+  ),
+  sdao_prev AS (
+    SELECT
+      sb.income_sum     AS income_last_month,
+      sb.expense_sum    AS expense_last_month,
+      sb.net_sum        AS net_last_month,
+      sb.funds_to_month AS funds_last_month
+    FROM sdao_monthly_bal sb
+    JOIN sdao_last_month lm
+      ON sb.month_start = DATE_SUB(lm.last_month_start, INTERVAL 1 MONTH)
   ),
   sdao_cash_flow_json AS (
     SELECT CONCAT(
              '[',
              IFNULL(GROUP_CONCAT(
                JSON_OBJECT(
-                 'month', DATE_FORMAT(sm.month_start, '%Y-%m'),
-                 'income', sm.income_sum,
-                 'expense', sm.expense_sum,
-                 'net', sm.income_sum - sm.expense_sum
+                 'month', DATE_FORMAT(sb.month_start, '%Y-%m'),
+                 'income', COALESCE(sb.income_sum,0),
+                 'expense', COALESCE(sb.expense_sum,0),
+                 'net', COALESCE(sb.net_sum,0),
+                 'funds', COALESCE(sb.funds_to_month,0)
                )
-               ORDER BY sm.month_start SEPARATOR ','
+               ORDER BY sb.month_start SEPARATOR ','
              ), ''),
              ']'
            ) AS cash_flow_over_time
-    FROM sdao_monthly sm
+    FROM sdao_monthly_bal sb
   ),
   sdao_event_sums AS (
     SELECT
@@ -12810,73 +13011,77 @@ BEGIN
                JSON_OBJECT(
                  'event_id', es.event_id,
                  'title', es.title,
-                 'income', es.income,
-                 'expense', es.expense,
-                 'net', es.income - es.expense
+                 'income', COALESCE(es.income,0),
+                 'expense', COALESCE(es.expense,0),
+                 'net', COALESCE(es.income,0) - COALESCE(es.expense,0)
                )
-               ORDER BY (es.income - es.expense) DESC, es.title SEPARATOR ','
+               ORDER BY (COALESCE(es.income,0) - COALESCE(es.expense,0)) DESC, es.title SEPARATOR ','
              ), ''),
              ']'
            ) AS event_revenue
     FROM sdao_event_sums es
   )
+
   SELECT *
   FROM (
-    -- All Organizations row (-1)
+    -- All Organizations (aggregated)
     SELECT
       -1 AS organization_id,
       'All Organizations' AS organization_name,
       NULL AS cycle_number,
 
-      (tm.income_mtd_sum - tm.expense_mtd_sum) AS funds_this_month,
-      (tp.income_prev_sum - tp.expense_prev_sum) AS funds_last_month,
-      ((tm.income_mtd_sum - tm.expense_mtd_sum) - (tp.income_prev_sum - tp.expense_prev_sum)) AS funds_change_amount,
-      CASE WHEN (tp.income_prev_sum - tp.expense_prev_sum) = 0 THEN NULL
-           ELSE ROUND(100 * (((tm.income_mtd_sum - tm.expense_mtd_sum) - (tp.income_prev_sum - tp.expense_prev_sum)) / (tp.income_prev_sum - tp.expense_prev_sum)), 2)
+      gc.funds_this_month,
+      gp.funds_last_month,
+      (gc.funds_this_month - gp.funds_last_month) AS funds_change_amount,
+      CASE WHEN gp.funds_last_month = 0 THEN NULL
+           ELSE ROUND(100 * ((gc.funds_this_month - gp.funds_last_month) / ABS(gp.funds_last_month)), 2)
       END AS funds_change_percent,
       CASE
-        WHEN ((tm.income_mtd_sum - tm.expense_mtd_sum) - (tp.income_prev_sum - tp.expense_prev_sum)) > 0 THEN 'Increase'
-        WHEN ((tm.income_mtd_sum - tm.expense_mtd_sum) - (tp.income_prev_sum - tp.expense_prev_sum)) < 0 THEN 'Decrease'
+        WHEN (gc.funds_this_month - gp.funds_last_month) > 0 THEN 'Increase'
+        WHEN (gc.funds_this_month - gp.funds_last_month) < 0 THEN 'Decrease'
         ELSE 'No change'
       END AS funds_change_status,
 
-      tm.income_mtd_sum AS income_this_month,
-      tp.income_prev_sum AS income_last_month,
-      (tm.income_mtd_sum - tp.income_prev_sum) AS income_change_amount,
-      CASE WHEN tp.income_prev_sum = 0 THEN NULL ELSE ROUND(100 * ((tm.income_mtd_sum - tp.income_prev_sum)/tp.income_prev_sum), 2) END AS income_change_percent,
+      gc.income_this_month,
+      gp.income_last_month,
+      (gc.income_this_month - gp.income_last_month) AS income_change_amount,
+      CASE WHEN gp.income_last_month = 0 THEN NULL
+           ELSE ROUND(100 * ((gc.income_this_month - gp.income_last_month) / ABS(gp.income_last_month)), 2)
+      END AS income_change_percent,
       CASE
-        WHEN (tm.income_mtd_sum - tp.income_prev_sum) > 0 THEN 'Increase'
-        WHEN (tm.income_mtd_sum - tp.income_prev_sum) < 0 THEN 'Decrease'
+        WHEN (gc.income_this_month - gp.income_last_month) > 0 THEN 'Increase'
+        WHEN (gc.income_this_month - gp.income_last_month) < 0 THEN 'Decrease'
         ELSE 'No change'
       END AS income_change_status,
 
-      tm.expense_mtd_sum AS expense_this_month,
-      tp.expense_prev_sum AS expense_last_month,
-      (tm.expense_mtd_sum - tp.expense_prev_sum) AS expense_change_amount,
-      CASE WHEN tp.expense_prev_sum = 0 THEN NULL ELSE ROUND(100 * ((tm.expense_mtd_sum - tp.expense_prev_sum)/tp.expense_prev_sum), 2) END AS expense_change_percent,
+      gc.expense_this_month,
+      gp.expense_last_month,
+      (gc.expense_this_month - gp.expense_last_month) AS expense_change_amount,
+      CASE WHEN gp.expense_last_month = 0 THEN NULL
+           ELSE ROUND(100 * ((gc.expense_this_month - gp.expense_last_month) / ABS(gp.expense_last_month)), 2)
+      END AS expense_change_percent,
       CASE
-        WHEN (tm.expense_mtd_sum - tp.expense_prev_sum) > 0 THEN 'Increase'
-        WHEN (tm.expense_mtd_sum - tp.expense_prev_sum) < 0 THEN 'Decrease'
+        WHEN (gc.expense_this_month - gp.expense_last_month) > 0 THEN 'Increase'
+        WHEN (gc.expense_this_month - gp.expense_last_month) < 0 THEN 'Decrease'
         ELSE 'No change'
       END AS expense_change_status,
 
-      (tm.income_mtd_sum - tm.expense_mtd_sum) AS net_this_month,
-      (tp.income_prev_sum - tp.expense_prev_sum) AS net_last_month,
-      ((tm.income_mtd_sum - tm.expense_mtd_sum) - (tp.income_prev_sum - tp.expense_prev_sum)) AS net_change_amount,
-      CASE WHEN (tp.income_prev_sum - tp.expense_prev_sum) = 0 THEN NULL
-           ELSE ROUND(100 * (((tm.income_mtd_sum - tm.expense_mtd_sum) - (tp.income_prev_sum - tp.expense_prev_sum)) / (tp.income_prev_sum - tp.expense_prev_sum)), 2)
+      gc.net_this_month,
+      gp.net_last_month,
+      (gc.net_this_month - gp.net_last_month) AS net_change_amount,
+      CASE WHEN gp.net_last_month = 0 THEN NULL
+           ELSE ROUND(100 * ((gc.net_this_month - gp.net_last_month) / ABS(gp.net_last_month)), 2)
       END AS net_change_percent,
       CASE
-        WHEN ((tm.income_mtd_sum - tm.expense_mtd_sum) - (tp.income_prev_sum - tp.expense_prev_sum)) > 0 THEN 'Increase'
-        WHEN ((tm.income_mtd_sum - tm.expense_mtd_sum) - (tp.income_prev_sum - tp.expense_prev_sum)) < 0 THEN 'Decrease'
+        WHEN (gc.net_this_month - gp.net_last_month) > 0 THEN 'Increase'
+        WHEN (gc.net_this_month - gp.net_last_month) < 0 THEN 'Decrease'
         ELSE 'No change'
       END AS net_change_status,
 
       (SELECT cash_flow_over_time FROM global_cash_flow_json) AS cash_flow_over_time,
       (SELECT event_revenue FROM global_event_revenue_json) AS event_revenue,
 
-      (
-        SELECT JSON_OBJECT(
+      (SELECT JSON_OBJECT(
           'is_required', COALESCE(ma.is_required, FALSE),
           'membership_fee_type', 'Mixed',
           'fee_amount', NULL,
@@ -12886,62 +13091,77 @@ BEGIN
           'paid_percent', CASE WHEN COALESCE(ma.total_members,0) = 0 THEN NULL ELSE ROUND(100 * ma.paid_members / ma.total_members, 2) END,
           'unpaid_percent', CASE WHEN COALESCE(ma.total_members,0) = 0 THEN NULL ELSE ROUND(100 * ma.unpaid_members / ma.total_members, 2) END,
           'paid_amount_total', COALESCE(ma.paid_amount_total, 0)
-        )
-        FROM membership_agg_all ma
-      ) AS membership_fee_status
+        ) FROM membership_agg_all ma
+      ) AS membership_fee_status,
 
-    FROM totals_mtd_all tm
-    CROSS JOIN totals_prev_all tp
+      JSON_OBJECT(
+        'funds_this_month', gc.funds_this_month,
+        'funds_last_month', gp.funds_last_month,
+        'funds_change_amount', (gc.funds_this_month - gp.funds_last_month),
+        'funds_change_percent', CASE WHEN gp.funds_last_month = 0 THEN NULL
+                                     ELSE ROUND(100 * ((gc.funds_this_month - gp.funds_last_month) / ABS(gp.funds_last_month)), 2)
+                                END,
+        'income_this_month', gc.income_this_month,
+        'expense_this_month', gc.expense_this_month,
+        'net_this_month', gc.net_this_month
+      ) AS kpis
+
+    FROM global_curr gc
+    CROSS JOIN global_prev gp
 
     UNION ALL
 
-    -- SDAO row (organization_id = NULL)
+    -- SDAO (events without org)
     SELECT
       NULL AS organization_id,
       'SDAO' AS organization_name,
       NULL AS cycle_number,
 
-      (sm.income_mtd - sm.expense_mtd) AS funds_this_month,
-      (sp.income_prev - sp.expense_prev) AS funds_last_month,
-      ((sm.income_mtd - sm.expense_mtd) - (sp.income_prev - sp.expense_prev)) AS funds_change_amount,
-      CASE WHEN (sp.income_prev - sp.expense_prev) = 0 THEN NULL
-           ELSE ROUND(100 * (((sm.income_mtd - sm.expense_mtd) - (sp.income_prev - sp.expense_prev)) / (sp.income_prev - sp.expense_prev)), 2)
+      sc.funds_this_month,
+      sp.funds_last_month,
+      (sc.funds_this_month - sp.funds_last_month) AS funds_change_amount,
+      CASE WHEN sp.funds_last_month = 0 THEN NULL
+           ELSE ROUND(100 * ((sc.funds_this_month - sp.funds_last_month) / ABS(sp.funds_last_month)), 2)
       END AS funds_change_percent,
       CASE
-        WHEN ((sm.income_mtd - sm.expense_mtd) - (sp.income_prev - sp.expense_prev)) > 0 THEN 'Increase'
-        WHEN ((sm.income_mtd - sm.expense_mtd) - (sp.income_prev - sp.expense_prev)) < 0 THEN 'Decrease'
+        WHEN (sc.funds_this_month - sp.funds_last_month) > 0 THEN 'Increase'
+        WHEN (sc.funds_this_month - sp.funds_last_month) < 0 THEN 'Decrease'
         ELSE 'No change'
       END AS funds_change_status,
 
-      sm.income_mtd AS income_this_month,
-      sp.income_prev AS income_last_month,
-      (sm.income_mtd - sp.income_prev) AS income_change_amount,
-      CASE WHEN sp.income_prev = 0 THEN NULL ELSE ROUND(100 * ((sm.income_mtd - sp.income_prev)/sp.income_prev), 2) END AS income_change_percent,
+      sc.income_this_month,
+      sp.income_last_month,
+      (sc.income_this_month - sp.income_last_month) AS income_change_amount,
+      CASE WHEN sp.income_last_month = 0 THEN NULL
+           ELSE ROUND(100 * ((sc.income_this_month - sp.income_last_month) / ABS(sp.income_last_month)), 2)
+      END AS income_change_percent,
       CASE
-        WHEN (sm.income_mtd - sp.income_prev) > 0 THEN 'Increase'
-        WHEN (sm.income_mtd - sp.income_prev) < 0 THEN 'Decrease'
+        WHEN (sc.income_this_month - sp.income_last_month) > 0 THEN 'Increase'
+        WHEN (sc.income_this_month - sp.income_last_month) < 0 THEN 'Decrease'
         ELSE 'No change'
       END AS income_change_status,
 
-      sm.expense_mtd AS expense_this_month,
-      sp.expense_prev AS expense_last_month,
-      (sm.expense_mtd - sp.expense_prev) AS expense_change_amount,
-      CASE WHEN sp.expense_prev = 0 THEN NULL ELSE ROUND(100 * ((sm.expense_mtd - sp.expense_prev)/sp.expense_prev), 2) END AS expense_change_percent,
+      sc.expense_this_month,
+      sp.expense_last_month,
+      (sc.expense_this_month - sp.expense_last_month) AS expense_change_amount,
+      CASE WHEN sp.expense_last_month = 0 THEN NULL
+           ELSE ROUND(100 * ((sc.expense_this_month - sp.expense_last_month) / ABS(sp.expense_last_month)), 2)
+      END AS expense_change_percent,
       CASE
-        WHEN (sm.expense_mtd - sp.expense_prev) > 0 THEN 'Increase'
-        WHEN (sm.expense_mtd - sp.expense_prev) < 0 THEN 'Decrease'
+        WHEN (sc.expense_this_month - sp.expense_last_month) > 0 THEN 'Increase'
+        WHEN (sc.expense_this_month - sp.expense_last_month) < 0 THEN 'Decrease'
         ELSE 'No change'
       END AS expense_change_status,
 
-      (sm.income_mtd - sm.expense_mtd) AS net_this_month,
-      (sp.income_prev - sp.expense_prev) AS net_last_month,
-      ((sm.income_mtd - sm.expense_mtd) - (sp.income_prev - sp.expense_prev)) AS net_change_amount,
-      CASE WHEN (sp.income_prev - sp.expense_prev) = 0 THEN NULL
-           ELSE ROUND(100 * (((sm.income_mtd - sm.expense_mtd) - (sp.income_prev - sp.expense_prev)) / (sp.income_prev - sp.expense_prev)), 2)
+      sc.net_this_month,
+      sp.net_last_month,
+      (sc.net_this_month - sp.net_last_month) AS net_change_amount,
+      CASE WHEN sp.net_last_month = 0 THEN NULL
+           ELSE ROUND(100 * ((sc.net_this_month - sp.net_last_month) / ABS(sp.net_last_month)), 2)
       END AS net_change_percent,
       CASE
-        WHEN ((sm.income_mtd - sm.expense_mtd) - (sp.income_prev - sp.expense_prev)) > 0 THEN 'Increase'
-        WHEN ((sm.income_mtd - sm.expense_mtd) - (sp.income_prev - sp.expense_prev)) < 0 THEN 'Decrease'
+        WHEN (sc.net_this_month - sp.net_last_month) > 0 THEN 'Increase'
+        WHEN (sc.net_this_month - sp.net_last_month) < 0 THEN 'Decrease'
         ELSE 'No change'
       END AS net_change_status,
 
@@ -12958,70 +13178,88 @@ BEGIN
         'paid_percent', NULL,
         'unpaid_percent', NULL,
         'paid_amount_total', 0
-      ) AS membership_fee_status
+      ) AS membership_fee_status,
 
-    FROM sdao_mtd sm
+      JSON_OBJECT(
+        'funds_this_month', sc.funds_this_month,
+        'funds_last_month', sp.funds_last_month,
+        'funds_change_amount', (sc.funds_this_month - sp.funds_last_month),
+        'funds_change_percent', CASE WHEN sp.funds_last_month = 0 THEN NULL
+                                     ELSE ROUND(100 * ((sc.funds_this_month - sp.funds_last_month) / ABS(sp.funds_last_month)), 2)
+                                END,
+        'income_this_month', sc.income_this_month,
+        'expense_this_month', sc.expense_this_month,
+        'net_this_month', sc.net_this_month
+      ) AS kpis
+
+    FROM sdao_curr sc
     CROSS JOIN sdao_prev sp
 
     UNION ALL
 
-    -- Per-organization rows
+    -- Per-organization
     SELECT
       o.organization_id,
       o.organization_name,
       c.cycle_number,
 
-      COALESCE(mtd.income_mtd,0) - COALESCE(mtd.expense_mtd,0) AS funds_this_month,
-      COALESCE(prev.income_prev,0) - COALESCE(prev.expense_prev,0) AS funds_last_month,
-      ((COALESCE(mtd.income_mtd,0) - COALESCE(mtd.expense_mtd,0)) - (COALESCE(prev.income_prev,0) - COALESCE(prev.expense_prev,0))) AS funds_change_amount,
-      CASE WHEN (COALESCE(prev.income_prev,0) - COALESCE(prev.expense_prev,0)) = 0 THEN NULL
+      COALESCE(cb.funds_this_month, 0) AS funds_this_month,
+      COALESCE(pb.funds_last_month, 0) AS funds_last_month,
+      (COALESCE(cb.funds_this_month, 0) - COALESCE(pb.funds_last_month, 0)) AS funds_change_amount,
+      CASE WHEN COALESCE(pb.funds_last_month,0) = 0 THEN NULL
            ELSE ROUND(100 * (
-             ((COALESCE(mtd.income_mtd,0) - COALESCE(mtd.expense_mtd,0)) - (COALESCE(prev.income_prev,0) - COALESCE(prev.expense_prev,0)))
-             / (COALESCE(prev.income_prev,0) - COALESCE(prev.expense_prev,0))
+              (COALESCE(cb.funds_this_month,0) - COALESCE(pb.funds_last_month,0))
+              / ABS(COALESCE(pb.funds_last_month,0))
            ), 2)
       END AS funds_change_percent,
       CASE
-        WHEN ((COALESCE(mtd.income_mtd,0) - COALESCE(mtd.expense_mtd,0)) - (COALESCE(prev.income_prev,0) - COALESCE(prev.expense_prev,0))) > 0 THEN 'Increase'
-        WHEN ((COALESCE(mtd.income_mtd,0) - COALESCE(mtd.expense_mtd,0)) - (COALESCE(prev.income_prev,0) - COALESCE(prev.expense_prev,0))) < 0 THEN 'Decrease'
+        WHEN (COALESCE(cb.funds_this_month,0) - COALESCE(pb.funds_last_month,0)) > 0 THEN 'Increase'
+        WHEN (COALESCE(cb.funds_this_month,0) - COALESCE(pb.funds_last_month,0)) < 0 THEN 'Decrease'
         ELSE 'No change'
       END AS funds_change_status,
 
-      COALESCE(mtd.income_mtd,0) AS income_this_month,
-      COALESCE(prev.income_prev,0) AS income_last_month,
-      (COALESCE(mtd.income_mtd,0) - COALESCE(prev.income_prev,0)) AS income_change_amount,
-      CASE WHEN COALESCE(prev.income_prev,0) = 0 THEN NULL
-           ELSE ROUND(100 * ((COALESCE(mtd.income_mtd,0) - COALESCE(prev.income_prev,0)) / COALESCE(prev.income_prev,0)), 2)
+      COALESCE(cb.income_this_month, 0) AS income_this_month,
+      COALESCE(pb.income_last_month, 0) AS income_last_month,
+      (COALESCE(cb.income_this_month,0) - COALESCE(pb.income_last_month,0)) AS income_change_amount,
+      CASE WHEN COALESCE(pb.income_last_month,0) = 0 THEN NULL
+           ELSE ROUND(100 * (
+             (COALESCE(cb.income_this_month,0) - COALESCE(pb.income_last_month,0))
+             / ABS(COALESCE(pb.income_last_month,0))
+           ), 2)
       END AS income_change_percent,
       CASE
-        WHEN (COALESCE(mtd.income_mtd,0) - COALESCE(prev.income_prev,0)) > 0 THEN 'Increase'
-        WHEN (COALESCE(mtd.income_mtd,0) - COALESCE(prev.income_prev,0)) < 0 THEN 'Decrease'
+        WHEN (COALESCE(cb.income_this_month,0) - COALESCE(pb.income_last_month,0)) > 0 THEN 'Increase'
+        WHEN (COALESCE(cb.income_this_month,0) - COALESCE(pb.income_last_month,0)) < 0 THEN 'Decrease'
         ELSE 'No change'
       END AS income_change_status,
 
-      COALESCE(mtd.expense_mtd,0) AS expense_this_month,
-      COALESCE(prev.expense_prev,0) AS expense_last_month,
-      (COALESCE(mtd.expense_mtd,0) - COALESCE(prev.expense_prev,0)) AS expense_change_amount,
-      CASE WHEN COALESCE(prev.expense_prev,0) = 0 THEN NULL
-           ELSE ROUND(100 * ((COALESCE(mtd.expense_mtd,0) - COALESCE(prev.expense_prev,0)) / COALESCE(prev.expense_prev,0)), 2)
+      COALESCE(cb.expense_this_month, 0) AS expense_this_month,
+      COALESCE(pb.expense_last_month, 0) AS expense_last_month,
+      (COALESCE(cb.expense_this_month,0) - COALESCE(pb.expense_last_month,0)) AS expense_change_amount,
+      CASE WHEN COALESCE(pb.expense_last_month,0) = 0 THEN NULL
+           ELSE ROUND(100 * (
+             (COALESCE(cb.expense_this_month,0) - COALESCE(pb.expense_last_month,0))
+             / ABS(COALESCE(pb.expense_last_month,0))
+           ), 2)
       END AS expense_change_percent,
       CASE
-        WHEN (COALESCE(mtd.expense_mtd,0) - COALESCE(prev.expense_prev,0)) > 0 THEN 'Increase'
-        WHEN (COALESCE(mtd.expense_mtd,0) - COALESCE(prev.expense_prev,0)) < 0 THEN 'Decrease'
+        WHEN (COALESCE(cb.expense_this_month,0) - COALESCE(pb.expense_last_month,0)) > 0 THEN 'Increase'
+        WHEN (COALESCE(cb.expense_this_month,0) - COALESCE(pb.expense_last_month,0)) < 0 THEN 'Decrease'
         ELSE 'No change'
       END AS expense_change_status,
 
-      (COALESCE(mtd.income_mtd,0) - COALESCE(mtd.expense_mtd,0)) AS net_this_month,
-      (COALESCE(prev.income_prev,0) - COALESCE(prev.expense_prev,0)) AS net_last_month,
-      ((COALESCE(mtd.income_mtd,0) - COALESCE(mtd.expense_mtd,0)) - (COALESCE(prev.income_prev,0) - COALESCE(prev.expense_prev,0))) AS net_change_amount,
-      CASE WHEN (COALESCE(prev.income_prev,0) - COALESCE(prev.expense_prev,0)) = 0 THEN NULL
+      COALESCE(cb.net_this_month, 0) AS net_this_month,
+      COALESCE(pb.net_last_month, 0) AS net_last_month,
+      (COALESCE(cb.net_this_month,0) - COALESCE(pb.net_last_month,0)) AS net_change_amount,
+      CASE WHEN COALESCE(pb.net_last_month,0) = 0 THEN NULL
            ELSE ROUND(100 * (
-             ((COALESCE(mtd.income_mtd,0) - COALESCE(mtd.expense_mtd,0)) - (COALESCE(prev.income_prev,0) - COALESCE(prev.expense_prev,0)))
-             / (COALESCE(prev.income_prev,0) - COALESCE(prev.expense_prev,0))
+              (COALESCE(cb.net_this_month,0) - COALESCE(pb.net_last_month,0))
+              / ABS(COALESCE(pb.net_last_month,0))
            ), 2)
       END AS net_change_percent,
       CASE
-        WHEN ((COALESCE(mtd.income_mtd,0) - COALESCE(mtd.expense_mtd,0)) - (COALESCE(prev.income_prev,0) - COALESCE(prev.expense_prev,0))) > 0 THEN 'Increase'
-        WHEN ((COALESCE(mtd.income_mtd,0) - COALESCE(mtd.expense_mtd,0)) - (COALESCE(prev.income_prev,0) - COALESCE(prev.expense_prev,0))) < 0 THEN 'Decrease'
+        WHEN (COALESCE(cb.net_this_month,0) - COALESCE(pb.net_last_month,0)) > 0 THEN 'Increase'
+        WHEN (COALESCE(cb.net_this_month,0) - COALESCE(pb.net_last_month,0)) < 0 THEN 'Decrease'
         ELSE 'No change'
       END AS net_change_status,
 
@@ -13038,12 +13276,26 @@ BEGIN
         'paid_percent', CASE WHEN COALESCE(mt.members_total,0) = 0 THEN NULL ELSE ROUND(100 * COALESCE(mp.members_paid,0) / mt.members_total, 2) END,
         'unpaid_percent', CASE WHEN COALESCE(mt.members_total,0) = 0 THEN NULL ELSE ROUND(100 * (GREATEST(mt.members_total - COALESCE(mp.members_paid,0),0)) / mt.members_total, 2) END,
         'paid_amount_total', COALESCE(mp.paid_amount,0)
-      ) AS membership_fee_status
+      ) AS membership_fee_status,
+
+      JSON_OBJECT(
+        'funds_this_month', COALESCE(cb.funds_this_month,0),
+        'funds_last_month', COALESCE(pb.funds_last_month,0),
+        'funds_change_amount', (COALESCE(cb.funds_this_month,0) - COALESCE(pb.funds_last_month,0)),
+        'funds_change_percent', CASE WHEN COALESCE(pb.funds_last_month,0) = 0 THEN NULL
+                                     ELSE ROUND(100 * (
+                                       (COALESCE(cb.funds_this_month,0) - COALESCE(pb.funds_last_month,0))
+                                       / ABS(COALESCE(pb.funds_last_month,0))
+                                     ), 2) END,
+        'income_this_month', COALESCE(cb.income_this_month,0),
+        'expense_this_month', COALESCE(cb.expense_this_month,0),
+        'net_this_month', COALESCE(cb.net_this_month,0)
+      ) AS kpis
 
     FROM orgs o
     LEFT JOIN cycles c ON c.organization_id = o.organization_id
-    LEFT JOIN sums_mtd_by_org mtd ON mtd.organization_id = o.organization_id
-    LEFT JOIN sums_prev_by_org prev ON prev.organization_id = o.organization_id
+    LEFT JOIN curr_by_org cb ON cb.organization_id = o.organization_id
+    LEFT JOIN prev_by_org pb ON pb.organization_id = o.organization_id
     LEFT JOIN cash_flow_json_by_org cf ON cf.organization_id = o.organization_id
     LEFT JOIN event_revenue_json_by_org er ON er.organization_id = o.organization_id
     LEFT JOIN members_total_by_org mt ON mt.organization_id = o.organization_id
@@ -13052,9 +13304,9 @@ BEGIN
   WHERE (p_organization_id IS NULL OR U.organization_id = p_organization_id)
   ORDER BY
     CASE
-      WHEN U.organization_id = -1 THEN 0      -- All Organizations first
-      WHEN U.organization_id IS NULL THEN 1   -- SDAO second
-      ELSE 2                                  -- each org next
+      WHEN U.organization_id = -1 THEN 0
+      WHEN U.organization_id IS NULL THEN 1
+      ELSE 2
     END,
     U.organization_name;
 
