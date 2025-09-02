@@ -785,10 +785,10 @@ async function getAllExecutiveRanks() {
     }
 }
       
-async function getSingleOrganizationMember(member_id, org_name) {
+async function getSingleOrganizationMember(member_id, org_id) {
     const connection = await pool.getConnection();
     try {
-        const [rows] = await connection.query('CALL GetSingleOrganizationMember(?, ?);', [member_id, org_name]);
+    const [rows] = await connection.query('CALL GetSingleOrganizationMember(?, ?);', [member_id, org_id]);
         return rows[0];
     } catch (error) {
         console.error('Error fetching single organization member:', error);
@@ -927,7 +927,7 @@ async function getAllOrganizations() {
     const connection = await pool.getConnection();
     try {
         // Call the stored procedure with NULL to ignore user filtering
-        const [rows] = await connection.query('CALL GetOrganizations(NULL);');
+        const [rows] = await connection.query('CALL GetAllOrganizations();');
         return rows[0];
     } catch (error) {
         console.error('Error fetching all organizations:', error);

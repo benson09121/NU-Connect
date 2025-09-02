@@ -1347,6 +1347,28 @@ END $$
 DELIMITER ;
 
 DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetAllOrganizations()
+BEGIN
+    SELECT 
+        o.organization_id as id,
+        o.name AS organization_name,
+        o.logo AS organization_logo,
+        o.status AS organization_status,
+        o.current_org_version_id,
+        MAX(c.cycle_number) AS cycle_number,
+        o.category,
+        p.name AS program_name,
+        o.created_at
+    FROM tbl_organization o
+    LEFT JOIN tbl_program p ON o.base_program_id = p.program_id
+    LEFT JOIN tbl_renewal_cycle c ON o.organization_id = c.organization_id
+    WHERE o.status = 'Approved'
+    GROUP BY o.organization_id
+    ORDER BY o.created_at DESC;
+END $$
+DELIMITER ;
+
+DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizations(IN p_user_id VARCHAR(200))
 BEGIN
     SELECT 
@@ -1758,23 +1780,48 @@ BEGIN
                     'logo', orgs.logo,
                     'status', orgs.status,
                     'organization_id', orgs.organization_id,
-                    'current_org_version_id', orgs.current_org_version_id
+                    'current_org_version_id', orgs.current_org_version_id,
+                    'position', orgs.position
                 ))
                 FROM (
-
-
-                    SELECT o.name, o.logo, o.status, o.organization_id, o.current_org_version_id
+                    -- Adviser
+                    SELECT o.name, o.logo, o.status, o.organization_id, o.current_org_version_id,
+                        'Adviser' AS position
                     FROM tbl_organization o
                     WHERE o.adviser_id = u.user_id
 
                     UNION
 
-                    SELECT o.name, o.logo, o.status, o.organization_id, o.current_org_version_id
+                    -- Executive
+                    SELECT o.name, o.logo, o.status, o.organization_id, o.current_org_version_id,
+                        'Executive' AS position
                     FROM tbl_organization_members om
                     JOIN tbl_renewal_cycle rc ON om.organization_id = rc.organization_id 
                         AND om.cycle_number = rc.cycle_number
                     JOIN tbl_organization o ON om.organization_id = o.organization_id
-                    WHERE om.user_id = u.user_id
+                    WHERE om.user_id = u.user_id AND om.member_type = 'Executive'
+
+                    UNION
+
+                    -- Committee
+                    SELECT o.name, o.logo, o.status, o.organization_id, o.current_org_version_id,
+                        'Committee' AS position
+                    FROM tbl_organization_members om
+                    JOIN tbl_renewal_cycle rc ON om.organization_id = rc.organization_id 
+                        AND om.cycle_number = rc.cycle_number
+                    JOIN tbl_organization o ON om.organization_id = o.organization_id
+                    WHERE om.user_id = u.user_id AND om.member_type = 'Committee'
+
+                    UNION
+
+                    -- Member
+                    SELECT o.name, o.logo, o.status, o.organization_id, o.current_org_version_id,
+                        'Member' AS position
+                    FROM tbl_organization_members om
+                    JOIN tbl_renewal_cycle rc ON om.organization_id = rc.organization_id 
+                        AND om.cycle_number = rc.cycle_number
+                    JOIN tbl_organization o ON om.organization_id = o.organization_id
+                    WHERE om.user_id = u.user_id AND om.member_type = 'Member'
                 ) AS orgs
             ),
             JSON_ARRAY()
@@ -14002,6 +14049,7 @@ VALUES
 (4,2),
 (4,3),
 (4,4),
+(4,7),
 (4,8),
 (4,9),
 (4,10),
@@ -14023,6 +14071,7 @@ VALUES
 (4,31),
 (2,6),
 (2,9),
+(2,14),
 (2,16),
 (2,17),
 (2,23),
