@@ -1730,6 +1730,49 @@ DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetUserPermissions(IN p_user_email VARCHAR(200))
 BEGIN
     SELECT JSON_OBJECT(
+        'f_name', u.f_name,
+        'l_name', u.l_name,
+        'role', r.role_name,
+        'email', u.email,
+        'program_id', p.program_id,
+        'program_name', p.name,
+        'permissions', COALESCE(
+            (
+                SELECT JSON_ARRAYAGG(permission_name)
+                FROM (
+                    SELECT DISTINCT permission_name
+                    FROM (
+                        -- Base role permissions
+                        SELECT p.permission_name
+                        FROM tbl_role_permission rp
+                        JOIN tbl_permission p ON rp.permission_id = p.permission_id
+                        WHERE rp.role_id = u.role_id
+
+                        UNION ALL
+
+                        -- Executive role permissions through ranks
+                        SELECT p.permission_name
+                        FROM tbl_organization_members om
+                        JOIN tbl_executive_role er ON om.executive_role_id = er.executive_role_id
+                        JOIN tbl_rank_permission rp ON er.rank_id = rp.rank_id
+                        JOIN tbl_permission p ON rp.permission_id = p.permission_id
+                        WHERE om.user_id = u.user_id
+
+                        UNION ALL
+
+                        -- Committee role permissions
+                        SELECT p.permission_name
+                        FROM tbl_committee_members cm
+                        JOIN tbl_committee c ON cm.committee_id = c.committee_id
+                        JOIN tbl_committee_role cr ON c.committee_id = cr.committee_id
+                        JOIN tbl_committee_role_permission crp ON cr.committee_role_id = crp.committee_role_id
+                        JOIN tbl_permission p ON crp.permission_id = p.permission_id
+                        WHERE cm.user_id = u.user_id
+                    ) AS all_permissions
+                ) AS distinct_permissions
+            ),
+            JSON_ARRAY()
+        ),
         'organizations', COALESCE(
             (
                 SELECT JSON_ARRAYAGG(JSON_OBJECT(
