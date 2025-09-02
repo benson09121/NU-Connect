@@ -1730,49 +1730,6 @@ DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetUserPermissions(IN p_user_email VARCHAR(200))
 BEGIN
     SELECT JSON_OBJECT(
-        'f_name', u.f_name,
-        'l_name', u.l_name,
-        'role', r.role_name,
-        'email', u.email,
-        'program_id', p.program_id,
-        'program_name', p.name,
-        'permissions', COALESCE(
-            (
-                SELECT JSON_ARRAYAGG(permission_name)
-                FROM (
-                    SELECT DISTINCT permission_name
-                    FROM (
-                        -- Base role permissions
-                        SELECT p.permission_name
-                        FROM tbl_role_permission rp
-                        JOIN tbl_permission p ON rp.permission_id = p.permission_id
-                        WHERE rp.role_id = u.role_id
-
-                        UNION ALL
-
-                        -- Executive role permissions through ranks
-                        SELECT p.permission_name
-                        FROM tbl_organization_members om
-                        JOIN tbl_executive_role er ON om.executive_role_id = er.executive_role_id
-                        JOIN tbl_rank_permission rp ON er.rank_id = rp.rank_id
-                        JOIN tbl_permission p ON rp.permission_id = p.permission_id
-                        WHERE om.user_id = u.user_id
-
-                        UNION ALL
-
-                        -- Committee role permissions
-                        SELECT p.permission_name
-                        FROM tbl_committee_members cm
-                        JOIN tbl_committee c ON cm.committee_id = c.committee_id
-                        JOIN tbl_committee_role cr ON c.committee_id = cr.committee_id
-                        JOIN tbl_committee_role_permission crp ON cr.committee_role_id = crp.committee_role_id
-                        JOIN tbl_permission p ON crp.permission_id = p.permission_id
-                        WHERE cm.user_id = u.user_id
-                    ) AS all_permissions
-                ) AS distinct_permissions
-            ),
-            JSON_ARRAY()
-        ),
         'organizations', COALESCE(
             (
                 SELECT JSON_ARRAYAGG(JSON_OBJECT(
@@ -1781,19 +1738,21 @@ BEGIN
                     'status', orgs.status,
                     'organization_id', orgs.organization_id,
                     'current_org_version_id', orgs.current_org_version_id,
+                    'cycle_number', orgs.cycle_number,
                     'position', orgs.position
                 ))
                 FROM (
                     -- Adviser
-                    SELECT o.name, o.logo, o.status, o.organization_id, o.current_org_version_id,
+                    SELECT o.name, o.logo, o.status, o.organization_id, o.current_org_version_id, rc.cycle_number,
                         'Adviser' AS position
                     FROM tbl_organization o
+                    JOIN tbl_renewal_cycle rc ON o.organization_id = rc.organization_id
                     WHERE o.adviser_id = u.user_id
 
                     UNION
 
                     -- Executive
-                    SELECT o.name, o.logo, o.status, o.organization_id, o.current_org_version_id,
+                    SELECT o.name, o.logo, o.status, o.organization_id, o.current_org_version_id, rc.cycle_number,
                         'Executive' AS position
                     FROM tbl_organization_members om
                     JOIN tbl_renewal_cycle rc ON om.organization_id = rc.organization_id 
@@ -1804,7 +1763,7 @@ BEGIN
                     UNION
 
                     -- Committee
-                    SELECT o.name, o.logo, o.status, o.organization_id, o.current_org_version_id,
+                    SELECT o.name, o.logo, o.status, o.organization_id, o.current_org_version_id, rc.cycle_number,
                         'Committee' AS position
                     FROM tbl_organization_members om
                     JOIN tbl_renewal_cycle rc ON om.organization_id = rc.organization_id 
@@ -1815,7 +1774,7 @@ BEGIN
                     UNION
 
                     -- Member
-                    SELECT o.name, o.logo, o.status, o.organization_id, o.current_org_version_id,
+                    SELECT o.name, o.logo, o.status, o.organization_id, o.current_org_version_id, rc.cycle_number,
                         'Member' AS position
                     FROM tbl_organization_members om
                     JOIN tbl_renewal_cycle rc ON om.organization_id = rc.organization_id 

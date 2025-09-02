@@ -2,6 +2,7 @@ const transactionModel = require('../models/transactionModel');
 const { publishToChannel, subscribeToChannel } = require('./sseController');
 const path = require('path');
 const fs = require('fs');
+const pool = require('../../config/db');
 
 function unwrapSPResult(row) {
   if (row == null) return null;
@@ -11,6 +12,10 @@ function unwrapSPResult(row) {
     return row[0] || null;
   }
   return row;
+}
+
+function sanitizeOrgId(orgId) {
+  return String(orgId).replace(/[^0-9]/g, '');
 }
 
 async function create(req, res) {
@@ -38,11 +43,33 @@ async function create(req, res) {
     if (req.files && req.files.proof_image) {
       const file = req.files.proof_image;
       const ext = path.extname(file.name).toLowerCase();
-      const safeName = `proof-${Date.now()}${ext}`;
-      const orgDir = path.join('/app/organizations', String(organization_id), 'transactions');
-      if (!fs.existsSync(orgDir)) fs.mkdirSync(orgDir, { recursive: true });
-      proofImagePath = path.join(orgDir, safeName);
-      fs.writeFileSync(proofImagePath, file.data);
+
+      console.log('Uploaded file extension:', ext);
+
+      const allowedExt = ['.jpg', '.jpeg', '.png', '.gif', '.pdf', '.webp'];
+      if (!allowedExt.includes(ext)) {
+        return res.status(400).json({ message: 'Invalid file type' });
+      }
+
+      let relPath, absPath;
+      if (organization_id) {
+        const safeOrgId = sanitizeOrgId(organization_id);
+        if (!safeOrgId) return res.status(400).json({ message: 'Invalid organization_id' });
+        const safeName = `proof-${Date.now()}${ext}`;
+        const orgDir = path.join('/app/organizations', safeOrgId, 'transactions');
+        if (!fs.existsSync(orgDir)) fs.mkdirSync(orgDir, { recursive: true });
+        absPath = path.join(orgDir, safeName);
+        relPath = path.posix.join('organizations', safeOrgId, 'transactions', safeName);
+      } else {
+        // For SDAO/system users, store in a generic system directory
+        const sysDir = path.join('/app/organizations', 'system', 'transactions');
+        if (!fs.existsSync(sysDir)) fs.mkdirSync(sysDir, { recursive: true });
+        const safeName = `proof-${Date.now()}${ext}`;
+        absPath = path.join(sysDir, safeName);
+        relPath = path.posix.join('organizations', 'system', 'transactions', safeName);
+      }
+      fs.writeFileSync(absPath, file.data);
+      proofImagePath = relPath;
     }
 
     const txn = await transactionModel.createTransaction({
@@ -55,7 +82,7 @@ async function create(req, res) {
       amount,
       status,
       transaction_date,
-      receipt_no, // can be blank/null, SP will generate if needed
+      receipt_no,
       category_code,
       event_id,
       payer_name_override,
@@ -64,7 +91,6 @@ async function create(req, res) {
       cycle_number
     }, proofImagePath);
 
-    // Real-time publish
     publishToChannel('transactions', { type: 'created', data: txn });
     if (txn && txn.transaction_id) {
       publishToChannel(`transactions:${txn.transaction_id}`, { type: 'created', data: txn });
@@ -77,33 +103,111 @@ async function create(req, res) {
   }
 }
 
-async function getByOrganization(req, res) {
+async function update(req, res) {
   try {
-    const { organization_id } = req.query;
-    if (!organization_id) return res.status(400).json({ message: 'organization_id is required' });
-    const txns = await transactionModel.getTransactionsByOrganization(organization_id);
-    res.json(txns);
-  } catch (e) {
-    res.status(500).json({ message: e.sqlMessage || e.message });
-  }
-}
-
-async function update(req,res){
-  try{
     const {
       transaction_id,
       payment_description,
       amount,
       status,
-      proof_image,
+      proof_image, // may be a string path or undefined
       receipt_no,
       category_code,
       payer_name,
       payee_name,
       payer_name_override,
-      event_remarks
+      event_remarks,
+      organization_id, // needed for file path if uploading new file
+      remove_proof_image // flag to indicate if proof image should be removed
     } = req.body;
-    if(!transaction_id) return res.status(400).json({ message:'transaction_id required' });
+
+    if (!transaction_id) return res.status(400).json({ message: 'transaction_id required' });
+
+    // Fetch current transaction for existing proof_image path
+    let currentTransaction = null;
+    try {
+      const conn = await pool.getConnection();
+      try {
+        const [currentRows] = await conn.query(
+          'SELECT proof_image FROM tbl_transaction WHERE transaction_id = ?',
+          [transaction_id]
+        );
+        if (currentRows.length > 0) {
+          currentTransaction = currentRows[0];
+        }
+      } finally {
+        conn.release();
+      }
+    } catch (err) {
+      console.warn('Could not fetch current transaction:', err.message);
+    }
+
+    // Handle file upload and removal logic
+    let proofImagePath = proof_image ?? null; // default to provided value
+
+    // Remove proof image if requested
+    if (remove_proof_image === true || remove_proof_image === 'true') {
+      if (currentTransaction?.proof_image) {
+        try {
+          const oldFilePath = path.join('/app', currentTransaction.proof_image);
+          if (fs.existsSync(oldFilePath)) {
+            fs.unlinkSync(oldFilePath);
+            console.log('Removed old proof image:', oldFilePath);
+          }
+        } catch (deleteErr) {
+          console.warn('Failed to delete old proof image:', deleteErr.message);
+        }
+      }
+      proofImagePath = null;
+    }
+    // If new file is uploaded, handle upload and remove old file
+    else if (req.files && req.files.proof_image) {
+      const file = req.files.proof_image;
+      const ext = path.extname(file.name).toLowerCase().trim();
+      const allowedExt = ['.jpg', '.jpeg', '.png', '.gif', '.pdf', '.webp'];
+      if (!allowedExt.includes(ext)) {
+        return res.status(400).json({ message: 'Invalid file type. Allowed: jpg, jpeg, png, gif, pdf, webp' });
+      }
+
+      // Remove old file if it exists
+      if (currentTransaction?.proof_image) {
+        try {
+          const oldFilePath = path.join('/app', currentTransaction.proof_image);
+          if (fs.existsSync(oldFilePath)) {
+            fs.unlinkSync(oldFilePath);
+            console.log('Removed old proof image:', oldFilePath);
+          }
+        } catch (deleteErr) {
+          console.warn('Failed to delete old proof image:', deleteErr.message);
+        }
+      }
+
+      // Save new file
+      let relPath, absPath;
+      if (organization_id) {
+        const safeOrgId = String(organization_id).replace(/[^0-9]/g, '');
+        if (!safeOrgId) return res.status(400).json({ message: 'Invalid organization_id' });
+        const safeName = `proof-${Date.now()}${ext}`;
+        const orgDir = path.join('/app/organizations', safeOrgId, 'transactions');
+        if (!fs.existsSync(orgDir)) fs.mkdirSync(orgDir, { recursive: true });
+        absPath = path.join(orgDir, safeName);
+        relPath = path.posix.join('organizations', safeOrgId, 'transactions', safeName);
+      } else {
+        // For SDAO/system users, store in a generic system directory
+        const sysDir = path.join('/app/organizations', 'system', 'transactions');
+        if (!fs.existsSync(sysDir)) fs.mkdirSync(sysDir, { recursive: true });
+        const safeName = `proof-${Date.now()}${ext}`;
+        absPath = path.join(sysDir, safeName);
+        relPath = path.posix.join('organizations', 'system', 'transactions', safeName);
+      }
+      fs.writeFileSync(absPath, file.data);
+      proofImagePath = relPath;
+      console.log('Saved new proof image:', absPath);
+    }
+    // If no new file and no removal flag, keep existing proof_image path
+    else if (!proof_image && currentTransaction?.proof_image) {
+      proofImagePath = currentTransaction.proof_image;
+    }
 
     const raw = await transactionModel.updateTransaction({
       transaction_id,
@@ -111,7 +215,7 @@ async function update(req,res){
       payment_description,
       amount,
       status,
-      proof_image,
+      proof_image: proofImagePath,
       receipt_no,
       category_code,
       payer_name,
@@ -135,7 +239,7 @@ async function update(req,res){
     }
 
     res.json(payload);
-  } catch(e){
+  } catch (e) {
     console.error('[transactions.update]', e);
     res.status(500).json({ message: e.sqlMessage || e.message });
   }
@@ -288,7 +392,7 @@ async function getFinancialCategories(req,res){
 async function getTransactionFile(req, res) {
   try {
     const { organization_id, filename } = req.params;
-    
+
     if (!organization_id || !filename) {
       return res.status(400).json({ message: 'Organization ID and filename are required' });
     }
@@ -298,8 +402,15 @@ async function getTransactionFile(req, res) {
       return res.status(400).json({ message: 'Invalid filename' });
     }
 
-    // Use NGINX internal redirect for protected file serving
-    const protectedPath = `/protected-transactions/${organization_id}/transactions/${filename}`;
+    let protectedPath;
+    if (organization_id === 'system') {
+      // SDAO/system files
+      protectedPath = `/protected-transactions/system/transactions/${filename}`;
+    } else {
+      // Regular organization files
+      protectedPath = `/protected-transactions/${organization_id}/transactions/${filename}`;
+    }
+
     res.set('X-Accel-Redirect', protectedPath);
     res.end();
   } catch (e) {
