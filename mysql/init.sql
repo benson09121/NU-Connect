@@ -903,6 +903,48 @@ CREATE TABLE tbl_receipt_sequence (
 ALTER TABLE tbl_transaction
   ADD UNIQUE KEY uq_transaction_receipt_no (receipt_no);
 
+CREATE TABLE tbl_ai_conversation (
+  conversation_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  owner_id VARCHAR(200) NOT NULL,                       -- who started/owns this chat
+  title VARCHAR(255) NULL,
+  system_prompt TEXT NULL,                               -- store custom instructions if any
+  model VARCHAR(100) DEFAULT 'deepseek-chat',
+  temperature DECIMAL(3,2) DEFAULT 0.7,
+  top_p DECIMAL(3,2) DEFAULT 1.0,
+  entity_type ENUM('general','user','organization','event','application','approval','system') DEFAULT 'general',
+  entity_id INT NULL,
+  summary LONGTEXT NULL,                                 -- rolling summary for long chats
+  is_global BOOLEAN DEFAULT TRUE,
+  last_summary_message_id BIGINT NULL,
+  is_archived BOOLEAN DEFAULT FALSE,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  FOREIGN KEY (owner_id) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
+  INDEX idx_owner_updated (owner_id, updated_at DESC),
+  INDEX idx_scope (entity_type, entity_id)
+);
+
+CREATE TABLE tbl_ai_message (
+  message_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  conversation_id BIGINT NOT NULL,
+  role ENUM('system','user','assistant','tool') NOT NULL,
+  user_id VARCHAR(200) NULL,                              -- set for role='user'
+  content LONGTEXT NOT NULL,
+  model VARCHAR(100) NULL,                                -- set for assistant messages
+  context_organizations JSON COMMENT 'Organizations referenced in this message',
+  message_scope ENUM('current_view', 'multi_org', 'global') DEFAULT 'current_view',
+  meta JSON NULL,                                         -- tool_calls, function args, etc.
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (conversation_id) REFERENCES tbl_ai_conversation(conversation_id) ON DELETE CASCADE,
+  FOREIGN KEY (user_id) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
+  INDEX idx_conv_time (conversation_id, created_at),
+  INDEX idx_conv_msg (conversation_id, message_id),
+  INDEX idx_message_scope (conversation_id, message_scope)
+);
+
+
+
+
 -- PROCEDURES
 use db_nuconnect;
 
@@ -13988,20 +14030,79 @@ BEGIN
 END$$
 DELIMITER ;
 
+DELIMITER $$
+CREATE PROCEDURE AnalyzeMultiOrgChatUsage(
+  IN start_date DATE,
+  IN end_date DATE
+)
+BEGIN
+  SELECT 
+    c.owner_id,
+    COUNT(DISTINCT c.conversation_id) as total_conversations,
+    COUNT(CASE WHEN m.message_scope = 'multi_org' THEN 1 END) as multi_org_messages,
+    COUNT(CASE WHEN m.message_scope = 'current_view' THEN 1 END) as single_org_messages,
+    COUNT(DISTINCT JSON_UNQUOTE(JSON_EXTRACT(m.context_organizations, '$[0]'))) as unique_orgs_mentioned
+  FROM tbl_ai_conversation c
+  JOIN tbl_ai_message m ON c.conversation_id = m.conversation_id
+  WHERE c.created_at BETWEEN start_date AND end_date
+    AND c.is_archived = 0
+    AND m.role = 'user'
+  GROUP BY c.owner_id
+  ORDER BY multi_org_messages DESC;
+END$$
+DELIMITER ;
+
+
+
+CREATE INDEX idx_conversation_global ON tbl_ai_conversation(owner_id, is_global, updated_at DESC);
+CREATE INDEX idx_message_created ON tbl_ai_message(conversation_id, created_at ASC);
 -- EVENTS
 
 DELIMITER $$
-CREATE DEFINER='admin'@'%' EVENT ev_disable_expired_periods
-ON SCHEDULE EVERY 1 HOUR
-DO
+CREATE FUNCTION GetUserOrganizations(user_id VARCHAR(200))
+RETURNS JSON
+READS SQL DATA
+DETERMINISTIC
 BEGIN
-  UPDATE tbl_application_period
-  SET is_active = 0
-  WHERE is_active = 1
-    AND 
-      end_date < CURDATE();
-END $$
+  DECLARE org_list JSON;
+  
+  SELECT JSON_ARRAYAGG(
+    JSON_OBJECT(
+      'organization_id', o.organization_id,
+      'name', o.name,
+      'status', o.status,
+      'category', o.category,
+      'role', CASE 
+        WHEN o.adviser_id = user_id THEN 'Adviser'
+        WHEN om.member_type IS NOT NULL THEN om.member_type
+        ELSE 'Member'
+      END
+    )
+  ) INTO org_list
+  FROM tbl_organization o
+  LEFT JOIN tbl_organization_members om ON o.organization_id = om.organization_id AND om.user_id = user_id
+  WHERE (o.adviser_id = user_id OR om.user_id = user_id)
+    AND o.status = 'Approved';
+  
+  RETURN COALESCE(org_list, JSON_ARRAY());
+END$$
 DELIMITER ;
+
+CREATE VIEW v_multi_org_messages AS
+SELECT 
+  m.message_id,
+  m.conversation_id,
+  m.content,
+  m.message_scope,
+  m.context_organizations,
+  c.owner_id,
+  c.entity_type,
+  c.is_global,
+  m.created_at
+FROM tbl_ai_message m
+JOIN tbl_ai_conversation c ON m.conversation_id = c.conversation_id
+WHERE m.message_scope IN ('multi_org', 'global')
+  AND c.is_archived = 0;
 
 -- SAMPLE DATAS
 INSERT INTO tbl_role(role_name, is_approver, hierarchy_order)
