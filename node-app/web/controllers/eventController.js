@@ -1585,10 +1585,20 @@ async function getEventsByUserRole(req, res) {
 
 async function archiveEvent(req, res) {
     try {
-        const { event_id, reason } = req.body;
-        const user_id = req.user?.user_id;
+        const { event_id, reason, user_email } = req.body;
+        let user_id = req.user?.user_id;
+
+        // Allow lookup by email if user_id is missing
+        if ((!user_id || user_id === 'undefined' || user_id === 'null') && user_email) {
+            const user = await eventModel.getUserByEmail(user_email);
+            if (!user) {
+                return res.status(404).json({ message: "User not found for the provided email." });
+            }
+            user_id = user.user_id;
+        }
+
         if (!event_id || !user_id || !reason) {
-            return res.status(400).json({ message: "event_id, user_id, and reason are required." });
+            return res.status(400).json({ message: "event_id, user_id (or user_email), and reason are required." });
         }
         const result = await eventModel.archiveEvent(event_id, user_id, reason);
         res.status(200).json(result);
@@ -1599,10 +1609,19 @@ async function archiveEvent(req, res) {
 
 async function unarchiveEvent(req, res) {
     try {
-        const { event_id, reason } = req.body;
-        const user_id = req.user?.user_id;
+        const { event_id, reason, user_email } = req.body;
+        let user_id = req.user?.user_id;
+
+        if ((!user_id || user_id === 'undefined' || user_id === 'null') && user_email) {
+            const user = await eventModel.getUserByEmail(user_email);
+            if (!user) {
+                return res.status(404).json({ message: "User not found for the provided email." });
+            }
+            user_id = user.user_id;
+        }
+
         if (!event_id || !user_id) {
-            return res.status(400).json({ message: "event_id and user_id are required." });
+            return res.status(400).json({ message: "event_id and user_id (or user_email) are required." });
         }
         const result = await eventModel.unarchiveEvent(event_id, user_id, reason || null);
         res.status(200).json(result);
@@ -1615,9 +1634,19 @@ async function updateEventSDAO(req, res) {
     try {
         const event_id = req.params.id;
         const event = req.body;
-        const user_id = req.user?.user_id;
+        let user_id = req.user?.user_id;
+        const user_email = req.body.user_email;
+
+        if ((!user_id || user_id === 'undefined' || user_id === 'null') && user_email) {
+            const user = await eventModel.getUserByEmail(user_email);
+            if (!user) {
+                return res.status(404).json({ message: "User not found for the provided email." });
+            }
+            user_id = user.user_id;
+        }
+
         if (!event_id || !user_id) {
-            return res.status(400).json({ message: "event_id and user_id are required." });
+            return res.status(400).json({ message: "event_id and user_id (or user_email) are required." });
         }
         const result = await eventModel.updateEventSDAO(event_id, event, user_id);
         res.status(200).json(result);
@@ -1628,10 +1657,19 @@ async function updateEventSDAO(req, res) {
 
 async function deleteEventSDAO(req, res) {
     try {
-        const { event_id, reason } = req.body;
-        const user_id = req.user?.user_id;
+        const { event_id, reason, user_email } = req.body;
+        let user_id = req.user?.user_id;
+
+        if ((!user_id || user_id === 'undefined' || user_id === 'null') && user_email) {
+            const user = await eventModel.getUserByEmail(user_email);
+            if (!user) {
+                return res.status(404).json({ message: "User not found for the provided email." });
+            }
+            user_id = user.user_id;
+        }
+
         if (!event_id || !user_id || !reason) {
-            return res.status(400).json({ message: "event_id, user_id, and reason are required." });
+            return res.status(400).json({ message: "event_id, user_id (or user_email), and reason are required." });
         }
         await eventModel.deleteEventSDAO(event_id, user_id, reason);
         res.status(200).json({ message: "Event deleted successfully." });
