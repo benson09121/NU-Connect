@@ -950,6 +950,19 @@ async function getAllApplicationsByOrganization(organization_id) {
     }
 }
 
+async function getUserOrganization(user_id) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetUserOrganization(?);', [user_id]);
+        return rows[0];
+    } catch (error) {
+        console.error('Error fetching user organization:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
 module.exports = {
     createOrganizationApplication,
     getSpecificApplication,
@@ -1009,4 +1022,5 @@ module.exports = {
     getOrganizationDashboardOverview,
     getAllOrganizations,
     getAllApplicationsByOrganization,
+    getUserOrganization,
 };

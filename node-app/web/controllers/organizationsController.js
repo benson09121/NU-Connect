@@ -19,7 +19,16 @@ async function getOrganizations(req, res) {
                 const organizations = await organizationsModel.getOrganizationByName(org_name);
                 subscribeToChannel(sessionId, `organizations_${user_role}_${org_name}`);
                 res.json(organizations);
-            }   else{
+            } else if (user_role === 'Student') {
+                // Get the organization associated with the student
+                const user = await organizationsModel.getUserByEmail(req.user.email);
+                if (!user || !user.user_id) {
+                    return res.status(404).json({ message: 'User not found.' });
+                }
+                const userOrganizations = await organizationsModel.getUserOrganization(user.user_id);
+                subscribeToChannel(sessionId, `organizations_${user_role}_${user.user_id}`);
+                res.json(userOrganizations);
+            } else {
                 const organizations = await organizationsModel.getAllOrganizations();
                 subscribeToChannel(sessionId, `organizations_all`);
                 res.json(organizations);
@@ -27,7 +36,7 @@ async function getOrganizations(req, res) {
         }
     } catch (error) {
         res.status(500).json({
-            error: error.message || "An error occurred while fetching the active application period.",
+            error: error.message || "An error occurred while fetching organizations.",
         });
     }
 }
@@ -80,32 +89,126 @@ async function getOrganizationMembers(req, res) {
 
 async function createOrganizationApplication(req, res) {
     try {
+        // File type configuration
+        const ALLOWED_MIME_TYPES = {
+            'application/pdf': ['.pdf'],
+            'application/msword': ['.doc'],
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
+            'application/vnd.ms-excel': ['.xls'],
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+            'image/jpeg': ['.jpg', '.jpeg'],
+            'image/png': ['.png']
+        };
+
+        const ALLOWED_LOGO_TYPES = {
+            'image/jpeg': ['.jpg', '.jpeg'],
+            'image/png': ['.png']
+        };
+        
+        const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+        const MAX_LOGO_SIZE = 5 * 1024 * 1024; // 5MB for logos
+
+        // Parse request body
         const organization = JSON.parse(req.body.organization);
         const executives = JSON.parse(req.body.executives);
         const requirements = JSON.parse(req.body.requirements);
 
+        // Validate logo file
         const logoFile = req.files?.logo;
-        const requirementFiles = {};
-
-        requirements.forEach(reqItem => {
-            const fileKey = `requirement_${reqItem.requirement_id}`;
-            if (req.files[fileKey]) {
-                requirementFiles[reqItem.requirement_id] = req.files[fileKey];
-            }
-        });
-
         if (!logoFile) {
-            throw new Error('Organization logo is required');
+            return res.status(400).json({ error: 'Organization logo is required' });
         }
 
-        // Generate filenames for requirements and use them for both DB and file upload
+        // Validate logo MIME type
+        if (!Object.keys(ALLOWED_LOGO_TYPES).includes(logoFile.mimetype)) {
+            return res.status(400).json({ 
+                error: 'Logo must be JPG or PNG format' 
+            });
+        }
+
+        // Validate logo file extension
+        const logoExt = path.extname(logoFile.name).toLowerCase();
+        if (!ALLOWED_LOGO_TYPES[logoFile.mimetype].includes(logoExt)) {
+            return res.status(400).json({ 
+                error: 'Logo file extension does not match its content type' 
+            });
+        }
+
+        // Validate logo file size
+        if (logoFile.size > MAX_LOGO_SIZE) {
+            return res.status(400).json({ 
+                error: `Logo file size exceeds ${MAX_LOGO_SIZE / (1024 * 1024)}MB limit` 
+            });
+        }
+
+        // Process and validate requirement files
+        const requirementFiles = {};
+        const validationErrors = [];
+
+        for (const reqItem of requirements) {
+            const fileKey = `requirement_${reqItem.requirement_id}`;
+            const file = req.files?.[fileKey];
+            
+            if (file) {
+                // Validate MIME type
+                if (!Object.keys(ALLOWED_MIME_TYPES).includes(file.mimetype)) {
+                    validationErrors.push({
+                        requirement_id: reqItem.requirement_id,
+                        error: `Invalid file type. Allowed: PDF, DOC, DOCX, XLS, XLSX, JPG, PNG`
+                    });
+                    continue;
+                }
+
+                // Validate file extension
+                const ext = path.extname(file.name).toLowerCase();
+                const allowedExts = ALLOWED_MIME_TYPES[file.mimetype];
+                if (!allowedExts.includes(ext)) {
+                    validationErrors.push({
+                        requirement_id: reqItem.requirement_id,
+                        error: `File extension (${ext}) does not match its content type`
+                    });
+                    continue;
+                }
+
+                // Validate file size
+                if (file.size > MAX_FILE_SIZE) {
+                    validationErrors.push({
+                        requirement_id: reqItem.requirement_id,
+                        error: `File size exceeds ${MAX_FILE_SIZE / (1024 * 1024)}MB limit`
+                    });
+                    continue;
+                }
+
+                // Sanitize filename to prevent path traversal
+                const sanitizedName = file.name.replace(/[^a-zA-Z0-9.-]/g, '_');
+                file.sanitizedName = sanitizedName;
+
+                requirementFiles[reqItem.requirement_id] = file;
+            }
+        }
+
+        // If there are validation errors, return them
+        if (validationErrors.length > 0) {
+            return res.status(400).json({ 
+                error: 'File validation failed',
+                details: validationErrors 
+            });
+        }
+
+        // Generate secure filenames for requirements
         const requirementFilePaths = requirements.map(req => {
             const file = requirementFiles[req.requirement_id];
             if (file) {
-                const filename = `requirement-${Date.now()}-${req.requirement_path}`;
+                // Generate secure filename with timestamp and sanitized original name
+                const timestamp = Date.now();
+                const randomString = Math.random().toString(36).substring(2, 8);
+                const ext = path.extname(file.sanitizedName);
+                const filename = `requirement-${timestamp}-${randomString}${ext}`;
+                
                 return {
                     requirement_id: req.requirement_id,
-                    requirement_path: filename
+                    requirement_path: filename,
+                    original_name: file.name
                 };
             } else {
                 return {
@@ -115,92 +218,222 @@ async function createOrganizationApplication(req, res) {
             }
         });
 
-        // Lookup user_id by email (optimized)
+        // Lookup user_id by email
         const user = await organizationsModel.getUserByEmail(req.user.email);
         if (!user || !user.user_id) {
-            return res.status(404).json({ message: 'User not found.' });
+            return res.status(404).json({ error: 'User not found.' });
         }
-        const dbResult = await organizationsModel.createOrganizationApplication(
-            { ...organization, organization_logo: logoFile.name },
-            executives,
-            requirementFilePaths,
-            user.user_id
-        );
-        // New folder structure: /apps/applications/{app_id}/
-        console.log('dbResult[0]:', dbResult[0]);
+
+        // Generate secure logo filename
+        const logoTimestamp = Date.now();
+        const logoRandomString = Math.random().toString(36).substring(2, 8);
+        const logoExtension = path.extname(logoFile.name);
+        const logoFilename = `logo-${logoTimestamp}-${logoRandomString}${logoExtension}`;
+
+        // Create organization application in database
+        let dbResult;
+        try {
+            dbResult = await organizationsModel.createOrganizationApplication(
+                { ...organization, organization_logo: logoFilename },
+                executives,
+                requirementFilePaths,
+                user.user_id
+            );
+        } catch (dbError) {
+            console.error('Database error:', dbError);
+            return res.status(500).json({ 
+                error: 'Failed to create organization application in database' 
+            });
+        }
+
+        // Validate database result
+        if (!dbResult || !dbResult[0] || !dbResult[0].application_id) {
+            console.error('Invalid database result:', dbResult);
+            return res.status(500).json({ 
+                error: 'Failed to create organization application - invalid response' 
+            });
+        }
+
         const appId = dbResult[0].application_id;
         console.log(`Creating directories for application ID: ${appId}`);
+
+        // Create directory structure
         const appDir = path.join('/app/applications', String(appId));
         const logoDir = path.join(appDir, 'logo');
         const requirementsDir = path.join(appDir, 'requirements');
 
-        // Only create each directory once
-        if (!fs.existsSync(appDir)) {
-            fs.mkdirSync(appDir, { recursive: true });
-        }
-        if (!fs.existsSync(logoDir)) {
-            fs.mkdirSync(logoDir, { recursive: true });
-        }
-        if (!fs.existsSync(requirementsDir)) {
-            fs.mkdirSync(requirementsDir, { recursive: true });
-        }
-        console.log(dbResult[0].logo_path);
-        const logoFilename = path.basename(dbResult[0].logo_path);
-
-        // File write logic with error handling
         try {
-            fs.writeFileSync(
-                path.join(logoDir, logoFilename),
-                logoFile.data
-            );
+            // Create directories with error handling
+            [appDir, logoDir, requirementsDir].forEach(dir => {
+                if (!fs.existsSync(dir)) {
+                    fs.mkdirSync(dir, { recursive: true });
+                    console.log(`Created directory: ${dir}`);
+                }
+            });
+        } catch (dirError) {
+            console.error('Failed to create directories:', dirError);
+            // Attempt to rollback database entry
+            try {
+                await organizationsModel.deleteApplication(appId);
+            } catch (rollbackError) {
+                console.error('Failed to rollback application:', rollbackError);
+            }
+            return res.status(500).json({ 
+                error: 'Failed to create application directories' 
+            });
+        }
+
+        // File write operations with individual error handling
+        const fileWriteErrors = [];
+
+        // Write logo file
+        try {
+            const logoPath = path.join(logoDir, logoFilename);
+            fs.writeFileSync(logoPath, logoFile.data);
+            console.log(`Logo saved: ${logoPath}`);
         } catch (fileErr) {
             console.error('Failed to write logo file:', fileErr);
-            return res.status(500).json({ error: 'Failed to save organization logo.' });
+            fileWriteErrors.push({ file: 'logo', error: fileErr.message });
         }
 
-        for (const req of requirements) {
-            const file = requirementFiles[req.requirement_id];
+        // Write requirement files
+        for (const reqPath of requirementFilePaths) {
+            const file = requirementFiles[reqPath.requirement_id];
             if (file) {
-                const filename = requirementFilePaths.find(r => r.requirement_id === req.requirement_id)?.requirement_path;
                 try {
-                    fs.writeFileSync(
-                        path.join(requirementsDir, filename),
-                        file.data
-                    );
+                    const filePath = path.join(requirementsDir, reqPath.requirement_path);
+                    fs.writeFileSync(filePath, file.data);
+                    console.log(`Requirement saved: ${filePath}`);
                 } catch (fileErr) {
-                    console.error(`Failed to write requirement file (${filename}):`, fileErr);
-                    return res.status(500).json({ error: `Failed to save requirement file: ${filename}` });
+                    console.error(`Failed to write requirement file (${reqPath.requirement_path}):`, fileErr);
+                    fileWriteErrors.push({ 
+                        file: reqPath.requirement_path, 
+                        requirement_id: reqPath.requirement_id,
+                        error: fileErr.message 
+                    });
                 }
             }
         }
 
-        const result = await organizationsModel.getApplication(appId);
+        // If critical files failed to save, return error
+        if (fileWriteErrors.length > 0) {
+            // Log detailed errors
+            console.error('File write errors:', fileWriteErrors);
+            
+            // Attempt cleanup
+            try {
+                if (fs.existsSync(appDir)) {
+                    fs.rmSync(appDir, { recursive: true, force: true });
+                }
+                await organizationsModel.deleteApplication(appId);
+            } catch (cleanupError) {
+                console.error('Failed to cleanup after file write errors:', cleanupError);
+            }
 
-        publishToChannel('organization-applications', {
-            operation: 'CREATE',
-            data: result
-        });
+            return res.status(500).json({ 
+                error: 'Failed to save some files',
+                details: fileWriteErrors 
+            });
+        }
+
+        // Fetch complete application data
+        let result;
+        try {
+            result = await organizationsModel.getApplication(appId);
+            if (!result) {
+                throw new Error('Application created but could not be retrieved');
+            }
+        } catch (fetchError) {
+            console.error('Failed to fetch created application:', fetchError);
+            return res.status(500).json({ 
+                error: 'Application created but could not retrieve details' 
+            });
+        }
+
+        // Publish to channel with error handling
+        try {
+            publishToChannel('organization-applications', {
+                operation: 'CREATE',
+                data: result
+            });
+        } catch (publishError) {
+            console.error('Failed to publish to channel:', publishError);
+            // Don't fail the request if publishing fails
+        }
+
         console.log('Application created successfully:', result);
-        console.log(appId, user.user_id);
-        // Initiate approval process with enhanced logging
+        console.log(`Application ID: ${appId}, User ID: ${user.user_id}`);
+
+        // Initiate approval process with enhanced error handling
         try {
             await organizationsModel.initiateApprovalProcess(appId, user.user_id);
+            console.log('Approval process initiated successfully');
         } catch (approvalError) {
             console.error('Failed to initiate approval process:', approvalError);
             // Don't fail the application creation if approval process fails
+            // But log it for monitoring
         }
 
+        // Prepare successful response
+        const responseData = {
+            ...dbResult[0],
+            logo_url: `/apps/applications/${appId}/logo/${logoFilename}`,
+            requirement_files: requirementFilePaths.map(req => ({
+                requirement_id: req.requirement_id,
+                file_url: req.requirement_path ? `/apps/applications/${appId}/requirements/${req.requirement_path}` : null,
+                original_name: req.original_name
+            }))
+        };
+
+        // Send success response
         res.status(201).json({
             message: 'Organization application submitted successfully',
-            data: {
-                ...dbResult[0],
-                logo_url: `/apps/applications/${appId}/logo/${logoFilename}`
-            }
+            data: responseData
         });
+
     } catch (error) {
+        // Log unexpected errors
+        console.error('Unexpected error in createOrganizationApplication:', error);
+        
+        // Send generic error response
         res.status(500).json({
-            error: error.message || "An error occurred while creating the organization."
+            error: error.message || "An unexpected error occurred while creating the organization application."
         });
+    }
+}
+
+// Optional: Add a helper function to validate file safety
+function isFileSafe(file) {
+    // Additional security checks
+    const dangerousPatterns = [
+        /\.exe$/i,
+        /\.bat$/i,
+        /\.cmd$/i,
+        /\.sh$/i,
+        /\.ps1$/i,
+        /\.vbs$/i,
+        /\.js$/i,
+        /\.jar$/i,
+        /\.com$/i,
+        /\.scr$/i,
+        /\.msi$/i
+    ];
+
+    const filename = file.name.toLowerCase();
+    return !dangerousPatterns.some(pattern => pattern.test(filename));
+}
+
+// Optional: Add cleanup function for failed applications
+async function cleanupFailedApplication(appId) {
+    try {
+        const appDir = path.join('/app/applications', String(appId));
+        if (fs.existsSync(appDir)) {
+            fs.rmSync(appDir, { recursive: true, force: true });
+        }
+        await organizationsModel.deleteApplication(appId);
+        console.log(`Cleaned up failed application: ${appId}`);
+    } catch (error) {
+        console.error(`Failed to cleanup application ${appId}:`, error);
     }
 }
 
@@ -1212,6 +1445,69 @@ async function checkOrgRenewalStatus(req, res){
     }
 }
 
+async function getAllApplicationsByOrganization(req, res) {
+    try {
+        const { organization_id } = req.query;
+        
+        if (!organization_id) {
+            return res.status(400).json({ error: "organization_id is required." });
+        }
+
+        const applications = await organizationsModel.getAllApplicationsByOrganization(organization_id);
+        res.json(applications);
+    } catch (error) {
+        console.error('Error fetching applications by organization:', error);
+        res.status(500).json({
+            error: error.message || "An error occurred while fetching applications by organization.",
+        });
+    }
+}
+
+async function getOrganizationDashboardOverview(req, res) {
+    try {
+        let organization_id = parseInt(req.query.organization_id);
+        const org_name = req.query.org_name;
+
+        // If org_name is provided, look up organization_id using the model function
+        if (!organization_id && org_name) {
+            organization_id = await organizationsModel.getOrganizationIdByName(org_name);
+            if (!organization_id) {
+                return res.status(404).json({ message: 'Organization not found.' });
+            }
+        }
+
+        if (!organization_id) {
+            return res.status(400).json({ message: 'organization_id or org_name is required.' });
+        }
+
+        const overview = await organizationsModel.getOrganizationDashboardOverview(organization_id);
+        res.json(overview);
+    } catch (error) {
+        console.error('Error fetching organization dashboard overview:', error);
+        res.status(500).json({
+            error: error.message || "An error occurred while fetching organization dashboard overview.",
+        });
+    }
+}
+
+async function getAllOrganizations(req, res) {
+    try {
+        const { sessionId } = req.query;
+        const organizations = await organizationsModel.getAllOrganizations();
+        
+        if (sessionId) {
+            subscribeToChannel(sessionId, 'organizations_all');
+        }
+        
+        res.json(organizations);
+    } catch (error) {
+        console.error('Error fetching all organizations:', error);
+        res.status(500).json({
+            error: error.message || "An error occurred while fetching all organizations.",
+        });
+    }
+}
+
 
 
 module.exports = {
@@ -1260,5 +1556,8 @@ module.exports = {
     initiateApprovalProcess,
     getOrganizationLogoApplication,
     getApprovedOrganizationLogos,
-    checkOrgRenewalStatus
+    checkOrgRenewalStatus,
+    getAllApplicationsByOrganization,
+    getOrganizationDashboardOverview,
+    getAllOrganizations
 };

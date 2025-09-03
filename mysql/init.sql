@@ -105,19 +105,11 @@ CREATE TABLE tbl_organization (
     is_recruiting BOOLEAN DEFAULT TRUE,
     is_open_to_all_courses BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-
-    -- Archive / unarchive audit columns
     archived_at TIMESTAMP NULL,
     archived_by VARCHAR(200) NULL,
     archived_reason VARCHAR(255) NULL,
-    unarchived_at TIMESTAMP NULL,
-    unarchived_by VARCHAR(200) NULL,
-    unarchived_reason VARCHAR(255) NULL,
-
-    -- foreign keys (ensure tbl_user exists before running)
     FOREIGN KEY (adviser_id) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
-    FOREIGN KEY (archived_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
-    FOREIGN KEY (unarchived_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE
+    FOREIGN KEY (archived_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE
 );
 
 CREATE TABLE tbl_organization_version (
@@ -141,12 +133,8 @@ CREATE TABLE tbl_organization_version (
     archived_at TIMESTAMP NULL,
     archived_by VARCHAR(200) NULL,
     archived_reason VARCHAR(255) NULL,
-    unarchived_at TIMESTAMP NULL,
-    unarchived_by VARCHAR(200) NULL,
-    unarchived_reason VARCHAR(255) NULL,
     FOREIGN KEY (created_by) REFERENCES tbl_user(user_id),
     FOREIGN KEY (archived_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
-    FOREIGN KEY (unarchived_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
     FOREIGN KEY (organization_id) REFERENCES tbl_organization(organization_id) ON DELETE SET NULL
 );
 
@@ -1091,6 +1079,7 @@ SELECT a.event_id,
 a.title,
 a.description,
 c.name as organization_name,
+a.venue_type,
 a.venue, 
 a.start_time, 
 a.end_time, 
@@ -1098,11 +1087,50 @@ a.status,
 a.type, 
 a.start_date,
 a.end_date,
+a.event_type,
+a.is_open_to,
+a.fee,
+a.capacity,
+a.certificate,
+a.image,
+a.created_at,
 COALESCE(b.status, "Not Registered") as student_status
 FROM tbl_event a
 LEFT JOIN tbl_event_attendance b ON a.event_id = b.event_id AND b.user_id = userId
 LEFT JOIN tbl_organization c ON a.organization_id = c.organization_id
 WHERE a.event_id = eventId;
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetEventAttendeesWithDetails(
+    IN p_event_id INT
+)
+BEGIN
+    SELECT
+        ea.attendance_id,
+        ea.event_id,
+        ea.user_id,
+        CONCAT(u.f_name, ' ', u.l_name) AS full_name,
+        u.email,
+        u.profile_picture,
+        ea.status AS attendance_status,
+        te.remarks,
+        ea.time_in,
+        ea.time_out,
+        ea.created_at AS registration_date,
+        t.transaction_id,
+        t.amount,
+        tt.label AS transaction_type,
+        t.status AS transaction_status,
+        t.proof_image,
+        t.created_at AS transaction_created_at
+    FROM tbl_event_attendance ea
+    LEFT JOIN tbl_user u ON ea.user_id = u.user_id
+    LEFT JOIN tbl_transaction_event te ON ea.event_id = te.event_id 
+    LEFT JOIN tbl_transaction t ON te.transaction_id = t.transaction_id AND ea.user_id = t.user_id
+    LEFT JOIN tbl_transaction_type tt ON t.transaction_type_id = tt.transaction_type_id
+    WHERE ea.event_id = p_event_id;
 END $$
 DELIMITER ;
 
@@ -1301,6 +1329,189 @@ END $$
 DELIMITER ;
 
 DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE ArchiveEvent(
+    IN p_event_id INT,
+    IN p_user_id VARCHAR(200),
+    IN p_reason VARCHAR(255)
+)
+BEGIN
+    DECLARE v_user_email VARCHAR(100);
+
+    IF p_event_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'event_id required';
+    END IF;
+    IF p_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'user_id required';
+    END IF;
+
+    -- Only allow archiving SDAO events
+    IF NOT EXISTS (SELECT 1 FROM tbl_event WHERE event_id = p_event_id AND event_type = 'SDAO') THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Only SDAO events can be archived with this procedure';
+    END IF;
+
+    UPDATE tbl_event
+    SET status = 'Archived'
+    WHERE event_id = p_event_id;
+
+    SELECT email INTO v_user_email FROM tbl_user WHERE user_id = p_user_id LIMIT 1;
+    IF v_user_email IS NULL THEN SET v_user_email = ''; END IF;
+
+    CALL LogAction(
+        v_user_email,
+        CONCAT('Archived SDAO event ID ', p_event_id, IF(p_reason IS NOT NULL, CONCAT(' (Reason: ', p_reason, ')'), '')),
+        'event',
+        JSON_OBJECT('event_id', p_event_id, 'archived_at', NOW(), 'reason', p_reason),
+        CONCAT('/events/', p_event_id),
+        NULL
+    );
+
+    SELECT * FROM tbl_event WHERE event_id = p_event_id LIMIT 1;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE UnarchiveEvent(
+    IN p_event_id INT,
+    IN p_user_id VARCHAR(200),
+    IN p_reason VARCHAR(255)
+)
+BEGIN
+    DECLARE v_user_email VARCHAR(100);
+
+    IF p_event_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'event_id required';
+    END IF;
+    IF p_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'user_id required';
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM tbl_event WHERE event_id = p_event_id AND event_type = 'SDAO') THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Only SDAO events can be unarchived with this procedure';
+    END IF;
+
+    UPDATE tbl_event
+    SET status = 'Approved'
+    WHERE event_id = p_event_id AND status = 'Archived';
+
+    SELECT email INTO v_user_email FROM tbl_user WHERE user_id = p_user_id LIMIT 1;
+    IF v_user_email IS NULL THEN SET v_user_email = ''; END IF;
+
+    CALL LogAction(
+        v_user_email,
+        CONCAT('Unarchived SDAO event ID ', p_event_id, IF(p_reason IS NOT NULL AND p_reason != '', CONCAT(' (Reason: ', p_reason, ')'), '')),
+        'event',
+        JSON_OBJECT('event_id', p_event_id, 'unarchived_at', NOW(), 'reason', p_reason),
+        CONCAT('/events/', p_event_id),
+        NULL
+    );
+
+    SELECT * FROM tbl_event WHERE event_id = p_event_id LIMIT 1;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE UpdateEvent(
+    IN p_event_id INT,
+    IN p_title VARCHAR(300),
+    IN p_description TEXT,
+    IN p_venue_type ENUM('Face to face', 'Online'),
+    IN p_venue VARCHAR(200),
+    IN p_start_date DATE,
+    IN p_end_date DATE,
+    IN p_start_time TIME,
+    IN p_end_time TIME,
+    IN p_status ENUM('Pending', 'Approved', 'Rejected', 'Archived'),
+    IN p_type ENUM('Paid', 'Free'),
+    IN p_is_open_to ENUM('Members only', 'Open to all', 'NU Students only'),
+    IN p_fee INT,
+    IN p_capacity INT,
+    IN p_image TEXT,
+    IN p_user_id VARCHAR(200)
+)
+BEGIN
+    DECLARE v_user_email VARCHAR(100);
+
+    IF p_event_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'event_id required';
+    END IF;
+    IF p_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'user_id required';
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM tbl_event WHERE event_id = p_event_id AND event_type = 'SDAO') THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Only SDAO events can be updated with this procedure';
+    END IF;
+
+    UPDATE tbl_event
+    SET title = p_title,
+        description = p_description,
+        venue_type = p_venue_type,
+        venue = p_venue,
+        start_date = p_start_date,
+        end_date = p_end_date,
+        start_time = p_start_time,
+        end_time = p_end_time,
+        status = p_status,
+        type = p_type,
+        is_open_to = p_is_open_to,
+        fee = p_fee,
+        capacity = p_capacity,
+        image = p_image
+    WHERE event_id = p_event_id;
+
+    SELECT email INTO v_user_email FROM tbl_user WHERE user_id = p_user_id LIMIT 1;
+    IF v_user_email IS NULL THEN SET v_user_email = ''; END IF;
+
+    CALL LogAction(
+        v_user_email,
+        CONCAT('Updated SDAO event ID ', p_event_id),
+        'event',
+        JSON_OBJECT('event_id', p_event_id, 'updated_at', NOW()),
+        CONCAT('/events/', p_event_id),
+        NULL
+    );
+
+    SELECT * FROM tbl_event WHERE event_id = p_event_id LIMIT 1;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE DeleteEvent(
+    IN p_event_id INT,
+    IN p_user_id VARCHAR(200),
+    IN p_reason VARCHAR(255)
+)
+BEGIN
+    DECLARE v_user_email VARCHAR(100);
+
+    IF p_event_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'event_id required';
+    END IF;
+    IF p_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'user_id required';
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM tbl_event WHERE event_id = p_event_id AND event_type = 'SDAO') THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Only SDAO events can be deleted with this procedure';
+    END IF;
+
+    DELETE FROM tbl_event WHERE event_id = p_event_id;
+
+    SELECT email INTO v_user_email FROM tbl_user WHERE user_id = p_user_id LIMIT 1;
+    IF v_user_email IS NULL THEN SET v_user_email = ''; END IF;
+
+    CALL LogAction(
+        v_user_email,
+        CONCAT('Deleted SDAO event ID ', p_event_id, IF(p_reason IS NOT NULL, CONCAT(' (Reason: ', p_reason, ')'), '')),
+        'event',
+        JSON_OBJECT('event_id', p_event_id, 'deleted_at', NOW(), 'reason', p_reason),
+        '/events',
+        NULL
+    );
+END$$
+DELIMITER ;
+
+DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE RegisterEvent(IN
 	event_id INT,   
     user_id VARCHAR(200)
@@ -1362,7 +1573,6 @@ BEGIN
     FROM tbl_organization o
     LEFT JOIN tbl_program p ON o.base_program_id = p.program_id
     LEFT JOIN tbl_renewal_cycle c ON o.organization_id = c.organization_id
-    WHERE o.status = 'Approved'
     GROUP BY o.organization_id
     ORDER BY o.created_at DESC;
 END $$
@@ -1582,12 +1792,22 @@ END $$
 DELIMITER ;
 
 DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE AddCertificateTemplate(IN
-    p_event_id INT,
-    p_template_path VARCHAR(255),
-    p_uploaded_by VARCHAR(200)
+CREATE DEFINER='admin'@'%' PROCEDURE AddCertificateTemplate(
+    IN p_event_id INT,
+    IN p_template_path VARCHAR(255),
+    IN p_uploaded_by VARCHAR(200)
 )
 BEGIN
+    -- Check if uploaded_by exists
+    IF NOT EXISTS (SELECT 1 FROM tbl_user WHERE user_id = p_uploaded_by) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Uploader user_id does not exist';
+    END IF;
+
+    -- Check if event exists
+    IF NOT EXISTS (SELECT 1 FROM tbl_event WHERE event_id = p_event_id) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Event does not exist';
+    END IF;
+
     IF EXISTS (SELECT 1 FROM tbl_certificate_template WHERE event_id = p_event_id) THEN
         UPDATE tbl_certificate_template 
         SET template_path = p_template_path,
@@ -3375,6 +3595,130 @@ END $$
 DELIMITER ;
 
 DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetEventsByUserRole(IN p_user_id VARCHAR(200))
+BEGIN
+    DECLARE v_role_name VARCHAR(100);
+    DECLARE v_college_id INT;
+    DECLARE v_program_id INT;
+
+    -- Get user role, program, and college
+    SELECT r.role_name, u.program_id, p.college_id
+      INTO v_role_name, v_program_id, v_college_id
+      FROM tbl_user u
+      JOIN tbl_role r ON u.role_id = r.role_id
+      LEFT JOIN tbl_program p ON u.program_id = p.program_id
+     WHERE u.user_id = p_user_id
+     LIMIT 1;
+
+    -- SDAO or Academic Director: show all events
+    IF v_role_name IN ('SDAO', 'Academic Director') THEN
+        SELECT 
+            e.*, 
+            o.name AS organization_name,
+            (
+                SELECT JSON_ARRAYAGG(
+                    JSON_OBJECT(
+                        'organization_id', ec.organization_id,
+                        'organization_name', co.name,
+                        'base_program_id', co.base_program_id,
+                        'logo', co.logo
+                    )
+                )
+                FROM tbl_event_collaborator ec
+                LEFT JOIN tbl_organization co ON ec.organization_id = co.organization_id
+                WHERE ec.event_id = e.event_id
+            ) AS collaborators
+        FROM tbl_event e
+        LEFT JOIN tbl_organization o ON e.organization_id = o.organization_id;
+
+    -- Dean: show all SDAO events, all org events under same college, and collaborations
+    ELSEIF v_role_name = 'Dean' THEN
+        SELECT DISTINCT 
+            e.*, 
+            o.name AS organization_name,
+            (
+                SELECT JSON_ARRAYAGG(
+                    JSON_OBJECT(
+                        'organization_id', ec.organization_id,
+                        'organization_name', co.name,
+                        'base_program_id', co.base_program_id,
+                        'logo', co.logo
+                    )
+                )
+                FROM tbl_event_collaborator ec
+                LEFT JOIN tbl_organization co ON ec.organization_id = co.organization_id
+                WHERE ec.event_id = e.event_id
+            ) AS collaborators
+        FROM tbl_event e
+        LEFT JOIN tbl_organization o ON e.organization_id = o.organization_id
+        LEFT JOIN tbl_program p ON o.base_program_id = p.program_id
+        LEFT JOIN tbl_event_collaborator ec ON e.event_id = ec.event_id
+        LEFT JOIN tbl_organization co ON ec.organization_id = co.organization_id
+        LEFT JOIN tbl_program cp ON co.base_program_id = cp.program_id
+        WHERE 
+            e.event_type = 'SDAO'
+            OR (p.college_id = v_college_id)
+            OR (cp.college_id = v_college_id);
+
+    -- Program Chair: show all SDAO events, all org events under same program, and collaborations
+    ELSEIF v_role_name = 'Program Chair' THEN
+        SELECT DISTINCT 
+            e.*, 
+            o.name AS organization_name,
+            (
+                SELECT JSON_ARRAYAGG(
+                    JSON_OBJECT(
+                        'organization_id', ec.organization_id,
+                        'organization_name', co.name,
+                        'base_program_id', co.base_program_id,
+                        'logo', co.logo
+                    )
+                )
+                FROM tbl_event_collaborator ec
+                LEFT JOIN tbl_organization co ON ec.organization_id = co.organization_id
+                WHERE ec.event_id = e.event_id
+            ) AS collaborators
+        FROM tbl_event e
+        LEFT JOIN tbl_organization o ON e.organization_id = o.organization_id
+        LEFT JOIN tbl_event_collaborator ec ON e.event_id = ec.event_id
+        LEFT JOIN tbl_organization co ON ec.organization_id = co.organization_id
+        WHERE 
+            e.event_type = 'SDAO'
+            OR (o.base_program_id = v_program_id)
+            OR (co.base_program_id = v_program_id);
+
+    -- Other users: SDAO/institution events, org-owned events, and collaborations
+    ELSE
+        SELECT DISTINCT 
+            e.*, 
+            o.name AS organization_name,
+            (
+                SELECT JSON_ARRAYAGG(
+                    JSON_OBJECT(
+                        'organization_id', ec.organization_id,
+                        'organization_name', co.name,
+                        'base_program_id', co.base_program_id,
+                        'logo', co.logo
+                    )
+                )
+                FROM tbl_event_collaborator ec
+                LEFT JOIN tbl_organization co ON ec.organization_id = co.organization_id
+                WHERE ec.event_id = e.event_id
+            ) AS collaborators
+        FROM tbl_event e
+        LEFT JOIN tbl_organization o ON e.organization_id = o.organization_id
+        LEFT JOIN tbl_event_collaborator ec ON e.event_id = ec.event_id
+        LEFT JOIN tbl_organization_members om ON om.organization_id = ec.organization_id AND om.user_id = p_user_id
+        WHERE 
+            e.event_type = 'SDAO'
+            OR e.user_id = p_user_id
+            OR e.organization_id IN (SELECT organization_id FROM tbl_organization_members WHERE user_id = p_user_id)
+            OR om.user_id IS NOT NULL;
+    END IF;
+END$$
+DELIMITER ;
+
+DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE CheckEventTitle(
     IN p_title VARCHAR(300)
 )
@@ -3495,39 +3839,6 @@ BEGIN
     LEFT JOIN tbl_renewal_cycle rc ON e.organization_id = rc.organization_id AND e.cycle_number = rc.cycle_number
     WHERE e.event_id = p_event_id
     LIMIT 1;
-END $$
-DELIMITER ;
-
-DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE GetEventAttendeesWithDetails(
-    IN p_event_id INT
-)
-BEGIN
-    SELECT
-        ea.attendance_id,
-        ea.event_id,
-        ea.user_id,
-        CONCAT(u.f_name, ' ', u.l_name) AS full_name,
-        u.email,
-        u.profile_picture,
-        ea.status AS attendance_status,
-        te.remarks,
-        ea.time_in,
-        ea.time_out,
-        ea.created_at AS registration_date,
-        t.transaction_id,
-        t.amount,
-            tt.label AS transaction_type,
-        t.status AS transaction_status,
-        t.proof_image,
-        t.created_at AS transaction_created_at
-    FROM tbl_event_attendance ea
-
-    LEFT JOIN tbl_user u ON ea.user_id = u.user_id
-    LEFT JOIN tbl_transaction_event te ON ea.event_id = te.event_id AND ea.user_id = (SELECT user_id FROM tbl_transaction WHERE transaction_id = te.transaction_id LIMIT 1)
-       LEFT JOIN tbl_transaction t ON te.transaction_id = t.transaction_id
-        LEFT JOIN tbl_transaction_type tt ON t.transaction_type_id = tt.transaction_type_id
-    WHERE ea.event_id = p_event_id;
 END $$
 DELIMITER ;
 
@@ -4584,68 +4895,48 @@ DELIMITER ;
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetEventStatistics(IN p_event_id INT)
 BEGIN
-    -- Number of attendees (status = 'Attended')
-    SELECT COUNT(*) INTO @attendees_count
+    -- Total registered
+    SELECT COUNT(*) INTO @total_registered
     FROM tbl_event_attendance
-    WHERE event_id = p_event_id AND (status = 'Attended' OR status = 'Evaluated');
-    
-    -- Number of feedbacks (status = 'Evaluated' or has evaluation)
-    SELECT COUNT(DISTINCT ea.user_id) INTO @feedback_count
-    FROM tbl_event_attendance ea
-    LEFT JOIN tbl_evaluation e ON ea.user_id = e.user_id AND ea.event_id = e.event_id
-    WHERE ea.event_id = p_event_id 
-    AND (ea.status = 'Evaluated' OR e.evaluation_id IS NOT NULL);
-    
+    WHERE event_id = p_event_id AND status IN ('Registered', 'Attended', 'Evaluated');
+
+    -- Total attended (Attended or Evaluated)
+    SELECT COUNT(*) INTO @total_attended
+    FROM tbl_event_attendance
+    WHERE event_id = p_event_id AND status IN ('Attended', 'Evaluated');
+
+    -- Total evaluated (Evaluated)
+    SELECT COUNT(*) INTO @total_evaluated
+    FROM tbl_event_attendance
+    WHERE event_id = p_event_id AND status = 'Evaluated';
+
+    -- Attendance Rate
+    SET @attendance_rate = IF(@total_registered > 0, ROUND((@total_attended / @total_registered) * 100, 1), 0);
+
+    -- Evaluation Completion Rate
+    SET @evaluation_rate = IF(@total_attended > 0, ROUND((@total_evaluated / @total_attended) * 100, 1), 0);
+
     -- Average rating (average of all likert_4 responses)
     SELECT AVG(CAST(response_value AS DECIMAL)) INTO @avg_rating
     FROM tbl_evaluation_response er
     JOIN tbl_evaluation e ON er.evaluation_id = e.evaluation_id
     JOIN tbl_evaluation_question eq ON er.question_id = eq.question_id
     WHERE e.event_id = p_event_id AND eq.question_type = 'likert_4';
-    
+
     -- Average feedback time in seconds
     SELECT AVG(duration_seconds) INTO @avg_feedback_time
     FROM tbl_evaluation
     WHERE event_id = p_event_id;
-    
+
     -- Return all statistics
     SELECT 
-        @attendees_count AS attendeesCount,
-        @feedback_count AS feedbackCount,
+        @total_attended AS totalAttended,
+        @attendance_rate AS attendanceRate,
+        @total_evaluated AS totalEvaluated,
+        @evaluation_rate AS evaluationRate,
         ROUND(COALESCE(@avg_rating, 0), 2) AS averageRating,
         CONCAT(FLOOR(COALESCE(@avg_feedback_time, 0) / 60), 'm ', 
                MOD(COALESCE(@avg_feedback_time, 0), 60), 's') AS avgFeedbackTime;
-END $$
-DELIMITER ;
-
-DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE GetEventStatsForComponent(IN p_event_id INT)
-BEGIN
-    DECLARE v_attendees_count INT;
-    DECLARE v_feedback_count INT;
-    DECLARE v_avg_rating DECIMAL(10,2);
-    DECLARE v_avg_feedback_time VARCHAR(20);
-    
-    -- Get statistics
-    CALL GetEventStatistics(p_event_id);
-    
-    -- Format the results for React component
-    SELECT 
-        attendeesCount,
-        feedbackCount,
-        averageRating,
-        avgFeedbackTime
-    FROM (
-        SELECT 
-            @attendees_count AS attendeesCount,
-            @feedback_count AS feedbackCount,
-            ROUND(COALESCE(@avg_rating, 0), 2) AS averageRating,
-            CASE 
-                WHEN @avg_feedback_time IS NULL THEN '0s'
-                WHEN @avg_feedback_time < 60 THEN CONCAT(@avg_feedback_time, 's')
-                ELSE CONCAT(FLOOR(@avg_feedback_time / 60), 'm ', MOD(@avg_feedback_time, 60), 's')
-            END AS avgFeedbackTime
-    ) AS stats;
 END $$
 DELIMITER ;
 
@@ -5853,83 +6144,86 @@ BEGIN
 END$$
 DELIMITER ;
 
-    DELIMITER $$
-    CREATE DEFINER='admin'@'%' PROCEDURE RejectEventApplication(
-        IN p_approval_id INT,
-        IN p_event_application_id INT,
-        IN p_comment TEXT,
-        IN p_user_id VARCHAR(200)  -- Added user_id parameter for logging
-    )
-    BEGIN
-        DECLARE v_event_id INT;
-        DECLARE v_event_title VARCHAR(300);
-        
-        START TRANSACTION;
-        
-        -- Update the approval status
-        UPDATE tbl_event_approval_process
-        SET 
-            status = 'Rejected',
-            comment = p_comment,
-            approved_at = CURRENT_TIMESTAMP
-        WHERE event_approval_id = p_approval_id;
-        
-        -- Get the proposed event ID and title
-        SELECT e.proposed_event_id, ev.title INTO v_event_id, v_event_title
-        FROM tbl_event_application e
-        LEFT JOIN tbl_event ev ON e.proposed_event_id = ev.event_id
-        WHERE e.event_application_id = p_event_application_id;
-        
-        -- Update event application status
-        UPDATE tbl_event_application
-        SET status = 'Rejected',
-            updated_at = CURRENT_TIMESTAMP
-        WHERE event_application_id = p_event_application_id;
-        
-        -- Update the event status if it exists
-        IF v_event_id IS NOT NULL THEN
-            UPDATE tbl_event
-            SET status = 'Rejected'
-            WHERE event_id = v_event_id;
-        END IF;
-        
-        -- Log the rejection
-        INSERT INTO tbl_logs (
-            user_id,
-            action,
-            type,
-            meta_data
-        ) VALUES (
-            p_user_id,
-            CONCAT('Rejected event application for: ', IFNULL(v_event_title, 'Untitled Event')),
-            'Event Rejection',
-            JSON_OBJECT(
-                'approval_id', p_approval_id,
-                'application_id', p_event_application_id,
-                'event_id', IFNULL(v_event_id, 'NULL'),
-                'comment', p_comment
-            )
-        );
-        COMMIT;
-        SELECT 
-            eap.event_approval_id as id,
-            eap.approver_id as user_id,
-            u.f_name,
-            u.l_name,
-            u.email,
-            r.role_name,
-            eap.status,
-            eap.comment,
-            eap.step_number as step,
-            eap.approved_at AS timestamp
-        FROM tbl_event_approval_process eap
-        JOIN tbl_user u ON eap.approver_id = u.user_id
-        JOIN tbl_role r ON eap.approval_role_id = r.role_id
-        WHERE eap.event_application_id = p_event_application_id
-        AND u.user_id = p_user_id
-        ORDER BY eap.step_number;
-    END$$
-    DELIMITER ;
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE RejectEventApplication(
+    IN p_approval_id INT,
+    IN p_event_application_id INT,
+    IN p_comment TEXT,
+    IN p_user_id VARCHAR(200)  -- Added user_id parameter for logging
+)
+BEGIN
+    DECLARE v_event_id INT;
+    DECLARE v_event_title VARCHAR(300);
+    DECLARE v_user_email VARCHAR(100);
+
+    START TRANSACTION;
+
+    -- Update the approval status
+    UPDATE tbl_event_approval_process
+    SET 
+        status = 'Rejected',
+        comment = p_comment,
+        approved_at = CURRENT_TIMESTAMP
+    WHERE event_approval_id = p_approval_id;
+
+    -- Get the proposed event ID and title
+    SELECT e.proposed_event_id, ev.title INTO v_event_id, v_event_title
+    FROM tbl_event_application e
+    LEFT JOIN tbl_event ev ON e.proposed_event_id = ev.event_id
+    WHERE e.event_application_id = p_event_application_id;
+
+    -- Update event application status
+    UPDATE tbl_event_application
+    SET status = 'Rejected',
+        updated_at = CURRENT_TIMESTAMP
+    WHERE event_application_id = p_event_application_id;
+
+    -- Update the event status if it exists
+    IF v_event_id IS NOT NULL THEN
+        UPDATE tbl_event
+        SET status = 'Rejected'
+        WHERE event_id = v_event_id;
+    END IF;
+
+    -- Get user email for logging
+    SELECT email INTO v_user_email FROM tbl_user WHERE user_id = p_user_id LIMIT 1;
+
+    -- Log the rejection using LogAction
+    CALL LogAction(
+        v_user_email,
+        CONCAT('Rejected event application for: ', IFNULL(v_event_title, 'Untitled Event')),
+        'Event Rejection',
+        JSON_OBJECT(
+            'approval_id', p_approval_id,
+            'application_id', p_event_application_id,
+            'event_id', IFNULL(v_event_id, 'NULL'),
+            'comment', p_comment
+        ),
+        NULL,
+        NULL
+    );
+
+    COMMIT;
+
+    SELECT 
+        eap.event_approval_id as id,
+        eap.approver_id as user_id,
+        u.f_name,
+        u.l_name,
+        u.email,
+        r.role_name,
+        eap.status,
+        eap.comment,
+        eap.step_number as step,
+        eap.approved_at AS timestamp
+    FROM tbl_event_approval_process eap
+    JOIN tbl_user u ON eap.approver_id = u.user_id
+    JOIN tbl_role r ON eap.approval_role_id = r.role_id
+    WHERE eap.event_application_id = p_event_application_id
+    AND u.user_id = p_user_id
+    ORDER BY eap.step_number;
+END$$
+DELIMITER ;
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetEventEvaluationFeedbackPeriod(IN p_event_id INT)
@@ -5993,28 +6287,28 @@ CREATE DEFINER='admin'@'%' PROCEDURE UpdateEventEvaluationConfig(
     IN p_group_ids JSON,
     IN p_evaluation_end_date DATE,
     IN p_evaluation_end_time TIME,
-    IN p_user_id VARCHAR(200))
+    IN p_user_id VARCHAR(200)
+)
 BEGIN
     DECLARE i INT DEFAULT 0;
     DECLARE group_count INT;
     DECLARE current_group_id INT;
-    
+    DECLARE v_user_email VARCHAR(100);
+
     -- First, clear existing configuration for this event
     DELETE FROM tbl_event_evaluation_config WHERE event_id = p_event_id;
-    
+
     -- Get the count of groups to add
     SET group_count = JSON_LENGTH(p_group_ids);
-    
+
     -- Add each group in the JSON array
     WHILE i < group_count DO
         SET current_group_id = JSON_EXTRACT(p_group_ids, CONCAT('$[', i, ']'));
-        
         INSERT INTO tbl_event_evaluation_config (event_id, group_id)
         VALUES (p_event_id, current_group_id);
-        
         SET i = i + 1;
     END WHILE;
-    
+
     -- Update evaluation end date/time if provided
     IF p_evaluation_end_date IS NOT NULL AND p_evaluation_end_time IS NOT NULL THEN
         UPDATE tbl_event_evaluation_settings
@@ -6022,15 +6316,13 @@ BEGIN
             end_time = p_evaluation_end_time
         WHERE event_id = p_event_id;
     END IF;
-    
-    -- Log the configuration update
-    INSERT INTO tbl_logs (
-        user_id,
-        action,
-        type,
-        meta_data
-    ) VALUES (
-        p_user_id,
+
+    -- Get user email for logging
+    SELECT email INTO v_user_email FROM tbl_user WHERE user_id = p_user_id LIMIT 1;
+
+    -- Log the configuration update using LogAction
+    CALL LogAction(
+        v_user_email,
         CONCAT('Updated evaluation configuration for event ID: ', p_event_id),
         'Event Evaluation Config',
         JSON_OBJECT(
@@ -6038,7 +6330,9 @@ BEGIN
             'group_ids', p_group_ids,
             'evaluation_end_date', IFNULL(p_evaluation_end_date, 'NULL'),
             'evaluation_end_time', IFNULL(p_evaluation_end_time, 'NULL')
-        )
+        ),
+        NULL,
+        NULL
     );
 END$$
 DELIMITER ;
@@ -6220,16 +6514,20 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'archive reason required';
     END IF;
 
-    -- Update organization status and archive audit fields
+    -- Archive organization
     UPDATE tbl_organization
     SET status = 'Archived',
         archived_at = CURRENT_TIMESTAMP,
         archived_by = p_user_id,
-        archived_reason = p_reason,
-        -- clear any previous unarchive audit
-        unarchived_at = NULL,
-        unarchived_by = NULL,
-        unarchived_reason = NULL
+        archived_reason = p_reason
+    WHERE organization_id = p_organization_id;
+
+    -- Archive all org versions
+    UPDATE tbl_organization_version
+    SET status = 'Archived',
+        archived_at = CURRENT_TIMESTAMP,
+        archived_by = p_user_id,
+        archived_reason = p_reason
     WHERE organization_id = p_organization_id;
 
     -- Lookup user email for LogAction and call stored logger
@@ -6240,7 +6538,7 @@ BEGIN
 
     CALL LogAction(
         v_user_email,
-        CONCAT('Archived organization ID ', p_organization_id),
+        CONCAT('Archived organization ID ', p_organization_id, IF(p_reason IS NOT NULL, CONCAT(' (Reason: ', p_reason, ')'), '')),
         'organization',
         JSON_OBJECT('organization_id', p_organization_id, 'archived_at', NOW(), 'reason', p_reason),
         CONCAT('/admin/organizations/', p_organization_id),
@@ -6268,12 +6566,21 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'user_id required';
     END IF;
 
-    -- Update organization status and set unarchive audit fields. reason may be NULL.
+    -- Unarchive organization
     UPDATE tbl_organization
     SET status = 'Approved',
-        unarchived_at = CURRENT_TIMESTAMP,
-        unarchived_by = p_user_id,
-        unarchived_reason = p_reason
+        archived_at = NULL,
+        archived_by = NULL,
+        archived_reason = NULL
+    WHERE organization_id = p_organization_id
+      AND status = 'Archived';
+
+    -- Unarchive all org versions
+    UPDATE tbl_organization_version
+    SET status = 'Approved',
+        archived_at = NULL,
+        archived_by = NULL,
+        archived_reason = NULL
     WHERE organization_id = p_organization_id
       AND status = 'Archived';
 
@@ -6285,7 +6592,7 @@ BEGIN
 
     CALL LogAction(
         v_user_email,
-        CONCAT('Unarchived organization ID ', p_organization_id),
+        CONCAT('Unarchived organization ID ', p_organization_id, IF(p_reason IS NOT NULL AND p_reason != '', CONCAT(' (Reason: ', p_reason, ')'), '')),
         'organization',
         JSON_OBJECT('organization_id', p_organization_id, 'unarchived_at', NOW(), 'reason', p_reason),
         CONCAT('/admin/organizations/', p_organization_id),
@@ -9387,53 +9694,63 @@ END$$
 DELIMITER ;
 
 DELIMITER $$
-DROP PROCEDURE IF EXISTS GetAddEventStatus$$
 CREATE DEFINER='admin'@'%' PROCEDURE GetAddEventStatus(
     IN p_org_name VARCHAR(200)
 )
 BEGIN
     DECLARE v_org_id INT;
     DECLARE v_event_id INT;
+    DECLARE v_event_status VARCHAR(20);
+    DECLARE v_cycle_number INT;
+    DECLARE v_post_req_count INT DEFAULT 0;
+    DECLARE v_post_req_approved INT DEFAULT 0;
+    DECLARE v_can_add_event BOOLEAN DEFAULT 0;
 
-
+    -- Get organization_id
     SELECT organization_id INTO v_org_id
     FROM tbl_organization
     WHERE name = p_org_name
     LIMIT 1;
 
-
-    SELECT e.event_id
-      INTO v_event_id
-      FROM tbl_event e
-     WHERE e.organization_id = v_org_id
-     ORDER BY e.created_at DESC
+    -- Get most recent event for this org
+    SELECT event_id, status, cycle_number
+      INTO v_event_id, v_event_status, v_cycle_number
+      FROM tbl_event
+     WHERE organization_id = v_org_id
+     ORDER BY created_at DESC
      LIMIT 1;
 
-
     IF v_event_id IS NULL THEN
+        -- No event yet, allow add
         SELECT
             NULL AS id,
             (SELECT MAX(cycle_number) FROM tbl_renewal_cycle WHERE organization_id = v_org_id) AS cycle_number,
-            1 AS status;
+            1 AS can_add_event;
     ELSE
+        -- Count post-event requirements for this org
+        SELECT COUNT(*) INTO v_post_req_count
+        FROM tbl_event_application_requirement r
+        WHERE r.is_applicable_to = 'post-event';
+
+        -- Count approved post-event requirement submissions for this event
+        SELECT COUNT(DISTINCT ers.requirement_id) INTO v_post_req_approved
+        FROM tbl_event_requirement_submissions ers
+        JOIN tbl_event_application_requirement r ON ers.requirement_id = r.requirement_id
+        WHERE ers.event_id = v_event_id
+          AND r.is_applicable_to = 'post-event'
+          AND ers.status = 'Approved';
+
+        -- Allow add if last event is Rejected OR all post-event requirements are approved
+        IF v_event_status = 'Rejected' OR v_post_req_count = v_post_req_approved THEN
+            SET v_can_add_event = 1;
+        ELSE
+            SET v_can_add_event = 0;
+        END IF;
 
         SELECT
-            e.event_id AS id,
-            e.cycle_number,
-            (
-                SELECT COUNT(*)
-                FROM tbl_event_application_requirement r
-                WHERE r.is_applicable_to = 'post-event'
-            ) = (
-                SELECT COUNT(DISTINCT ers.requirement_id)
-                FROM tbl_event_requirement_submissions ers
-                JOIN tbl_event_application_requirement r ON ers.requirement_id = r.requirement_id
-                WHERE ers.event_id = e.event_id
-                  AND r.is_applicable_to = 'post-event'
-                  AND ers.status = 'Approved'
-            ) AS status
-        FROM tbl_event e
-        WHERE e.event_id = v_event_id;
+            v_event_id AS id,
+            v_cycle_number AS cycle_number,
+            v_can_add_event AS can_add_event;
     END IF;
 END$$
 DELIMITER ;
@@ -10519,32 +10836,6 @@ BEGIN
     ELSE
         SELECT * FROM tbl_blocked_period WHERE archived_at IS NULL;
     END IF;
-END$$
-DELIMITER ;
-
-DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE CheckAllPostEventRequirementsSubmitted(
-    IN p_event_id INT,
-    IN p_organization_id INT
-)
-BEGIN
-    DECLARE v_total INT DEFAULT 0;
-    DECLARE v_submitted INT DEFAULT 0;
-
-    -- Count all active post-event requirements for this event's organization
-    SELECT COUNT(*) INTO v_total
-    FROM tbl_event_application_requirement r
-    WHERE r.is_applicable_to = 'post-event'
-      AND r.status = 'active';
-
-    -- Count all unique requirements submitted for this event and organization
-    SELECT COUNT(DISTINCT ers.requirement_id) INTO v_submitted
-    FROM tbl_event_requirement_submissions ers
-    WHERE ers.event_id = p_event_id
-      AND ers.organization_id = p_organization_id
-      AND ers.status = 'Approved';
-
-    SELECT (v_total = v_submitted) AS all_submitted;
 END$$
 DELIMITER ;
 
@@ -12616,43 +12907,6 @@ CREATE INDEX idx_committee_members_user ON tbl_committee_members(user_id);
 
 CREATE INDEX idx_active_end_datetime 
 ON tbl_application_period(is_active, end_date, end_time);
-
--- Additional procedure for post-event requirement checking
-DELIMITER $$
-DROP PROCEDURE IF EXISTS CheckAllPostEventRequirementsSubmitted$$
-CREATE DEFINER='admin'@'%' PROCEDURE CheckAllPostEventRequirementsSubmitted(
-    IN p_event_id INT
-)
-BEGIN
-    DECLARE v_total_post_event_requirements INT DEFAULT 0;
-    DECLARE v_submitted_post_event_requirements INT DEFAULT 0;
-    
-    -- Count total post-event requirements
-    SELECT COUNT(*)
-    INTO v_total_post_event_requirements
-    FROM tbl_event_application_requirement
-    WHERE is_applicable_to = 'post-event';
-    
-    -- Count submitted and approved post-event requirements for the event
-    SELECT COUNT(DISTINCT ers.requirement_id)
-    INTO v_submitted_post_event_requirements
-    FROM tbl_event_requirement_submissions ers
-    INNER JOIN tbl_event_application_requirement ear ON ers.requirement_id = ear.requirement_id
-    WHERE ers.event_id = p_event_id
-      AND ear.is_applicable_to = 'post-event'
-      AND ers.status = 'Approved';
-    
-    -- Return the comparison result
-    SELECT 
-        p_event_id as event_id,
-        v_total_post_event_requirements as total_requirements,
-        v_submitted_post_event_requirements as submitted_requirements,
-        CASE 
-            WHEN v_total_post_event_requirements = v_submitted_post_event_requirements THEN 1
-            ELSE 0
-        END as all_requirements_submitted;
-END$$
-DELIMITER ;
 
 DELIMITER $$
 CREATE DEFINER=`admin`@`%` PROCEDURE `GetOrganizationFinance`(IN p_organization_id INT)

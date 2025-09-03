@@ -3,6 +3,12 @@ const router = express.Router();
 const eventController = require('../controllers/eventController');
 const middleware = require('../../middlewares/middleWare');
 
+router.get(
+  '/events/by-user-role',
+  middleware.validateAzureJWT,
+  eventController.getEventsByUserRole
+);
+
 router.post('/event-applications', middleware.validateAzureJWT, middleware.hasPermission("CREATE_EVENT"),eventController.createEventApplication);
 router.get('/event-applications/:id/details', middleware.validateAzureJWT, middleware.hasPermission("VIEW_EVENT"), eventController.getEventApplicationDetails);
 router.get('/event-applications/requirement', middleware.validateAzureJWT, middleware.hasPermission("VIEW_EVENT"), eventController.getEventApplicationRequirement);
@@ -25,6 +31,9 @@ router.post(
   eventController.uploadOrUpdatePostEventRequirement
 );
 
+router.get('/events/certificate-template', eventController.getCert);
+router.get('/events/sample-certificate', middleware.validateAzureJWT, middleware.hasPermission("UPDATE_EVALUATION"), eventController.getSampleCertificate);
+
 router.post('/events', middleware.validateAzureJWT, middleware.hasPermission("MANAGE_EVENTS"), eventController.addEvent);
 router.post(
   '/events-SDAO',
@@ -34,6 +43,7 @@ router.post(
 );
 router.get('/events/getEventPublicationImage', middleware.validateAzureJWT, middleware.hasPermission("VIEW_EVENT"), eventController.getEventPublicationImage);
 router.get('/events', middleware.validateAzureJWT, middleware.hasPermission("VIEW_EVENT"), eventController.getEvents);
+router.get('/events/feedback', middleware.validateAzureJWT, middleware.hasPermission("VIEW_EVENT"), eventController.getEventEvaluationResponsesByGroup);
 router.get('/events/check-event-title', middleware.validateAzureJWT, middleware.hasPermission(["CREATE_EVENT", "CREATE_SDAO_EVENT"]), eventController.checkEventTitle);
 router.get('/events/evaluation-questions', middleware.validateAzureJWT, middleware.hasPermission("VIEW_EVENT"), eventController.getAllEvaluationQuestions);
 router.get('/events/add-event-status', middleware.validateAzureJWT, eventController.getaddEventStatus);
@@ -43,7 +53,8 @@ router.post('/events/addcertificate', middleware.validateAzureJWT, middleware.ha
 router.get('/events/:id', middleware.validateAzureJWT, middleware.hasPermission("VIEW_EVENT"), eventController.getEventById);
 router.get('/events/attendees', middleware.validateAzureJWT, middleware.hasPermission("VIEW_EVENT"), eventController.getAttendeesbyEventId);
 router.get('/events/:id/stats', middleware.validateAzureJWT, middleware.hasPermission("VIEW_EVENT"), eventController.getEventStats);
-router.get('/events/sample-certificate', middleware.validateAzureJWT, middleware.hasPermission("UPDATE_EVALUATION"), eventController.getSampleCertificate);
+
+
 router.get(
   '/events/:id/evaluation-config',
   middleware.validateAzureJWT,
@@ -62,8 +73,6 @@ router.put(
   middleware.hasPermission("UPDATE_EVALUATION"),
   eventController.updateEventEvaluationConfig
 );
-
-router.get('/events/feedback', middleware.validateAzureJWT, middleware.hasPermission("VIEW_EVENT"), eventController.getEventEvaluationResponsesByGroup);
 router.get('/events/status/:status', middleware.validateAzureJWT, middleware.hasPermission("VIEW_EVENT"), eventController.getEventsByStatus);
 router.put('/events/:id', middleware.validateAzureJWT, middleware.hasPermission("MANAGE_EVENTS"), eventController.updateEvent);
 router.delete('/events/:id', middleware.validateAzureJWT, middleware.hasPermission("MANAGE_EVENTS"), eventController.deleteEvent);
@@ -131,17 +140,38 @@ router.get(
 );
 
 router.get(
-  '/events/check-all-post-event-requirements',
-  middleware.validateAzureJWT,
-  middleware.hasPermission("VIEW_EVENT"),
-  eventController.checkAllPostEventRequirementsSubmitted
-);
-
-router.get(
   '/event-applications/publication-image',
   middleware.validateAzureJWT,
   middleware.hasPermission("VIEW_EVENT"),
   eventController.getEventApplicationPublicationImage
+);
+
+router.put(
+  '/events/:id/sdao-update',
+  middleware.validateAzureJWT,
+  middleware.hasPermission("MANAGE_SDAO_EVENT"),
+  eventController.updateEventSDAO
+);
+
+router.post(
+  '/events/sdao-archive',
+  middleware.validateAzureJWT,
+  middleware.hasPermission("MANAGE_SDAO_EVENT"),
+  eventController.archiveEvent
+);
+
+router.post(
+  '/events/sdao-unarchive',
+  middleware.validateAzureJWT,
+  middleware.hasPermission("MANAGE_SDAO_EVENT"),
+  eventController.unarchiveEvent
+);
+
+router.delete(
+  '/events/sdao-delete',
+  middleware.validateAzureJWT,
+  middleware.hasPermission("MANAGE_SDAO_EVENT"),
+  eventController.deleteEventSDAO
 );
 
 module.exports = router;
