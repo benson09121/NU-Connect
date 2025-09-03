@@ -7,5 +7,6 @@ router.get('/nova/conversations/last', middleware.validateAzureJWT, nova.getLast
 router.post('/nova/conversations', middleware.validateAzureJWT, nova.createConversation);
 router.get('/nova/chat/register', middleware.validateAzureJWT, nova.registerChannel);
 router.post('/nova/chat/send', middleware.validateAzureJWT, nova.sendMessage);
+router.get('/nova/user/organizations', middleware.validateAzureJWT, nova.getUserOrganizations);
 
 module.exports = router;

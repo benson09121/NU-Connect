@@ -15,7 +15,24 @@ async function getLeaderboards(req, res) {
         });
     }
 }
-    async function getActivities(req, res) {
+
+async function getOrganizationAnalytics(req, res) {
+        const { sessionId } = req.query;
+
+        try {
+            const organizations = await analyticsModel.getOrganizationAnalytics();
+            if (sessionId) {
+                subscribeToChannel(sessionId, "analytics_organizations");
+            }
+            res.status(200).json(organizations);
+        } catch (error) {
+            res.status(500).json({
+                error: error.message || "An error occurred while fetching the organization analytics.",
+            });
+        }
+    }
+
+async function getActivities(req, res) {
         const { sessionId, organization_id } = req.query;
 
         try {
@@ -31,21 +48,7 @@ async function getLeaderboards(req, res) {
         }
     }
 
-    async function getOrganizationAnalytics(req, res) {
-        const { sessionId } = req.query;
 
-        try {
-            const organizations = await analyticsModel.getOrganizationAnalytics();
-            if (sessionId) {
-                subscribeToChannel(sessionId, "analytics_organizations");
-            }
-            res.status(200).json(organizations);
-        } catch (error) {
-            res.status(500).json({
-                error: error.message || "An error occurred while fetching the organization analytics.",
-            });
-        }
-    }
 async function getOrganizationFinance(req, res){
     const { sessionId, organization_id } = req.query;
 
