@@ -142,8 +142,9 @@ async function deleteAccount(req, res) {
 
 async function unarchiveAccount(req, res) {
   const { user_id } = req.params;
+  const { reason } = req.body; // reason is optional
   try {
-    await accountModel.unarchiveAccount(user_id, req.user.email);
+    await accountModel.unarchiveAccount(user_id, req.user.email, reason);
 
     const allAccounts = await accountModel.getAccounts();
     publishToChannel('accounts', {

@@ -74,12 +74,12 @@ async function deleteAccount(email, archivedByEmail, reason) {
     }
 }
 
-async function unarchiveAccount(user_id, unarchivedByEmail) {
+async function unarchiveAccount(user_id, unarchivedByEmail, reason = null) {
     const connection = await pool.getConnection();
     try {
         const [rows] = await connection.query(
-            'CALL UnarchiveManagedAccount(?, ?)', 
-            [user_id, unarchivedByEmail]
+            'CALL UnarchiveManagedAccount(?, ?, ?)', 
+            [user_id, unarchivedByEmail, reason]
         );
         return rows[0];
     }

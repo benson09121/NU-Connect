@@ -1603,6 +1603,7 @@ async function archiveEvent(req, res) {
         const result = await eventModel.archiveEvent(event_id, user_id, reason);
         res.status(200).json(result);
     } catch (error) {
+        console.error('[archiveEvent] Error:', error);
         res.status(500).json({ message: error.message });
     }
 }
@@ -1626,6 +1627,7 @@ async function unarchiveEvent(req, res) {
         const result = await eventModel.unarchiveEvent(event_id, user_id, reason || null);
         res.status(200).json(result);
     } catch (error) {
+        console.error('[unarchiveEvent] Error:', error);
         res.status(500).json({ message: error.message });
     }
 }
@@ -1651,6 +1653,7 @@ async function updateEventSDAO(req, res) {
         const result = await eventModel.updateEventSDAO(event_id, event, user_id);
         res.status(200).json(result);
     } catch (error) {
+        console.error('[updateEventSDAO] Error:', error);
         res.status(500).json({ message: error.message });
     }
 }
@@ -1674,6 +1677,7 @@ async function deleteEventSDAO(req, res) {
         await eventModel.deleteEventSDAO(event_id, user_id, reason);
         res.status(200).json({ message: "Event deleted successfully." });
     } catch (error) {
+        console.error('[deleteEventSDAO] Error:', error);
         res.status(500).json({ message: error.message });
     }
 }

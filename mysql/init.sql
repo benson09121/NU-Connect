@@ -2180,7 +2180,7 @@ BEGIN
     DECLARE v_existing_user INT DEFAULT 0;
     DECLARE student_role_id INT;
     DECLARE v_created_by_id VARCHAR(200);
-    
+
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
         ROLLBACK;
@@ -2198,7 +2198,7 @@ BEGIN
     SELECT role_id INTO student_role_id 
     FROM tbl_role 
     WHERE LOWER(role_name) = 'student';
-    
+
     -- Get role ID from role name
     SELECT role_id INTO v_role_id 
     FROM tbl_role 
@@ -2223,8 +2223,6 @@ BEGIN
             archived_at = NULL,
             archived_by = NULL,
             archived_reason = NULL,
-            unarchived_at = CASE WHEN status = 'Archive' THEN CURRENT_TIMESTAMP ELSE unarchived_at END,
-            unarchived_by = CASE WHEN status = 'Archive' THEN v_created_by_id ELSE unarchived_by END,
             updated_at = CURRENT_TIMESTAMP
         WHERE email = p_email;
 
@@ -2263,7 +2261,7 @@ BEGIN
             NULL
         );
     END IF;
-    
+
     COMMIT;
 
     SELECT u.user_id as id,
@@ -2276,9 +2274,7 @@ BEGIN
            u.updated_at,
            u.archived_at,
            u.archived_by,
-           u.archived_reason,
-           u.unarchived_at,
-           u.unarchived_by
+           u.archived_reason
     FROM tbl_user u
     JOIN tbl_role r ON u.role_id = r.role_id
     LEFT JOIN tbl_program p ON u.program_id = p.program_id
@@ -2309,7 +2305,7 @@ BEGIN
 
     -- Get current email and status for logging
     SELECT email, status INTO v_email, v_current_status FROM tbl_user WHERE user_id = p_user_id;
-    
+
     IF v_email IS NULL THEN
         SIGNAL SQLSTATE '45000' 
         SET MESSAGE_TEXT = 'User not found';
@@ -2348,8 +2344,6 @@ BEGIN
         archived_at = CASE WHEN p_status = 'Archive' AND v_current_status != 'Archive' THEN CURRENT_TIMESTAMP ELSE archived_at END,
         archived_by = CASE WHEN p_status = 'Archive' AND v_current_status != 'Archive' THEN v_updated_by_id ELSE archived_by END,
         archived_reason = CASE WHEN p_status = 'Archive' AND v_current_status != 'Archive' THEN 'Status updated to Archive' ELSE archived_reason END,
-        unarchived_at = CASE WHEN p_status != 'Archive' AND v_current_status = 'Archive' THEN CURRENT_TIMESTAMP ELSE unarchived_at END,
-        unarchived_by = CASE WHEN p_status != 'Archive' AND v_current_status = 'Archive' THEN v_updated_by_id ELSE unarchived_by END,
         updated_at = CURRENT_TIMESTAMP
     WHERE user_id = p_user_id;
 
@@ -2379,9 +2373,7 @@ BEGIN
            u.updated_at,
            u.archived_at,
            u.archived_by,
-           u.archived_reason,
-           u.unarchived_at,
-           u.unarchived_by
+           u.archived_reason
     FROM tbl_user u
     JOIN tbl_role r ON u.role_id = r.role_id
     LEFT JOIN tbl_program p ON u.program_id = p.program_id
@@ -2399,26 +2391,20 @@ BEGIN
     DECLARE user_count INT;
     DECLARE v_user_id VARCHAR(200);
     DECLARE v_archived_by_id VARCHAR(200);
-    
+
     -- Get archiver user_id
     SELECT user_id INTO v_archived_by_id FROM tbl_user WHERE email = p_archived_by_email LIMIT 1;
     IF v_archived_by_id IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Archiver user not found';
     END IF;
-    
-    -- Check if the user exists
-    SELECT COUNT(*) INTO user_count
-    FROM tbl_user 
-    WHERE email = p_email;
 
+    -- Check if the user exists
+    SELECT COUNT(*) INTO user_count FROM tbl_user WHERE email = p_email;
     IF user_count = 0 THEN
-        SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'User not found';
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'User not found';
     ELSE
         -- Get the user_id to log the action properly
-        SELECT user_id INTO v_user_id
-        FROM tbl_user
-        WHERE email = p_email;
+        SELECT user_id INTO v_user_id FROM tbl_user WHERE email = p_email;
 
         -- Archive the user with full metadata
         UPDATE tbl_user
@@ -2427,8 +2413,6 @@ BEGIN
             archived_at = CURRENT_TIMESTAMP,
             archived_by = v_archived_by_id,
             archived_reason = COALESCE(p_reason, 'Manual archive via DeleteManagedAccount'),
-            unarchived_at = NULL,
-            unarchived_by = NULL,
             updated_at = CURRENT_TIMESTAMP
         WHERE email = p_email;
 
@@ -2453,9 +2437,7 @@ BEGIN
            u.updated_at,
            u.archived_at,
            u.archived_by,
-           u.archived_reason,
-           u.unarchived_at,
-           u.unarchived_by
+           u.archived_reason
     FROM tbl_user u
     JOIN tbl_role r ON u.role_id = r.role_id
     LEFT JOIN tbl_program p ON u.program_id = p.program_id
@@ -2466,7 +2448,8 @@ DELIMITER ;
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE UnarchiveManagedAccount(
     IN p_user_id VARCHAR(200),
-    IN p_unarchived_by_email VARCHAR(100)
+    IN p_unarchived_by_email VARCHAR(100),
+    IN p_reason VARCHAR(255)
 )
 BEGIN
     DECLARE user_count INT;
@@ -2479,37 +2462,44 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Unarchiver user not found';
     END IF;
 
-    -- Check if user exists and get email (FIXED: separate queries)
+    -- Check if user exists and get email
     SELECT COUNT(*) INTO user_count FROM tbl_user WHERE user_id = p_user_id;
-    
     IF user_count = 0 THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'User not found';
     END IF;
-    
-    -- Get email separately
+
     SELECT email INTO v_email FROM tbl_user WHERE user_id = p_user_id;
 
-    -- Unarchive user with full metadata
+    -- Unarchive user (remove archive metadata)
     UPDATE tbl_user
     SET 
         status = 'Active',
         archived_at = NULL,
         archived_by = NULL,
         archived_reason = NULL,
-        unarchived_at = CURRENT_TIMESTAMP,
-        unarchived_by = v_unarchived_by_id,
         updated_at = CURRENT_TIMESTAMP
     WHERE user_id = p_user_id;
 
-    -- Log the action using LogAction
-    CALL LogAction(
-        p_unarchived_by_email,
-        CONCAT('Unarchived managed account for ', v_email),
-        'account',
-        JSON_OBJECT('reason', 'Manual unarchive', 'target_email', v_email),
-        NULL,
-        NULL
-    );
+    -- Log the action using LogAction (include reason only if provided)
+    IF p_reason IS NOT NULL AND TRIM(p_reason) <> '' THEN
+        CALL LogAction(
+            p_unarchived_by_email,
+            CONCAT('Unarchived managed account for ', v_email),
+            'account',
+            JSON_OBJECT('reason', p_reason, 'target_email', v_email),
+            NULL,
+            NULL
+        );
+    ELSE
+        CALL LogAction(
+            p_unarchived_by_email,
+            CONCAT('Unarchived managed account for ', v_email),
+            'account',
+            JSON_OBJECT('target_email', v_email),
+            NULL,
+            NULL
+        );
+    END IF;
 
     SELECT u.user_id as id,
            CONCAT(u.f_name, ' ', u.l_name) as name,
@@ -2521,9 +2511,7 @@ BEGIN
            u.updated_at,
            u.archived_at,
            u.archived_by,
-           u.archived_reason,
-           u.unarchived_at,
-           u.unarchived_by
+           u.archived_reason
     FROM tbl_user u
     JOIN tbl_role r ON u.role_id = r.role_id
     LEFT JOIN tbl_program p ON u.program_id = p.program_id
@@ -14297,7 +14285,8 @@ VALUES("CREATE_EVENT","Organization"),
 ("APPLY_NEW_ORGANIZATION","Global"),
 ("APPLY_RENEWAL_ORGANIZATION","Organization"),
 ("VIEW_TRANSACTIONS","Global"),
-("MANAGE_TRANSACTIONS","Global");
+("MANAGE_TRANSACTIONS","Global"),
+("MANAGE_SDAO_EVENT","SDAO");
 
 
 INSERT INTO tbl_role_permission (role_id, permission_id) 
