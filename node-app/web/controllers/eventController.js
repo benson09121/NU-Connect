@@ -101,9 +101,9 @@ async function getEvents(req, res) {
 }
 
 async function getaddEventStatus(req, res){
-  const {orgName, sessionId} = req.query;
+  const { orgName, sessionId } = req.query;
   try {
-    const events = await eventModel.getaddEventStatus(orgName);
+    const status = await eventModel.getaddEventStatus(orgName);
 
     if (sessionId) {
       const ch = `addEvent_${orgName}`;
@@ -111,11 +111,11 @@ async function getaddEventStatus(req, res){
       publishToChannel(ch, {
         channel: ch,
         operation: 'SNAPSHOT',
-        data: Array.isArray(events) ? events : []
+        data: status ? [status] : []
       });
     }
 
-    res.status(200).json(events);
+    res.status(200).json(status);
   } catch (error) {
     res.status(500).json({
       error: error.message || "An error occurred while fetching add event status.",
@@ -125,12 +125,34 @@ async function getaddEventStatus(req, res){
 
 async function getEventById(req, res) {
   try {
-    const { sessionId, event_id } = req.query;
-    let event = await eventModel.getEventById(event_id);
+    const event_id = req.params.id || req.query.event_id;
+    const { sessionId } = req.query;
+
+    let eventResult = await eventModel.getEventById(event_id);
+    let event = Array.isArray(eventResult) ? eventResult[0] : eventResult;
+
     if (!event) {
       return res.status(404).json({ message: 'Event not found' });
     }
     event = parseCollaboratorsField(event);
+
+    // Fetch attendees with details
+    let attendees = [];
+    try {
+      attendees = await eventModel.getAttendeesByEventId(event_id);
+    } catch (attErr) {
+      console.warn('[getEventById] Failed to fetch attendees:', attErr.message);
+    }
+    event.attendees = attendees;
+
+    // Fetch event statistics
+    try {
+      const stats = await eventModel.getEventStats(event_id);
+      event.stats = stats || {};
+    } catch (statsErr) {
+      console.warn('[getEventById] Failed to fetch event stats:', statsErr.message);
+      event.stats = {};
+    }
 
     if (sessionId) {
       const ch = `event_${event_id}`;
@@ -1042,12 +1064,25 @@ async function getEventEvaluationFeedbackPeriod(req, res) {
 async function addCertificate(req, res) {
   try {
     console.log('addCertificate: Request received');
-    const { event_id } = req.body;
+    const { event_id, user_email } = req.body;
     console.log('addCertificate: event_id:', event_id);
 
     if (!req.files || !req.files.file) {
       console.error('addCertificate: No file uploaded');
       return res.status(400).json({ message: 'No file uploaded' });
+    }
+
+    // Always prefer DB user_id if email is provided
+    let user_id = req.user?.user_id;
+    if (user_email) {
+      const user = await eventModel.getUserByEmail(user_email);
+      if (!user) {
+        return res.status(404).json({ message: "User not found for the provided email." });
+      }
+      user_id = user.user_id;
+    }
+    if (!user_id) {
+      return res.status(400).json({ message: "user_id (or user_email) is required." });
     }
 
     const uploadedFile = req.files.file;
@@ -1056,8 +1091,7 @@ async function addCertificate(req, res) {
     const fileBuffer = uploadedFile.data;
     console.log('addCertificate: File buffer size:', fileBuffer.length);
 
-    if (!uploadedFile.mimetype.includes('application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      'application/octet-stream')) {
+    if (!uploadedFile.mimetype.includes('application/vnd.openxmlformats-officedocument.wordprocessingml.document')) {
       console.error('addCertificate: Invalid file type:', uploadedFile.mimetype);
       return res.status(400).json({ message: 'Only .docx files allowed' });
     }
@@ -1074,13 +1108,49 @@ async function addCertificate(req, res) {
       return res.status(500).json({ message: 'Error saving file', error: writeError.message });
     }
 
-    await eventModel.AddCertificateTemplate(event_id, filename, req.user?.user_id);
+    await eventModel.AddCertificateTemplate(event_id, filename, user_id);
     console.log('addCertificate: Database insert successful');
 
     res.status(201).json({ path: templatePath });
   } catch (error) {
     console.error('addCertificate: Unexpected error:', error);
     res.status(500).json({ message: 'An unexpected error occurred', error: error.message });
+  }
+}
+
+async function getCert(req, res) {
+  try {
+    const { event_id } = req.query;
+    console.log('getCert: Starting for event_id:', event_id);
+
+    if (!event_id) {
+      return res.status(400).json({ message: "event_id is required." });
+    }
+
+    const template = await eventModel.getCertificateTemplate(event_id);
+    if (!template || !template[0] || !template[0].template_path) {
+      throw new Error("Certificate template not found for this event.");
+    }
+
+    const templatePath = `/app/certificates/templates/${template[0].template_path}`;
+    console.log('getCert: Template path:', templatePath);
+
+    if (!fs.existsSync(templatePath)) {
+      throw new Error("Certificate file not found on server.");
+    }
+
+    // Stream the file as a download
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    res.setHeader('Content-Disposition', `attachment; filename="${template[0].template_path}"`);
+    const readStream = fs.createReadStream(templatePath);
+    readStream.on('error', (err) => {
+      console.error('getCert: File stream error:', err);
+      res.status(500).json({ message: 'Error reading certificate file.', error: err.message });
+    });
+    readStream.pipe(res);
+  } catch (error) {
+    console.error('getCert: Error:', error);
+    res.status(500).json({ message: 'An error occurred while downloading the certificate template.', error: error.message });
   }
 }
 
@@ -1131,7 +1201,7 @@ async function getSampleCertificate(req, res) {
     const data = { name: fullName };
     doc.render(data);
 
-    const buf = doc.toBuffer();
+    const buf = doc.getZip().generate({ type: 'nodebuffer' });
 
     const baseFilename = `Certificate_${req.user.f_name.replace(/[^a-z0-9]/gi, '_')}_${req.user.l_name.replace(/[^a-z0-9]/gi, '_')}`;
     const docxPath = path.join("/tmp", `${baseFilename}_${Date.now()}.docx`);
@@ -1486,20 +1556,129 @@ async function getBlockedPeriodsByStatus(req, res) {
   }
 }
 
-async function checkAllPostEventRequirementsSubmitted(req, res) {
+async function getEventsByUserRole(req, res) {
+  try {
+    let user_id = req.user?.user_id || req.query.user_id;
+    const user_email = req.query.user_email;
+
+    // If user_id is not provided but user_email is, look up user_id
+    if ((!user_id || user_id === 'undefined' || user_id === 'null') && user_email) {
+      const user = await eventModel.getUserByEmail(user_email);
+      if (!user) {
+        return res.status(404).json({ message: "User not found for the provided email." });
+      }
+      user_id = user.user_id;
+    }
+
+    if (!user_id) {
+      return res.status(400).json({ message: "user_id (or user_email) is required." });
+    }
+
+    const events = await eventModel.getEventsByUserRole(user_id);
+    res.status(200).json(events);
+  } catch (error) {
+    res.status(500).json({
+      error: error.message || "An error occurred while fetching events by user role.",
+    });
+  }
+}
+
+async function archiveEvent(req, res) {
     try {
-        const { event_id, organization_id } = req.query;
-        if (!event_id || !organization_id) {
-            return res.status(400).json({ message: "event_id and organization_id are required" });
+        const { event_id, reason, user_email } = req.body;
+        let user_id = req.user?.user_id;
+
+        // Allow lookup by email if user_id is missing
+        if ((!user_id || user_id === 'undefined' || user_id === 'null') && user_email) {
+            const user = await eventModel.getUserByEmail(user_email);
+            if (!user) {
+                return res.status(404).json({ message: "User not found for the provided email." });
+            }
+            user_id = user.user_id;
         }
-        const allSubmitted = await eventModel.checkAllPostEventRequirementsSubmitted(
-            parseInt(event_id), parseInt(organization_id)
-        );
-        res.status(200).json({ all_submitted: allSubmitted });
+
+        if (!event_id || !user_id || !reason) {
+            return res.status(400).json({ message: "event_id, user_id (or user_email), and reason are required." });
+        }
+        const result = await eventModel.archiveEvent(event_id, user_id, reason);
+        res.status(200).json(result);
     } catch (error) {
-        res.status(500).json({
-            error: error.message || "An error occurred while checking post-event requirements."
-        });
+        console.error('[archiveEvent] Error:', error);
+        res.status(500).json({ message: error.message });
+    }
+}
+
+async function unarchiveEvent(req, res) {
+    try {
+        const { event_id, reason, user_email } = req.body;
+        let user_id = req.user?.user_id;
+
+        if ((!user_id || user_id === 'undefined' || user_id === 'null') && user_email) {
+            const user = await eventModel.getUserByEmail(user_email);
+            if (!user) {
+                return res.status(404).json({ message: "User not found for the provided email." });
+            }
+            user_id = user.user_id;
+        }
+
+        if (!event_id || !user_id) {
+            return res.status(400).json({ message: "event_id and user_id (or user_email) are required." });
+        }
+        const result = await eventModel.unarchiveEvent(event_id, user_id, reason || null);
+        res.status(200).json(result);
+    } catch (error) {
+        console.error('[unarchiveEvent] Error:', error);
+        res.status(500).json({ message: error.message });
+    }
+}
+
+async function updateEventSDAO(req, res) {
+    try {
+        const event_id = req.params.id;
+        const event = req.body;
+        let user_id = req.user?.user_id;
+        const user_email = req.body.user_email;
+
+        if ((!user_id || user_id === 'undefined' || user_id === 'null') && user_email) {
+            const user = await eventModel.getUserByEmail(user_email);
+            if (!user) {
+                return res.status(404).json({ message: "User not found for the provided email." });
+            }
+            user_id = user.user_id;
+        }
+
+        if (!event_id || !user_id) {
+            return res.status(400).json({ message: "event_id and user_id (or user_email) are required." });
+        }
+        const result = await eventModel.updateEventSDAO(event_id, event, user_id);
+        res.status(200).json(result);
+    } catch (error) {
+        console.error('[updateEventSDAO] Error:', error);
+        res.status(500).json({ message: error.message });
+    }
+}
+
+async function deleteEventSDAO(req, res) {
+    try {
+        const { event_id, reason, user_email } = req.body;
+        let user_id = req.user?.user_id;
+
+        if ((!user_id || user_id === 'undefined' || user_id === 'null') && user_email) {
+            const user = await eventModel.getUserByEmail(user_email);
+            if (!user) {
+                return res.status(404).json({ message: "User not found for the provided email." });
+            }
+            user_id = user.user_id;
+        }
+
+        if (!event_id || !user_id || !reason) {
+            return res.status(400).json({ message: "event_id, user_id (or user_email), and reason are required." });
+        }
+        await eventModel.deleteEventSDAO(event_id, user_id, reason);
+        res.status(200).json({ message: "Event deleted successfully." });
+    } catch (error) {
+        console.error('[deleteEventSDAO] Error:', error);
+        res.status(500).json({ message: error.message });
     }
 }
 
@@ -1541,6 +1720,11 @@ module.exports = {
   unarchiveBlockedPeriod,
   deleteBlockedPeriod,
   getBlockedPeriodsByStatus,
-  checkAllPostEventRequirementsSubmitted,
-  getEventApplicationPublicationImage
+  getEventApplicationPublicationImage,
+  getCert,
+  getEventsByUserRole,
+  archiveEvent,
+  unarchiveEvent,
+  updateEventSDAO,
+  deleteEventSDAO
 };

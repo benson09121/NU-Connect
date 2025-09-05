@@ -160,8 +160,8 @@ async function rejectPaidEventRegistration(event_id, user_id, approver_id, remar
 async function getEventStats(event_id) {
   const connection = await pool.getConnection();
   try {
-    const [rows] = await connection.query('CALL GetEventStatsForComponent(?)', [event_id]);
-    return rows[0][0];
+    const [rows] = await connection.query('CALL GetEventStatistics(?)', [event_id]);
+    return rows[0][0]; // Return the first row of the first result set
   } finally {
     connection.release();
   }
@@ -398,14 +398,14 @@ async function createEvent(event) {
   }
 }
 
-async function getaddEventStatus(orgName){
+async function getaddEventStatus(orgName) {
     const connection = await pool.getConnection();
     try {
         const [rows] = await connection.query(
             'CALL GetAddEventStatus(?);',
             [orgName]
         );
-        return rows[0];
+        return rows[0][0]; // Return the first row (object with id, cycle_number, can_add_event)
     } finally {
         connection.release();
     }
@@ -444,7 +444,7 @@ async function getCertificateTemplate(event_id) {
     const connection = await pool.getConnection();
     try {
         const [rows] = await connection.query('CALL GetCertificateTemplate(?);', [event_id]);
-        return rows[0];
+        return rows[0]; // returns [{ template_path: 'event-86-template.docx', ... }]
     } finally {
         connection.release();
     }
@@ -537,15 +537,71 @@ async function getBlockedPeriodsByStatus(status) {
     }
 }
 
-async function checkAllPostEventRequirementsSubmitted(event_id, organization_id) {
+async function getEventsByUserRole(user_id) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetEventsByUserRole(?);', [user_id]);
+        return rows[0];
+    } finally {
+        connection.release();
+    }
+}
+
+async function archiveEvent(event_id, user_id, reason) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL ArchiveEvent(?, ?, ?);', [event_id, user_id, reason]);
+        return rows[0]?.[0] || null;
+    } finally {
+        connection.release();
+    }
+}
+
+async function unarchiveEvent(event_id, user_id, reason) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL UnarchiveEvent(?, ?, ?);', [event_id, user_id, reason]);
+        return rows[0]?.[0] || null;
+    } finally {
+        connection.release();
+    }
+}
+
+async function updateEventSDAO(event_id, event, user_id) {
     const connection = await pool.getConnection();
     try {
         const [rows] = await connection.query(
-            'CALL CheckAllPostEventRequirementsSubmitted(?, ?);',
-            [event_id, organization_id]
+            'CALL UpdateEvent(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);',
+            [
+                event_id,
+                event.title,
+                event.description,
+                event.venue_type,
+                event.venue,
+                event.start_date,
+                event.end_date,
+                event.start_time,
+                event.end_time,
+                event.status,
+                event.type,
+                event.is_open_to,
+                event.fee,
+                event.capacity,
+                event.image,
+                user_id
+            ]
         );
-        // rows[0][0].all_submitted will be true/false
-        return rows[0][0]?.all_submitted === 1;
+        return rows[0]?.[0] || null;
+    } finally {
+        connection.release();
+    }
+}
+
+async function deleteEventSDAO(event_id, user_id, reason) {
+    const connection = await pool.getConnection();
+    try {
+        await connection.query('CALL DeleteEvent(?, ?, ?);', [event_id, user_id, reason]);
+        return true;
     } finally {
         connection.release();
     }
@@ -591,5 +647,9 @@ module.exports = {
     unarchiveBlockedPeriod,
     deleteBlockedPeriod,
     getBlockedPeriodsByStatus,
-    checkAllPostEventRequirementsSubmitted
+    getEventsByUserRole,
+    archiveEvent,
+    unarchiveEvent,
+    updateEventSDAO,
+    deleteEventSDAO
 };
