@@ -1,9 +1,10 @@
 const { publishToChannel, subscribeToChannel } = require('./sseController');
 const db = require('../../config/db');
 const organizationsModel = require('../models/organizationsModel');
+const eventModel = require('../models/eventModel');
 
-// Update channel function to be user-scoped instead of conversation-scoped
-const CHANNEL = (userId, cid) => `ai:chat:user:${userId}:${cid}`;
+// Update channel function to be email-scoped instead of userId-scoped
+const CHANNEL = (email, cid) => `ai:chat:email:${email}:${cid}`;
 
 const DEFAULT_SYSTEM_PROMPT = 
   'You are NOVA, an AI assistant for NU Connect. ' +
@@ -63,21 +64,21 @@ function buildContextAwareSystemPrompt(context) {
   
   // Data context
   if (context.pageData && Object.keys(context.pageData).length > 0) {
-    prompt += 'Current data on screen includes:\n';
+    prompt += 'IMPORTANT: Detailed analytics data is available in the context messages below. You have access to:\n';
     
     // Events data
-    if (context.pageData.events) {
-      prompt += `- ${context.pageData.events.length} events visible\n`;
+    if (context.pageData.events && context.pageData.events.length > 0) {
+      prompt += `- EVENTS: Detailed analytics for ${context.pageData.events.length} organization(s) including attendance rates, event counts, trends, and specific event performance\n`;
     }
     
     // Transaction data
-    if (context.pageData.transactions) {
-      prompt += `- ${context.pageData.transactions.length} transactions visible\n`;
+    if (context.pageData.transactions && context.pageData.transactions.length > 0) {
+      prompt += `- FINANCIAL: Complete financial analytics for ${context.pageData.transactions.length} organization(s) including income, expenses, funds, and trends\n`;
     }
     
     // User data
-    if (context.pageData.users) {
-      prompt += `- ${context.pageData.users.length} users visible\n`;
+    if (context.pageData.users && context.pageData.users.length > 0) {
+      prompt += `- USER ENGAGEMENT: Member engagement data for ${context.pageData.users.length} organization(s) including active/inactive members and registration trends\n`;
     }
     
     // Summary metrics
@@ -124,6 +125,9 @@ function buildContextAwareSystemPrompt(context) {
   prompt += '4. Suggest improvements or next steps relevant to the user\'s role\n';
   prompt += '5. If asked about status, trends, or recommendations, base your response on the current context\n';
   prompt += '6. Be specific about numbers and metrics when available in the context\n';
+  prompt += '7. If asked about "organizations" or "my organizations", list the organizations the user has access to\n';
+  prompt += '8. IMPORTANT: Use the detailed analytics data provided in context messages, not just summary totals\n';
+  prompt += '9. When asked about events, refer to the specific event performance data, attendance trends, and feedback rates\n';
   
   return prompt;
 }
@@ -135,6 +139,12 @@ function detectMultiOrgIntent(message, context) {
     'our status', 'our performance', 'financial situation', 'how are we',
     'current status', 'organization comparison', 'summary', 'all orgs',
     'everything', 'complete picture', 'full view', 'aggregate'
+  ];
+  
+  const organizationListKeywords = [
+    'my organizations', 'see my organizations', 'organizations', 'what organizations',
+    'which organizations', 'list organizations', 'show organizations', 'organizations I have',
+    'organizations I can access', 'available organizations'
   ];
   
   const currentViewKeywords = [
@@ -150,6 +160,11 @@ function detectMultiOrgIntent(message, context) {
     return false;
   }
   
+  // Check for organization listing intent (should be treated as multi-org for listing)
+  if (organizationListKeywords.some(keyword => messageLower.includes(keyword))) {
+    return true;
+  }
+  
   // Check for multi-org intent
   if (multiOrgKeywords.some(keyword => messageLower.includes(keyword))) {
     return true;
@@ -161,7 +176,8 @@ function detectMultiOrgIntent(message, context) {
   }
   
   // Default: if user has multiple organizations, assume multi-org for general questions
-  return context.userOrganizations?.length > 1;
+  const userOrgCount = context.userOrganizations?.length || context.dataScope?.organizationCount || 0;
+  return userOrgCount > 1;
 }
 
 // Multi-organization data fetching functions
@@ -421,12 +437,24 @@ function normalizeEntityId(raw) {
   return Number.isNaN(n) ? raw : n;
 }
 
-async function getUserId(req, res) {
-  const user = await organizationsModel.getUserByEmail(req.user.email);
-  if (!user || !user.user_id) {
-    if (res) res.status(404).json({ message: 'User not found.' });
-    throw new Error('User not found');
+async function getUserId(email, res) {
+  console.log('getUserId called with email:', email);
+  const user = await eventModel.getUserByEmail(email);
+  console.log('eventModel.getUserByEmail returned:', user);
+  
+  if (!user) {
+    console.error('No user found for email:', email);
+    if (res) return res.status(404).json({ message: "User not found for the provided email." });
+    throw new Error("User not found for the provided email.");
   }
+  
+  if (!user.user_id) {
+    console.error('User found but no user_id field:', user);
+    if (res) return res.status(404).json({ message: "User found but missing user_id field." });
+    throw new Error("User found but missing user_id field.");
+  }
+  
+  console.log('Returning user_id:', user.user_id);
   return user.user_id;
 }
 
@@ -455,9 +483,12 @@ async function getUserOrganizations(userId) {
 
 async function getLastConversation(req, res) {
   try {
-    const userId = await getUserId(req, res);
-    let { entityType = 'general', entityId = null } = req.query;
-    entityId = normalizeEntityId(entityId);
+    const email = req.user.email;
+    const userId = await getUserId(email, res);
+    let { entityType = 'general' } = req.query;
+    
+    // Always use entityId = 0 - owner_id identifies the user
+    const entityId = 0;
 
     // Get last conversation for this user (user-scoped instead of organization-scoped)
     const [rows] = await db.query(
@@ -470,7 +501,7 @@ async function getLastConversation(req, res) {
         WHERE c.owner_id = ?
           AND c.is_archived = 0
           AND c.entity_type = ?
-          AND (c.entity_id <=> ?)
+          AND c.entity_id = ?
         ORDER BY c.updated_at DESC
         LIMIT 1`,
       [userId, entityType, entityId]
@@ -497,13 +528,30 @@ async function getLastConversation(req, res) {
 
 async function createConversation(req, res) {
   try {
-    const userId = await getUserId(req, res);
-    let { entityType = 'general', entityId = null, systemPrompt = null, context = null } = req.body;
-    entityId = normalizeEntityId(entityId);
+    const email = req.user.email;
+    console.log('Creating conversation for email:', email);
+    
+    let userId;
+    try {
+      userId = await getUserId(email);
+      console.log('Retrieved userId:', userId);
+    } catch (error) {
+      console.error('Error getting userId:', error);
+      return res.status(404).json({ message: "User not found for the provided email." });
+    }
+    
+    let { entityType = 'general', systemPrompt = null, context = null } = req.body;
+    console.log('Original entityType:', entityType);
+    
+    // Always set entityId to 0 - owner_id identifies the user
+    const entityId = 0;
+    console.log('Set entityId to:', entityId);
 
     // Build context-aware system prompt
     const contextPrompt = context ? buildContextAwareSystemPrompt(context) : DEFAULT_SYSTEM_PROMPT;
 
+    console.log('Inserting with values:', { userId, entityType, entityId });
+    
     const [r] = await db.query(
       `INSERT INTO tbl_ai_conversation (owner_id, entity_type, entity_id, system_prompt)
        VALUES (?, ?, ?, ?)`,
@@ -511,7 +559,7 @@ async function createConversation(req, res) {
     );
     return res.json({ conversationId: r.insertId });
   } catch (e) {
-    console.error(e);
+    console.error('Create conversation error:', e);
     return res.status(500).json({ error: 'Failed to create conversation' });
   }
 }
@@ -524,7 +572,8 @@ async function registerChannel(req, res) {
     }
 
     // Verify conversation belongs to user
-    const userId = await getUserId(req);
+    const email = req.user.email;
+    const userId = await getUserId(email);
     const [convRows] = await db.query(
       `SELECT owner_id FROM tbl_ai_conversation WHERE conversation_id = ? AND is_archived = 0`,
       [conversationId]
@@ -533,8 +582,8 @@ async function registerChannel(req, res) {
       return res.status(403).json({ error: 'Access denied' });
     }
 
-    // Subscribe to user-scoped channel
-    subscribeToChannel(sessionId, CHANNEL(userId, conversationId));
+    // Subscribe to email-scoped channel
+    subscribeToChannel(sessionId, CHANNEL(email, conversationId));
 
     // Get messages but filter out corrupted ones
     const [rows] = await db.query(
@@ -556,7 +605,8 @@ async function registerChannel(req, res) {
 
 async function sendMessage(req, res) {
   try {
-    const userId = await getUserId(req, res);
+    const email = req.user.email;
+    const userId = await getUserId(email, res);
     const { conversationId, content, context = null } = req.body;
     if (!conversationId || !content?.trim()) {
       return res.status(400).json({ error: 'conversationId and content are required' });
@@ -583,14 +633,22 @@ async function sendMessage(req, res) {
       return res.status(403).json({ error: 'Access denied' });
     }
 
+    // Get user's organizations from context - check both userOrganizations and dataScope.availableOrganizations
+    const userOrgs = context?.userOrganizations?.length > 0 
+      ? context.userOrganizations 
+      : context?.dataScope?.availableOrganizations?.map(org => ({
+          organization_id: org.value,
+          name: org.label
+        })) || [];
+    
     // Detect if this is a multi-organization query
-    const isMultiOrgQuery = context ? detectMultiOrgIntent(content, context) : false;
+    const isMultiOrgQuery = context ? detectMultiOrgIntent(content, { ...context, userOrganizations: userOrgs }) : false;
     
     // Get relevant data based on query type
     let responseData = {};
-    if (isMultiOrgQuery && context?.userOrganizations) {
+    if (isMultiOrgQuery && userOrgs.length > 0) {
       responseData = await getMultiOrgData(
-        context.userOrganizations, 
+        userOrgs, 
         context.activeTab, 
         context.userRole
       );
@@ -601,6 +659,7 @@ async function sendMessage(req, res) {
     // Update context with query type and response data
     const enhancedContext = {
       ...context,
+      userOrganizations: userOrgs, // Use the corrected organizations list
       queryType: isMultiOrgQuery ? 'multi_org' : 'current_view',
       responseData
     };
@@ -616,7 +675,7 @@ async function sendMessage(req, res) {
         JSON.stringify({
           context: enhancedContext,
           query_type: isMultiOrgQuery ? 'multi_org' : 'current_view',
-          organizations: context?.userOrganizations?.map(org => org.organization_id) || []
+          organizations: userOrgs?.map(org => org.organization_id || org.value) || []
         })
       ]
     );
@@ -629,7 +688,7 @@ async function sendMessage(req, res) {
       content,
       created_at: new Date(),
     });
-    publishToChannel(CHANNEL(userId, conversationId), { operation: 'CREATE', data: [userMsg] });
+    publishToChannel(CHANNEL(email, conversationId), { operation: 'CREATE', data: [userMsg] });
 
     // Assistant placeholder
     const [am] = await db.query(
@@ -644,7 +703,7 @@ async function sendMessage(req, res) {
       role: 'assistant',
       created_at: new Date(),
     };
-    publishToChannel(CHANNEL(userId, conversationId), { operation: 'CREATE', data: [mapMessage({ ...assistantBase, content: '' })] });
+    publishToChannel(CHANNEL(email, conversationId), { operation: 'CREATE', data: [mapMessage({ ...assistantBase, content: '' })] });
 
     // Get clean history (filter out any corrupted messages)
     const [history] = await db.query(
@@ -685,44 +744,135 @@ async function sendMessage(req, res) {
     ];
 
     // Add enhanced context as a separate system message if provided
-    if (enhancedContext && Object.keys(responseData).length > 0) {
+    if (enhancedContext) {
       let contextMessage = 'Analytics data context:\n';
       
-      if (isMultiOrgQuery) {
-        contextMessage += '--- MULTI-ORGANIZATION DATA ---\n';
-        Object.entries(responseData).forEach(([category, orgData]) => {
-          if (typeof orgData === 'object' && !Array.isArray(orgData)) {
-            Object.entries(orgData).forEach(([orgId, data]) => {
-              contextMessage += `\n${data.organizationName || `Organization ${orgId}`}:\n`;
-              if (data.summary) {
-                Object.entries(data.summary).forEach(([key, value]) => {
-                  contextMessage += `  • ${key}: ${value}\n`;
-                });
-              }
-            });
-          }
+      // Always include organization information if available
+      if (userOrgs && userOrgs.length > 0) {
+        contextMessage += `--- USER ORGANIZATIONS ---\n`;
+        contextMessage += `User has access to ${userOrgs.length} organization(s):\n`;
+        userOrgs.forEach(org => {
+          contextMessage += `• ${org.name || org.label || `Organization ${org.organization_id || org.value}`}\n`;
         });
-      } else {
-        contextMessage += '--- CURRENT VIEW DATA ---\n';
-        if (enhancedContext.currentOrganization !== 'all' && enhancedContext.organizationInfo?.name) {
-          contextMessage += `Organization: ${enhancedContext.organizationInfo.name}\n`;
-        }
-        if (enhancedContext.activeTab) {
-          const tabNames = {
-            event: 'Events Analytics',
-            transaction: 'Financial Analytics', 
-            user: 'User Engagement',
-            leaderboard: 'Leaderboard'
-          };
-          contextMessage += `Active Tab: ${tabNames[enhancedContext.activeTab] || enhancedContext.activeTab}\n`;
-        }
-        Object.entries(responseData).forEach(([key, value]) => {
-          if (typeof value === 'number') {
-            contextMessage += `${key}: ${value}\n`;
-          } else if (Array.isArray(value)) {
-            contextMessage += `${key}: ${value.length} items\n`;
+        contextMessage += '\n';
+      }
+      
+      if (Object.keys(responseData).length > 0) {
+        if (isMultiOrgQuery) {
+          contextMessage += '--- MULTI-ORGANIZATION DATA ---\n';
+          Object.entries(responseData).forEach(([category, orgData]) => {
+            if (typeof orgData === 'object' && !Array.isArray(orgData)) {
+              Object.entries(orgData).forEach(([orgId, data]) => {
+                contextMessage += `\n${data.organizationName || `Organization ${orgId}`}:\n`;
+                if (data.summary) {
+                  Object.entries(data.summary).forEach(([key, value]) => {
+                    contextMessage += `  • ${key}: ${value}\n`;
+                  });
+                }
+              });
+            }
+          });
+        } else {
+          contextMessage += '--- CURRENT VIEW DATA ---\n';
+          if (enhancedContext.currentOrganization !== 'all' && enhancedContext.organizationInfo?.name) {
+            contextMessage += `Organization: ${enhancedContext.organizationInfo.name}\n`;
           }
-        });
+          if (enhancedContext.activeTab) {
+            const tabNames = {
+              event: 'Events Analytics',
+              transaction: 'Financial Analytics', 
+              user: 'User Engagement',
+              leaderboard: 'Leaderboard'
+            };
+            contextMessage += `Active Tab: ${tabNames[enhancedContext.activeTab] || enhancedContext.activeTab}\n`;
+          }
+          
+          // Include detailed pageData information
+          if (enhancedContext.pageData) {
+            const pageData = enhancedContext.pageData;
+            
+            // Events data
+            if (pageData.events && pageData.events.length > 0) {
+              contextMessage += `\nDETAILED EVENTS ANALYTICS:\n`;
+              pageData.events.forEach((event, index) => {
+                contextMessage += `\n--- ${event.organization_name || `Organization ${index + 1}`} ---\n`;
+                contextMessage += `• Completed Events: ${event.completed_events || 0}\n`;
+                contextMessage += `• Cancelled Events: ${event.cancelled_events || 0}\n`;
+                contextMessage += `• Average Attendance Rate: ${event.avg_attendance_rate || 0}%\n`;
+                contextMessage += `• Attendance Trend: ${event.attendance_rate_change || 0}% change\n`;
+                contextMessage += `• Average Feedback Rate: ${event.avg_feedback_rate || 0}%\n`;
+                contextMessage += `• Feedback Trend: ${event.feedback_rate_change || 0}% change\n`;
+                
+                // Include attendance trend data if available
+                if (event.attendance_trend && Array.isArray(event.attendance_trend)) {
+                  contextMessage += `• Recent Event Attendance:\n`;
+                  event.attendance_trend.slice(0, 3).forEach(attend => {
+                    contextMessage += `  - ${attend.event}: ${attend.attended} attended, ${attend.notAttended} didn't attend\n`;
+                  });
+                }
+                
+                // Include events per month if available
+                if (event.events_per_month && Array.isArray(event.events_per_month)) {
+                  contextMessage += `• Events by Month: `;
+                  const monthlyEvents = event.events_per_month.map(m => `${m.month}: ${m.events}`).join(', ');
+                  contextMessage += `${monthlyEvents}\n`;
+                }
+                
+                // Include feedback data if available
+                if (event.event_feedback_rate && Array.isArray(event.event_feedback_rate)) {
+                  contextMessage += `• Recent Event Feedback:\n`;
+                  event.event_feedback_rate.slice(0, 3).forEach(feedback => {
+                    contextMessage += `  - ${feedback.event}: ${feedback.feedback}% feedback rate\n`;
+                  });
+                }
+              });
+            } else if (pageData.events && pageData.events.length === 0) {
+              contextMessage += `\nEVENTS DATA: No events found for current filters\n`;
+            }
+            
+            // Transaction/Financial data
+            if (pageData.transactions && pageData.transactions.length > 0) {
+              contextMessage += `\nFINANCIAL DATA:\n`;
+              pageData.transactions.forEach(transaction => {
+                contextMessage += `• ${transaction.organization_name}:\n`;
+                contextMessage += `  - Current Funds: ₱${transaction.funds_this_month}\n`;
+                contextMessage += `  - Income: ₱${transaction.income_this_month} (${transaction.income_change_status}: ${transaction.income_change_percent}%)\n`;
+                contextMessage += `  - Expenses: ₱${transaction.expense_this_month} (${transaction.expense_change_status}: ${transaction.expense_change_percent}%)\n`;
+                contextMessage += `  - Net: ₱${transaction.net_this_month} (${transaction.net_change_status}: ${transaction.net_change_percent}%)\n`;
+              });
+            }
+            
+            // User engagement data
+            if (pageData.users && pageData.users.length > 0) {
+              contextMessage += `\nUSER ENGAGEMENT DATA:\n`;
+              pageData.users.forEach(user => {
+                contextMessage += `• ${user.organization_name}:\n`;
+                contextMessage += `  - Total Members: ${user.registered_members}\n`;
+                contextMessage += `  - Active This Month: ${user.active_members_this_month}\n`;
+                contextMessage += `  - New Members: ${user.new_members_this_month}\n`;
+                contextMessage += `  - Activity Rate: ${((user.active_members_this_month / user.registered_members) * 100).toFixed(1)}%\n`;
+              });
+            }
+            
+            // Summary totals
+            if (pageData.totalRevenue !== undefined || pageData.totalExpenses !== undefined) {
+              contextMessage += `\nSUMMARY TOTALS:\n`;
+              if (pageData.totalRevenue !== undefined) contextMessage += `• Total Revenue: ₱${pageData.totalRevenue}\n`;
+              if (pageData.totalExpenses !== undefined) contextMessage += `• Total Expenses: ₱${pageData.totalExpenses}\n`;
+              if (pageData.totalEvents !== undefined) contextMessage += `• Total Events: ${pageData.totalEvents}\n`;
+              if (pageData.totalParticipants !== undefined) contextMessage += `• Total Participants: ${pageData.totalParticipants}\n`;
+            }
+          }
+          
+          // Fallback to basic responseData if pageData is not available
+          Object.entries(responseData).forEach(([key, value]) => {
+            if (typeof value === 'number') {
+              contextMessage += `${key}: ${value}\n`;
+            } else if (Array.isArray(value)) {
+              contextMessage += `${key}: ${value.length} items\n`;
+            }
+          });
+        }
       }
       
       messages.push({
@@ -742,7 +892,7 @@ async function sendMessage(req, res) {
     // Log for debugging
     console.log('Sending to DeepSeek with enhanced context:', JSON.stringify({
       queryType: isMultiOrgQuery ? 'multi_org' : 'current_view',
-      organizationCount: context?.userOrganizations?.length || 0,
+      organizationCount: userOrgs?.length || 0,
       hasResponseData: Object.keys(responseData).length > 0
     }, null, 2));
 
@@ -770,7 +920,7 @@ async function sendMessage(req, res) {
       const errText = await dsResp.text().catch(() => '');
       console.error('DeepSeek API error:', errText);
       await db.query(`UPDATE tbl_ai_message SET content = ? WHERE message_id = ?`, ['I apologize, but I encountered an error. Please try again.', am.insertId]);
-      publishToChannel(CHANNEL(userId, conversationId), {
+      publishToChannel(CHANNEL(email, conversationId), {
         operation: 'UPDATE',
         data: [mapMessage({ ...assistantBase, content: 'I apologize, but I encountered an error. Please try again.' })],
       });
@@ -798,7 +948,7 @@ async function sendMessage(req, res) {
           
           await db.query(`UPDATE tbl_ai_message SET content = ? WHERE message_id = ?`, [assistantText, am.insertId]);
           await db.query(`UPDATE tbl_ai_conversation SET updated_at = NOW() WHERE conversation_id = ?`, [conversationId]);
-          publishToChannel(CHANNEL(userId, conversationId), {
+          publishToChannel(CHANNEL(email, conversationId), {
             operation: 'UPDATE',
             data: [mapMessage({ ...assistantBase, content: assistantText })],
           });
@@ -812,7 +962,7 @@ async function sendMessage(req, res) {
             const now = Date.now();
             if (now - lastPublish > 50) {
               lastPublish = now;
-              publishToChannel(CHANNEL(userId, conversationId), {
+              publishToChannel(CHANNEL(email, conversationId), {
                 operation: 'UPDATE',
                 data: [mapMessage({ ...assistantBase, content: assistantText })],
               });
@@ -836,7 +986,8 @@ module.exports = {
   sendMessage,
   getUserOrganizations: async (req, res) => {
     try {
-      const userId = await getUserId(req, res);
+      const email = req.user.email;
+      const userId = await getUserId(email, res);
       const organizations = await getUserOrganizations(userId);
       res.json({ organizations });
     } catch (e) {
