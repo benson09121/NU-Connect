@@ -9700,12 +9700,7 @@ DELIMITER ;
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetAllColleges()
 BEGIN
-    SELECT 
-        college_id,
-        name,
-        abbreviation,
-        created_at
-    FROM tbl_college
+    SELECT * FROM tbl_college
     ORDER BY name;
 END $$
 DELIMITER ;

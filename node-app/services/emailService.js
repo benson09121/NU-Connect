@@ -866,15 +866,15 @@ async function resendInvitationEmail(email) {
   const cca = new msal.ConfidentialClientApplication(msalConfig);
 
   try {
-    // Check if user exists
+    // Check if user exists and is pending
     const user = await userModel.getUserByEmail(email);
-    if (!user) {
-      throw new Error('User not found');
+    if (!user || user.status !== 'Pending') {
+      throw new Error('Pending user not found or user may already be active');
     }
 
     // Get new access token
     const token = await getAccessToken(cca);
-    
+
     // Create new invitation with fresh redemption URL
     const response = await axios.post(
       "https://graph.microsoft.com/v1.0/invitations",
@@ -894,7 +894,7 @@ async function resendInvitationEmail(email) {
 
     // Send custom invitation email with isResend flag
     const emailResult = await sendInvitationEmail(email, redemptionUrl, true);
-    
+
     if (emailResult.success) {
       console.log(`✅ Invitation resent successfully to ${email}`);
       return {
@@ -908,14 +908,14 @@ async function resendInvitationEmail(email) {
 
   } catch (error) {
     console.error('❌ Failed to resend invitation email:', error.message);
-    
+
     // Handle specific error cases
     if (error.response?.status === 400) {
       console.error('💡 User may already exist in Azure AD or invitation is invalid');
     } else if (error.code === 'EAUTH') {
       console.error('💡 Azure authentication failed. Check your credentials.');
     }
-    
+
     return { success: false, error: error.message };
   }
 }
