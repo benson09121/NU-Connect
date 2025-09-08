@@ -29,9 +29,7 @@ CREATE TABLE tbl_college(
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     archived_at TIMESTAMP NULL,
     archived_by VARCHAR(200) NULL,
-    archived_reason VARCHAR(255) NULL,
-    CONSTRAINT fk_college_archived_by FOREIGN KEY (archived_by)
-        REFERENCES tbl_user(user_id) ON UPDATE CASCADE
+    archived_reason VARCHAR(255) NULL
 );
 
 CREATE TABLE tbl_program(
@@ -44,10 +42,8 @@ CREATE TABLE tbl_program(
     archived_at TIMESTAMP NULL,
     archived_by VARCHAR(200) NULL,
     archived_reason VARCHAR(255) NULL,
-    CONSTRAINT fk_program_college FOREIGN KEY (college_id)
-        REFERENCES tbl_college(college_id) ON DELETE CASCADE,
-    CONSTRAINT fk_program_archived_by FOREIGN KEY (archived_by)
-        REFERENCES tbl_user(user_id) ON UPDATE CASCADE
+    CONSTRAINT fk_program_college
+        FOREIGN KEY (college_id) REFERENCES tbl_college(college_id) ON DELETE CASCADE
 );
 
 CREATE TABLE tbl_user(
@@ -68,6 +64,14 @@ CREATE TABLE tbl_user(
     FOREIGN KEY (program_id) REFERENCES tbl_program(program_id),
     FOREIGN KEY (archived_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE
 );
+
+ALTER TABLE tbl_college
+  ADD CONSTRAINT fk_college_archived_by
+  FOREIGN KEY (archived_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE;
+
+ALTER TABLE tbl_program
+  ADD CONSTRAINT fk_program_archived_by
+  FOREIGN KEY (archived_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE; 
 
 CREATE TABLE tbl_user_application (
     application_id INT AUTO_INCREMENT PRIMARY KEY,
@@ -9706,7 +9710,266 @@ BEGIN
 END$$
 DELIMITER ;
 
-/* -------- CreateProgram (with parent archived check + logging) -------- */
+DELIMITER $$
+/* ===========================
+   CreateCollege
+   =========================== */
+CREATE DEFINER='admin'@'%' PROCEDURE CreateCollege(
+    IN p_name          VARCHAR(100),
+    IN p_abbreviation  VARCHAR(20),
+    IN p_user_email    VARCHAR(100)
+)
+BEGIN
+    /* All DECLAREs first */
+    DECLARE v_college_id INT;
+
+    /* Nicer duplicate message (name/abbr) */
+    DECLARE EXIT HANDLER FOR 1062
+    BEGIN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'College name or abbreviation already exists';
+    END;
+
+    /* Basic validations */
+    IF p_name IS NULL OR TRIM(p_name) = '' THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='College name is required';
+    END IF;
+    IF p_abbreviation IS NULL OR TRIM(p_abbreviation) = '' THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='College abbreviation is required';
+    END IF;
+
+    /* Insert */
+    INSERT INTO tbl_college(name, abbreviation, status)
+    VALUES (TRIM(p_name), TRIM(p_abbreviation), 'Active');
+
+    SET v_college_id = LAST_INSERT_ID();
+
+    /* Audit */
+    CALL LogAction(
+        p_user_email,
+        CONCAT('Created college "', TRIM(p_name), '" (', TRIM(p_abbreviation), ')'),
+        'College.Create',
+        JSON_OBJECT('college_id', v_college_id, 'name', TRIM(p_name), 'abbreviation', TRIM(p_abbreviation)),
+        NULL, NULL
+    );
+
+    /* Friendly payload */
+    SELECT 'College created successfully' AS message, c.*
+    FROM tbl_college c WHERE c.college_id = v_college_id;
+END$$
+DELIMITER ;
+
+
+/* ===========================
+   UpdateCollege
+   - Blocks updates when Archived
+   =========================== */
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE UpdateCollege(
+    IN p_college_id    INT,
+    IN p_name          VARCHAR(100),
+    IN p_abbreviation  VARCHAR(20),
+    IN p_user_email    VARCHAR(100)
+)
+BEGIN
+    DECLARE v_exists INT DEFAULT 0;
+    DECLARE v_status VARCHAR(10);
+    DECLARE v_old JSON;
+
+    /* Duplicate handler */
+    DECLARE EXIT HANDLER FOR 1062
+    BEGIN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'College name or abbreviation already exists';
+    END;
+
+    /* Exists? */
+    SELECT COUNT(*), status
+      INTO v_exists, v_status
+    FROM tbl_college
+    WHERE college_id = p_college_id
+    LIMIT 1;
+
+    IF v_exists = 0 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='College not found';
+    END IF;
+
+    IF v_status = 'Archived' THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Cannot update an archived college';
+    END IF;
+
+    IF p_name IS NULL OR TRIM(p_name) = '' THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='College name is required';
+    END IF;
+    IF p_abbreviation IS NULL OR TRIM(p_abbreviation) = '' THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='College abbreviation is required';
+    END IF;
+
+    /* Snapshot for audit */
+    SELECT JSON_OBJECT(
+             'college_id', college_id,
+             'name', name,
+             'abbreviation', abbreviation,
+             'status', status,
+             'archived_at', archived_at,
+             'archived_by', archived_by,
+             'archived_reason', archived_reason
+           )
+      INTO v_old
+    FROM tbl_college
+    WHERE college_id = p_college_id;
+
+    /* Update */
+    UPDATE tbl_college
+       SET name = TRIM(p_name),
+           abbreviation = TRIM(p_abbreviation)
+     WHERE college_id = p_college_id;
+
+    /* Audit */
+    CALL LogAction(
+        p_user_email,
+        CONCAT('Updated college "', TRIM(p_name), '" (', TRIM(p_abbreviation), ')'),
+        'College.Update',
+        JSON_OBJECT(
+          'before', v_old,
+          'after', JSON_OBJECT(
+              'college_id', p_college_id,
+              'name', TRIM(p_name),
+              'abbreviation', TRIM(p_abbreviation)
+          )
+        ),
+        NULL, NULL
+    );
+
+    SELECT 'College updated successfully' AS message, c.*
+    FROM tbl_college c WHERE c.college_id = p_college_id;
+END$$
+DELIMITER ;
+
+
+/* ===========================
+   ArchiveCollege
+   - Requires no Active programs under it
+   - Sets archived_* fields and status
+   =========================== */
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE ArchiveCollege(
+    IN p_college_id INT,
+    IN p_reason     VARCHAR(255),
+    IN p_user_email VARCHAR(100)
+)
+BEGIN
+    DECLARE v_exists INT DEFAULT 0;
+    DECLARE v_status VARCHAR(10);
+    DECLARE v_user_id VARCHAR(200);
+    DECLARE v_active_programs INT DEFAULT 0;
+
+    /* Resolve archiver (also validates email) */
+    SELECT user_id INTO v_user_id
+    FROM tbl_user WHERE email = p_user_email LIMIT 1;
+    IF v_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='User email not found';
+    END IF;
+
+    /* College exists and current status */
+    SELECT COUNT(*), status
+      INTO v_exists, v_status
+    FROM tbl_college
+    WHERE college_id = p_college_id
+    LIMIT 1;
+
+    IF v_exists = 0 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='College not found';
+    END IF;
+
+    IF v_status = 'Archived' THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='College is already archived';
+    END IF;
+
+    /* Block if there are Active programs under the college (if tbl_program exists) */
+    SELECT COUNT(*) INTO v_active_programs
+    FROM tbl_program
+    WHERE college_id = p_college_id AND status = 'Active';
+
+    IF v_active_programs > 0 THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT='Cannot archive college with Active programs. Archive/move programs first.';
+    END IF;
+
+    /* Archive */
+    UPDATE tbl_college
+       SET status = 'Archived',
+           archived_at = CURRENT_TIMESTAMP,
+           archived_by = v_user_id,
+           archived_reason = p_reason
+     WHERE college_id = p_college_id;
+
+    /* Audit */
+    CALL LogAction(
+        p_user_email,
+        CONCAT('Archived college ID ', p_college_id),
+        'College.Archive',
+        JSON_OBJECT('college_id', p_college_id, 'reason', p_reason),
+        NULL, NULL
+    );
+
+    SELECT 'College archived successfully' AS message, c.*
+    FROM tbl_college c WHERE c.college_id = p_college_id;
+END$$
+DELIMITER ;
+
+/* ===========================
+   UnarchiveCollege
+   - Restores to Active, clears archive fields
+   =========================== */
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE UnarchiveCollege(
+    IN p_college_id INT,
+    IN p_user_email VARCHAR(100)
+)
+BEGIN
+    DECLARE v_exists INT DEFAULT 0;
+    DECLARE v_status VARCHAR(10);
+
+    /* Exists + status */
+    SELECT COUNT(*), status
+      INTO v_exists, v_status
+    FROM tbl_college
+    WHERE college_id = p_college_id
+    LIMIT 1;
+
+    IF v_exists = 0 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='College not found';
+    END IF;
+
+    IF v_status = 'Active' THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='College is already Active';
+    END IF;
+
+    /* Unarchive */
+    UPDATE tbl_college
+       SET status = 'Active',
+           archived_at = NULL,
+           archived_by = NULL,
+           archived_reason = NULL
+     WHERE college_id = p_college_id;
+
+    /* Audit */
+    CALL LogAction(
+        p_user_email,
+        CONCAT('Unarchived college ID ', p_college_id),
+        'College.Unarchive',
+        JSON_OBJECT('college_id', p_college_id),
+        NULL, NULL
+    );
+
+    SELECT 'College unarchived successfully' AS message, c.*
+    FROM tbl_college c WHERE c.college_id = p_college_id;
+END$$
+DELIMITER ;
+
+
+/* -------- CreateProgram (fixed DECLARE order + EXIT handler + stable last_insert_id) -------- */
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE CreateProgram(
     IN p_college_id INT,
@@ -9715,17 +9978,27 @@ CREATE DEFINER='admin'@'%' PROCEDURE CreateProgram(
     IN p_email VARCHAR(100)
 )
 BEGIN
+    -- DECLAREs must be first
     DECLARE v_user_id VARCHAR(200);
     DECLARE v_col_status ENUM('Active','Archived');
+    DECLARE v_new_program_id INT;
+
+    -- nicer duplicate messages; EXIT to stop the proc
+    DECLARE EXIT HANDLER FOR 1062
+    BEGIN
+        CALL _RaiseDupKey('Program name or abbreviation already exists');
+    END;
 
     /* who */
-    SELECT user_id INTO v_user_id FROM tbl_user WHERE email = p_email LIMIT 1;
+    SELECT user_id INTO v_user_id
+    FROM tbl_user WHERE email = p_email LIMIT 1;
     IF v_user_id IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'User not found for provided email';
     END IF;
 
     /* parent college must exist and be Active */
-    SELECT status INTO v_col_status FROM tbl_college WHERE college_id = p_college_id;
+    SELECT status INTO v_col_status
+    FROM tbl_college WHERE college_id = p_college_id;
     IF v_col_status IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'College not found';
     END IF;
@@ -9733,29 +10006,27 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Cannot create program under an archived college';
     END IF;
 
-    /* nicer duplicate messages */
-    DECLARE CONTINUE HANDLER FOR 1062
-      BEGIN CALL _RaiseDupKey('Program name or abbreviation already exists'); END;
-
     INSERT INTO tbl_program (college_id, name, abbreviation)
     VALUES (p_college_id, p_name, p_abbreviation);
+
+    SET v_new_program_id = LAST_INSERT_ID();
 
     /* log */
     CALL LogAction(
         p_email,
         CONCAT('Created program "', COALESCE(p_name,'(no name)'), '" (', COALESCE(p_abbreviation,'N/A'), ')'),
         'Program.Create',
-        JSON_OBJECT('program_id', LAST_INSERT_ID(), 'college_id', p_college_id, 'name', p_name, 'abbreviation', p_abbreviation),
+        JSON_OBJECT('program_id', v_new_program_id, 'college_id', p_college_id, 'name', p_name, 'abbreviation', p_abbreviation),
         NULL, NULL
     );
 
     /* friendly payload */
-    SELECT 'Program created successfully' AS message, p.* 
-    FROM tbl_program p WHERE p.program_id = LAST_INSERT_ID();
+    SELECT 'Program created successfully' AS message, p.*
+    FROM tbl_program p WHERE p.program_id = v_new_program_id;
 END$$
 DELIMITER ;
 
-/* -------- UpdateProgram (blocks moving into archived college) -------- */
+/* -------- UpdateProgram (fixed DECLARE order + EXIT handler) -------- */
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE UpdateProgram(
     IN p_program_id INT,
@@ -9765,11 +10036,20 @@ CREATE DEFINER='admin'@'%' PROCEDURE UpdateProgram(
     IN p_email VARCHAR(100)
 )
 BEGIN
+    -- DECLAREs must be first
     DECLARE v_user_id VARCHAR(200);
     DECLARE v_col_status ENUM('Active','Archived');
     DECLARE v_old JSON;
 
-    SELECT user_id INTO v_user_id FROM tbl_user WHERE email = p_email LIMIT 1;
+    -- duplicate handler up front
+    DECLARE EXIT HANDLER FOR 1062
+    BEGIN
+        CALL _RaiseDupKey('Program name or abbreviation already exists');
+    END;
+
+    /* who */
+    SELECT user_id INTO v_user_id
+    FROM tbl_user WHERE email = p_email LIMIT 1;
     IF v_user_id IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'User not found for provided email';
     END IF;
@@ -9778,7 +10058,9 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Program not found';
     END IF;
 
-    SELECT status INTO v_col_status FROM tbl_college WHERE college_id = p_college_id;
+    /* target college must exist and be Active */
+    SELECT status INTO v_col_status
+    FROM tbl_college WHERE college_id = p_college_id;
     IF v_col_status IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'College not found';
     END IF;
@@ -9786,19 +10068,22 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Cannot move program into an archived college';
     END IF;
 
-    /* keep snapshot for log */
-    SELECT JSON_OBJECT('program', program_id, 'college_id', college_id, 'name', name, 'abbreviation', abbreviation, 'status', status)
+    /* snapshot for log */
+    SELECT JSON_OBJECT(
+               'program', program_id,
+               'college_id', college_id,
+               'name', name,
+               'abbreviation', abbreviation,
+               'status', status
+           )
       INTO v_old
-    FROM tbl_program WHERE program_id = p_program_id;
-
-    DECLARE CONTINUE HANDLER FOR 1062
-      BEGIN CALL _RaiseDupKey('Program name or abbreviation already exists'); END;
+      FROM tbl_program WHERE program_id = p_program_id;
 
     UPDATE tbl_program
-       SET college_id = p_college_id,
-           name       = p_name,
+       SET college_id   = p_college_id,
+           name         = p_name,
            abbreviation = p_abbreviation
-     WHERE program_id = p_program_id;
+     WHERE program_id   = p_program_id;
 
     CALL LogAction(
         p_email,
