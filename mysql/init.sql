@@ -25,7 +25,13 @@ CREATE TABLE tbl_college(
     college_id INT AUTO_INCREMENT PRIMARY KEY,
     name VARCHAR(100) UNIQUE NOT NULL,
     abbreviation VARCHAR(20) UNIQUE NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    status ENUM('Active','Archived') NOT NULL DEFAULT 'Active',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    archived_at TIMESTAMP NULL,
+    archived_by VARCHAR(200) NULL,
+    archived_reason VARCHAR(255) NULL,
+    CONSTRAINT fk_college_archived_by FOREIGN KEY (archived_by)
+        REFERENCES tbl_user(user_id) ON UPDATE CASCADE
 );
 
 CREATE TABLE tbl_program(
@@ -33,7 +39,15 @@ CREATE TABLE tbl_program(
     college_id INT NOT NULL,
     name VARCHAR(200) UNIQUE,
     abbreviation VARCHAR(20) UNIQUE,
-    FOREIGN KEY (college_id) REFERENCES tbl_college(college_id) ON DELETE CASCADE
+    status ENUM('Active','Archived') NOT NULL DEFAULT 'Active',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    archived_at TIMESTAMP NULL,
+    archived_by VARCHAR(200) NULL,
+    archived_reason VARCHAR(255) NULL,
+    CONSTRAINT fk_program_college FOREIGN KEY (college_id)
+        REFERENCES tbl_college(college_id) ON DELETE CASCADE,
+    CONSTRAINT fk_program_archived_by FOREIGN KEY (archived_by)
+        REFERENCES tbl_user(user_id) ON UPDATE CASCADE
 );
 
 CREATE TABLE tbl_user(
@@ -930,11 +944,77 @@ CREATE TABLE tbl_ai_message (
   INDEX idx_message_scope (conversation_id, message_scope)
 );
 
+DELIMITER $$
 
+/* ---- Block creating a Program under an archived College ---- */
+CREATE TRIGGER trg_program_before_insert
+BEFORE INSERT ON tbl_program
+FOR EACH ROW
+BEGIN
+    IF (SELECT status FROM tbl_college WHERE college_id = NEW.college_id) = 'Archived' THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Cannot create program under an archived college';
+    END IF;
+END$$
 
+/* ---- Block re-pointing a Program to an archived College ---- */
+CREATE TRIGGER trg_program_before_update
+BEFORE UPDATE ON tbl_program
+FOR EACH ROW
+BEGIN
+    IF NEW.college_id <> OLD.college_id THEN
+        IF (SELECT status FROM tbl_college WHERE college_id = NEW.college_id) = 'Archived' THEN
+            SIGNAL SQLSTATE '45000'
+                SET MESSAGE_TEXT = 'Cannot move program into an archived college';
+        END IF;
+    END IF;
+END$$
+
+/* ---- Block adding org members to archived orgs (requires tbl_organization_members) ---- */
+CREATE TRIGGER trg_org_members_before_insert
+BEFORE INSERT ON tbl_organization_members
+FOR EACH ROW
+BEGIN
+    IF (SELECT status FROM tbl_organization WHERE organization_id = NEW.organization_id) = 'Archived' THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Cannot add members to an archived organization';
+    END IF;
+END$$
+
+/* ---- Block new org versions for archived orgs ---- */
+CREATE TRIGGER trg_org_version_before_insert
+BEFORE INSERT ON tbl_organization_version
+FOR EACH ROW
+BEGIN
+    IF NEW.organization_id IS NOT NULL AND
+       (SELECT status FROM tbl_organization WHERE organization_id = NEW.organization_id) = 'Archived'
+    THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Cannot create a new organization version for an archived organization';
+    END IF;
+END$$
+
+/* (Optional sanity) Block creating an org directly as Archived */
+CREATE TRIGGER trg_org_before_insert
+BEFORE INSERT ON tbl_organization
+FOR EACH ROW
+BEGIN
+    IF NEW.status = 'Archived' THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'New organizations cannot be created already archived';
+    END IF;
+END$$
+DELIMITER ;
 
 -- PROCEDURES
 use db_nuconnect;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE _RaiseDupKey(IN p_msg TEXT)
+BEGIN
+  SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = p_msg;
+END$$
+DELIMITER ;
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE LogAction(
@@ -9626,6 +9706,7 @@ BEGIN
 END$$
 DELIMITER ;
 
+/* -------- CreateProgram (with parent archived check + logging) -------- */
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE CreateProgram(
     IN p_college_id INT,
@@ -9635,25 +9716,46 @@ CREATE DEFINER='admin'@'%' PROCEDURE CreateProgram(
 )
 BEGIN
     DECLARE v_user_id VARCHAR(200);
+    DECLARE v_col_status ENUM('Active','Archived');
 
-    -- Lookup user_id from email
-    SELECT user_id INTO v_user_id
-    FROM tbl_user
-    WHERE email = p_email
-    LIMIT 1;
-
+    /* who */
+    SELECT user_id INTO v_user_id FROM tbl_user WHERE email = p_email LIMIT 1;
     IF v_user_id IS NULL THEN
-        SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'User not found for provided email';
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'User not found for provided email';
     END IF;
+
+    /* parent college must exist and be Active */
+    SELECT status INTO v_col_status FROM tbl_college WHERE college_id = p_college_id;
+    IF v_col_status IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'College not found';
+    END IF;
+    IF v_col_status = 'Archived' THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Cannot create program under an archived college';
+    END IF;
+
+    /* nicer duplicate messages */
+    DECLARE CONTINUE HANDLER FOR 1062
+      BEGIN CALL _RaiseDupKey('Program name or abbreviation already exists'); END;
 
     INSERT INTO tbl_program (college_id, name, abbreviation)
     VALUES (p_college_id, p_name, p_abbreviation);
 
-    SELECT * FROM tbl_program WHERE program_id = LAST_INSERT_ID();
+    /* log */
+    CALL LogAction(
+        p_email,
+        CONCAT('Created program "', COALESCE(p_name,'(no name)'), '" (', COALESCE(p_abbreviation,'N/A'), ')'),
+        'Program.Create',
+        JSON_OBJECT('program_id', LAST_INSERT_ID(), 'college_id', p_college_id, 'name', p_name, 'abbreviation', p_abbreviation),
+        NULL, NULL
+    );
+
+    /* friendly payload */
+    SELECT 'Program created successfully' AS message, p.* 
+    FROM tbl_program p WHERE p.program_id = LAST_INSERT_ID();
 END$$
 DELIMITER ;
 
+/* -------- UpdateProgram (blocks moving into archived college) -------- */
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE UpdateProgram(
     IN p_program_id INT,
@@ -9664,48 +9766,152 @@ CREATE DEFINER='admin'@'%' PROCEDURE UpdateProgram(
 )
 BEGIN
     DECLARE v_user_id VARCHAR(200);
+    DECLARE v_col_status ENUM('Active','Archived');
+    DECLARE v_old JSON;
 
-    -- Lookup user_id from email
-    SELECT user_id INTO v_user_id
-    FROM tbl_user
-    WHERE email = p_email
-    LIMIT 1;
-
+    SELECT user_id INTO v_user_id FROM tbl_user WHERE email = p_email LIMIT 1;
     IF v_user_id IS NULL THEN
-        SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'User not found for provided email';
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'User not found for provided email';
     END IF;
 
-    UPDATE tbl_program
-    SET college_id = p_college_id,
-        name = p_name,
-        abbreviation = p_abbreviation
-    WHERE program_id = p_program_id;
+    IF NOT EXISTS (SELECT 1 FROM tbl_program WHERE program_id = p_program_id) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Program not found';
+    END IF;
 
-    SELECT * FROM tbl_program WHERE program_id = p_program_id;
+    SELECT status INTO v_col_status FROM tbl_college WHERE college_id = p_college_id;
+    IF v_col_status IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'College not found';
+    END IF;
+    IF v_col_status = 'Archived' THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Cannot move program into an archived college';
+    END IF;
+
+    /* keep snapshot for log */
+    SELECT JSON_OBJECT('program', program_id, 'college_id', college_id, 'name', name, 'abbreviation', abbreviation, 'status', status)
+      INTO v_old
+    FROM tbl_program WHERE program_id = p_program_id;
+
+    DECLARE CONTINUE HANDLER FOR 1062
+      BEGIN CALL _RaiseDupKey('Program name or abbreviation already exists'); END;
+
+    UPDATE tbl_program
+       SET college_id = p_college_id,
+           name       = p_name,
+           abbreviation = p_abbreviation
+     WHERE program_id = p_program_id;
+
+    CALL LogAction(
+        p_email,
+        CONCAT('Updated program "', COALESCE(p_name,'(no name)'), '" (', COALESCE(p_abbreviation,'N/A'), ')'),
+        'Program.Update',
+        JSON_OBJECT('before', v_old,
+                    'after', JSON_OBJECT('program_id', p_program_id, 'college_id', p_college_id, 'name', p_name, 'abbreviation', p_abbreviation)),
+        NULL, NULL
+    );
+
+    SELECT 'Program updated successfully' AS message, p.*
+    FROM tbl_program p WHERE p.program_id = p_program_id;
 END$$
 DELIMITER ;
 
+/* -------- ArchiveProgram -------- */
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE ArchiveProgram(
+    IN p_program_id INT,
+    IN p_user_email VARCHAR(100),
+    IN p_reason VARCHAR(255)
+)
+BEGIN
+    DECLARE v_user_id VARCHAR(200);
+    DECLARE v_status ENUM('Active','Archived');
+
+    SELECT user_id INTO v_user_id FROM tbl_user WHERE email = p_user_email LIMIT 1;
+    IF v_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='User not found for provided email';
+    END IF;
+
+    SELECT status INTO v_status FROM tbl_program WHERE program_id = p_program_id;
+    IF v_status IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Program not found';
+    END IF;
+    IF v_status = 'Archived' THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Program is already archived';
+    END IF;
+
+    UPDATE tbl_program
+       SET status = 'Archived',
+           archived_at = NOW(),
+           archived_by = v_user_id,
+           archived_reason = p_reason
+     WHERE program_id = p_program_id;
+
+    CALL LogAction(
+        p_user_email,
+        CONCAT('Archived program ID ', p_program_id, COALESCE(CONCAT(' — reason: ', p_reason), '')),
+        'Program.Archive',
+        JSON_OBJECT('program_id', p_program_id, 'reason', p_reason),
+        NULL, NULL
+    );
+
+    SELECT 'Program archived successfully' AS message, p.*
+    FROM tbl_program p WHERE p.program_id = p_program_id;
+END$$
+DELIMITER ;
+
+/* -------- UnarchiveProgram -------- */
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE UnarchiveProgram(
+    IN p_program_id INT,
+    IN p_user_email VARCHAR(100)
+)
+BEGIN
+    DECLARE v_user_id VARCHAR(200);
+    DECLARE v_status ENUM('Active','Archived');
+
+    SELECT user_id INTO v_user_id FROM tbl_user WHERE email = p_user_email LIMIT 1;
+    IF v_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='User not found for provided email';
+    END IF;
+
+    SELECT status INTO v_status FROM tbl_program WHERE program_id = p_program_id;
+    IF v_status IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Program not found';
+    END IF;
+    IF v_status = 'Active' THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Program is not archived';
+    END IF;
+
+    UPDATE tbl_program
+       SET status = 'Active',
+           archived_at = NULL,
+           archived_by = NULL,
+           archived_reason = NULL
+     WHERE program_id = p_program_id;
+
+    CALL LogAction(
+        p_user_email,
+        CONCAT('Unarchived program ID ', p_program_id),
+        'Program.Unarchive',
+        JSON_OBJECT('program_id', p_program_id),
+        NULL, NULL
+    );
+
+    SELECT 'Program unarchived successfully' AS message, p.*
+    FROM tbl_program p WHERE p.program_id = p_program_id;
+END$$
+DELIMITER ;
+
+/* -------- Back-compat: DeleteProgram now archives instead -------- */
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE DeleteProgram(
     IN p_program_id INT,
     IN p_email VARCHAR(100)
 )
 BEGIN
-    DECLARE v_user_id VARCHAR(200);
-
-    -- Lookup user_id from email
-    SELECT user_id INTO v_user_id
-    FROM tbl_user
-    WHERE email = p_email
-    LIMIT 1;
-
-    IF v_user_id IS NULL THEN
-        SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'User not found for provided email';
-    END IF;
-
-    DELETE FROM tbl_program WHERE program_id = p_program_id;
+    /* Soft-delete for safety */
+    CALL ArchiveProgram(p_program_id, p_email, 'Archived via DeleteProgram');
+    /* Return a friendly hint */
+    SELECT 'Note: program was archived (soft-deleted) to preserve history' AS notice;
 END$$
 DELIMITER ;
 
@@ -11037,1892 +11243,540 @@ BEGIN
 END$$
 DELIMITER ;
 
+DROP PROCEDURE IF EXISTS GetEventActivities;
 DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE GetEventActivities(IN p_organization_id INT)
+CREATE DEFINER=`admin`@`%` PROCEDURE GetEventActivities(IN p_organization_id INT)
 BEGIN
-DECLARE v_today DATE;
-DECLARE v_current_month_start DATE;
-DECLARE v_current_month_end DATE;
-DECLARE v_last_month_start DATE;
-DECLARE v_last_month_end DATE;
-SET v_today = CURDATE();
-SET v_current_month_start = DATE_FORMAT(CURDATE(), '%Y-%m-01');
-SET v_current_month_end   = LAST_DAY(CURDATE());
-SET v_last_month_start    = DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01');
-SET v_last_month_end      = LAST_DAY(DATE_SUB(CURDATE(), INTERVAL 1 MONTH));
+  /* ===== Dates (same logic) ===== */
+  DECLARE v_today DATE;
+  DECLARE v_current_month_start DATE;
+  DECLARE v_current_month_end DATE;
+  DECLARE v_last_month_start DATE;
+  DECLARE v_last_month_end DATE;
 
-IF p_organization_id IS NULL THEN
+  SET v_today = CURDATE();
+  SET v_current_month_start = DATE_FORMAT(CURDATE(), '%Y-%m-01');
+  SET v_current_month_end   = LAST_DAY(CURDATE());
+  SET v_last_month_start    = DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01');
+  SET v_last_month_end      = LAST_DAY(DATE_SUB(CURDATE(), INTERVAL 1 MONTH));
+
+  WITH RECURSIVE months AS (
+    SELECT 0 AS n, DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL 11 MONTH) AS month_date
+    UNION ALL
+    SELECT n+1, DATE_ADD(month_date, INTERVAL 1 MONTH)
+    FROM months WHERE n < 11
+  ),
+  lc AS (
+    SELECT organization_id, MAX(cycle_number) AS max_cycle
+    FROM tbl_renewal_cycle
+    GROUP BY organization_id
+  ),
+  org_latest AS (
+    SELECT o.organization_id, o.status,
+           ov.name AS organization_name,
+           rc.cycle_number, rc.org_version_id
+    FROM tbl_organization o
+    JOIN lc            ON lc.organization_id = o.organization_id
+    JOIN tbl_renewal_cycle rc
+         ON rc.organization_id = o.organization_id AND rc.cycle_number = lc.max_cycle
+    JOIN tbl_organization_version ov
+         ON ov.org_version_id = rc.org_version_id
+    WHERE o.status = 'Approved'
+  ),
+  ev_sdao AS (
+    SELECT e.*
+    FROM tbl_event e
+    WHERE e.event_type IN ('SDAO','System')
+  ),
+  ev_org AS (
+    SELECT e.*
+    FROM tbl_event e
+    JOIN lc ON lc.organization_id = e.organization_id
+    WHERE e.event_type = 'Organization'
+      AND e.cycle_number = lc.max_cycle
+  ),
+  att_by_event AS (
+    SELECT
+      e.event_id,
+      SUM(CASE WHEN ea.status IN ('Registered','Attended','Evaluated') THEN 1 ELSE 0 END) AS reg_all,
+      SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END)              AS att_all,
+      SUM(CASE WHEN ea.status = 'Evaluated' THEN 1 ELSE 0 END)                             AS eval_all,
+      SUM(CASE WHEN ea.status = 'Registered' THEN 1 ELSE 0 END)                            AS reg_only
+    FROM tbl_event e
+    LEFT JOIN tbl_event_attendance ea
+      ON ea.event_id = e.event_id AND ea.deleted_at IS NULL
+    GROUP BY e.event_id
+  ),
+  /* SDAO aggregates */
+  sdao_counts AS (
+    SELECT
+      SUM(CASE WHEN e.status='Approved' AND e.start_date < v_today
+               AND e.start_date BETWEEN v_current_month_start AND v_current_month_end THEN 1 ELSE 0 END) AS completed_cm,
+      SUM(CASE WHEN e.status='Approved' AND e.start_date < v_today
+               AND e.start_date BETWEEN v_last_month_start AND v_last_month_end THEN 1 ELSE 0 END)        AS completed_lm,
+      SUM(CASE WHEN e.status='Rejected'
+               AND e.start_date BETWEEN v_current_month_start AND v_current_month_end THEN 1 ELSE 0 END)  AS cancelled_cm,
+      SUM(CASE WHEN e.status='Rejected'
+               AND e.start_date BETWEEN v_last_month_start AND v_last_month_end THEN 1 ELSE 0 END)        AS cancelled_lm
+    FROM ev_sdao e
+  ),
+  sdao_rates AS (
+    SELECT
+      SUM(CASE WHEN e.status='Approved' AND e.start_date < v_today
+                    AND e.start_date BETWEEN v_current_month_start AND v_current_month_end
+               THEN COALESCE(a.reg_all,0) ELSE 0 END)  AS regs_cm,
+      SUM(CASE WHEN e.status='Approved' AND e.start_date < v_today
+                    AND e.start_date BETWEEN v_current_month_start AND v_current_month_end
+               THEN COALESCE(a.att_all,0) ELSE 0 END)  AS att_cm,
+      SUM(CASE WHEN e.status='Approved' AND e.start_date < v_today
+                    AND e.start_date BETWEEN v_current_month_start AND v_current_month_end
+               THEN COALESCE(a.eval_all,0) ELSE 0 END) AS eval_cm,
+
+      SUM(CASE WHEN e.status='Approved' AND e.start_date < v_today
+                    AND e.start_date BETWEEN v_last_month_start AND v_last_month_end
+               THEN COALESCE(a.reg_all,0) ELSE 0 END)  AS regs_lm,
+      SUM(CASE WHEN e.status='Approved' AND e.start_date < v_today
+                    AND e.start_date BETWEEN v_last_month_start AND v_last_month_end
+               THEN COALESCE(a.att_all,0) ELSE 0 END)  AS att_lm,
+      SUM(CASE WHEN e.status='Approved' AND e.start_date < v_today
+                    AND e.start_date BETWEEN v_last_month_start AND v_last_month_end
+               THEN COALESCE(a.eval_all,0) ELSE 0 END) AS eval_lm
+    FROM ev_sdao e
+    LEFT JOIN att_by_event a ON a.event_id = e.event_id
+  ),
+  sdao_trend AS (
+    SELECT CAST(
+      CONCAT(
+        '[',
+        IFNULL(GROUP_CONCAT(
+          CAST(JSON_OBJECT(
+            'event',   t.title,
+            'attended',COALESCE(a.att_all,0),
+            'notAttended',COALESCE(a.reg_only,0)
+          ) AS CHAR)
+          ORDER BY t.start_date DESC SEPARATOR ','
+        ), ''),
+        ']'
+      ) AS JSON
+    ) AS attendance_trend
+    FROM (
+      SELECT e.event_id, e.title, e.start_date
+      FROM ev_sdao e
+      WHERE e.status='Approved' AND e.start_date < v_today
+      ORDER BY e.start_date DESC
+      LIMIT 10
+    ) t
+    LEFT JOIN att_by_event a ON a.event_id = t.event_id
+  ),
+  sdao_feedback_per_event AS (
+    SELECT CAST(
+      CONCAT(
+        '[',
+        IFNULL(GROUP_CONCAT(
+          CAST(JSON_OBJECT(
+            'event', t.title,
+            'feedback',
+              CASE WHEN COALESCE(a.att_all,0) > 0
+                   THEN ROUND(COALESCE(a.eval_all,0)*100.0/COALESCE(a.att_all,0),0)
+                   ELSE 0 END
+          ) AS CHAR)
+          ORDER BY t.start_date DESC SEPARATOR ','
+        ), ''),
+        ']'
+      ) AS JSON
+    ) AS feedback_json
+    FROM (
+      SELECT e.event_id, e.title, e.start_date
+      FROM ev_sdao e
+      WHERE e.status='Approved' AND e.start_date < v_today
+      ORDER BY e.start_date DESC
+      LIMIT 10
+    ) t
+    LEFT JOIN att_by_event a ON a.event_id = t.event_id
+  ),
+  sdao_month_json AS (
+    SELECT CAST(
+      CONCAT(
+        '[',
+        GROUP_CONCAT(
+          CAST(JSON_OBJECT(
+            'month', DATE_FORMAT(m.month_date, '%b'),
+            'events',
+              COALESCE((
+                SELECT COUNT(*)
+                FROM ev_sdao e
+                WHERE e.status='Approved'
+                  AND e.start_date < v_today
+                  AND e.start_date >= m.month_date
+                  AND e.start_date <  DATE_ADD(m.month_date, INTERVAL 1 MONTH)
+              ),0)
+          ) AS CHAR)
+          ORDER BY m.month_date ASC SEPARATOR ','
+        ),
+        ']'
+      ) AS JSON
+    ) AS month_json
+    FROM months m
+  ),
+  /* All-orgs aggregates */
+  all_counts AS (
+    SELECT
+      SUM(CASE WHEN e.status='Approved' AND e.start_date < v_today
+               AND e.start_date BETWEEN v_current_month_start AND v_current_month_end THEN 1 ELSE 0 END) AS completed_cm,
+      SUM(CASE WHEN e.status='Approved' AND e.start_date < v_today
+               AND e.start_date BETWEEN v_last_month_start AND v_last_month_end THEN 1 ELSE 0 END)        AS completed_lm,
+      SUM(CASE WHEN e.status='Rejected'
+               AND e.start_date BETWEEN v_current_month_start AND v_current_month_end THEN 1 ELSE 0 END)  AS cancelled_cm,
+      SUM(CASE WHEN e.status='Rejected'
+               AND e.start_date BETWEEN v_last_month_start AND v_last_month_end THEN 1 ELSE 0 END)        AS cancelled_lm
+    FROM ev_org e
+  ),
+  all_rates AS (
+    SELECT
+      SUM(CASE WHEN e.status='Approved' AND e.start_date < v_today
+                    AND e.start_date BETWEEN v_current_month_start AND v_current_month_end
+               THEN COALESCE(a.reg_all,0) ELSE 0 END)  AS regs_cm,
+      SUM(CASE WHEN e.status='Approved' AND e.start_date < v_today
+                    AND e.start_date BETWEEN v_current_month_start AND v_current_month_end
+               THEN COALESCE(a.att_all,0) ELSE 0 END)  AS att_cm,
+      SUM(CASE WHEN e.status='Approved' AND e.start_date < v_today
+                    AND e.start_date BETWEEN v_current_month_start AND v_current_month_end
+               THEN COALESCE(a.eval_all,0) ELSE 0 END) AS eval_cm,
+
+      SUM(CASE WHEN e.status='Approved' AND e.start_date < v_today
+                    AND e.start_date BETWEEN v_last_month_start AND v_last_month_end
+               THEN COALESCE(a.reg_all,0) ELSE 0 END)  AS regs_lm,
+      SUM(CASE WHEN e.status='Approved' AND e.start_date < v_today
+                    AND e.start_date BETWEEN v_last_month_start AND v_last_month_end
+               THEN COALESCE(a.att_all,0) ELSE 0 END)  AS att_lm,
+      SUM(CASE WHEN e.status='Approved' AND e.start_date < v_today
+                    AND e.start_date BETWEEN v_last_month_start AND v_last_month_end
+               THEN COALESCE(a.eval_all,0) ELSE 0 END) AS eval_lm
+    FROM ev_org e
+    LEFT JOIN att_by_event a ON a.event_id = e.event_id
+  ),
+  all_trend AS (
+    SELECT CAST(
+      CONCAT(
+        '[',
+        IFNULL(GROUP_CONCAT(
+          CAST(JSON_OBJECT(
+            'event',   t.title,
+            'attended',COALESCE(a.att_all,0),
+            'notAttended',COALESCE(a.reg_only,0)
+          ) AS CHAR)
+          ORDER BY t.start_date DESC SEPARATOR ','
+        ), ''),
+        ']'
+      ) AS JSON
+    ) AS attendance_trend
+    FROM (
+      SELECT e.event_id, e.title, e.start_date
+      FROM ev_org e
+      WHERE e.status='Approved' AND e.start_date < v_today
+      ORDER BY e.start_date DESC
+      LIMIT 10
+    ) t
+    LEFT JOIN att_by_event a ON a.event_id = t.event_id
+  ),
+  all_feedback_per_event AS (
+    SELECT CAST(
+      CONCAT(
+        '[',
+        IFNULL(GROUP_CONCAT(
+          CAST(JSON_OBJECT(
+            'event', t.title,
+            'feedback',
+              CASE WHEN COALESCE(a.att_all,0) > 0
+                   THEN ROUND(COALESCE(a.eval_all,0)*100.0/COALESCE(a.att_all,0),0)
+                   ELSE 0 END
+          ) AS CHAR)
+          ORDER BY t.start_date DESC SEPARATOR ','
+        ), ''),
+        ']'
+      ) AS JSON
+    ) AS feedback_json
+    FROM (
+      SELECT e.event_id, e.title, e.start_date
+      FROM ev_org e
+      WHERE e.status='Approved' AND e.start_date < v_today
+      ORDER BY e.start_date DESC
+      LIMIT 10
+    ) t
+    LEFT JOIN att_by_event a ON a.event_id = t.event_id
+  ),
+  all_month_json AS (
+    SELECT CAST(
+      CONCAT(
+        '[',
+        GROUP_CONCAT(
+          CAST(JSON_OBJECT(
+            'month', DATE_FORMAT(m.month_date, '%b'),
+            'events',
+              COALESCE((
+                SELECT COUNT(*)
+                FROM ev_org e
+                WHERE e.status='Approved'
+                  AND e.start_date < v_today
+                  AND e.start_date >= m.month_date
+                  AND e.start_date <  DATE_ADD(m.month_date, INTERVAL 1 MONTH)
+              ),0)
+          ) AS CHAR)
+          ORDER BY m.month_date ASC SEPARATOR ','
+        ),
+        ']'
+      ) AS JSON
+    ) AS month_json
+    FROM months m
+  ),
+  org_counts AS (
+    SELECT
+      e.organization_id,
+      SUM(CASE WHEN e.status='Approved' AND e.start_date < v_today
+               AND e.start_date BETWEEN v_current_month_start AND v_current_month_end THEN 1 ELSE 0 END) AS completed_cm,
+      SUM(CASE WHEN e.status='Approved' AND e.start_date < v_today
+               AND e.start_date BETWEEN v_last_month_start AND v_last_month_end THEN 1 ELSE 0 END)        AS completed_lm,
+      SUM(CASE WHEN e.status='Rejected'
+               AND e.start_date BETWEEN v_current_month_start AND v_current_month_end THEN 1 ELSE 0 END)  AS cancelled_cm,
+      SUM(CASE WHEN e.status='Rejected'
+               AND e.start_date BETWEEN v_last_month_start AND v_last_month_end THEN 1 ELSE 0 END)        AS cancelled_lm
+    FROM ev_org e
+    GROUP BY e.organization_id
+  ),
+  org_rates AS (
+    SELECT
+      e.organization_id,
+      SUM(CASE WHEN e.status='Approved' AND e.start_date < v_today
+                    AND e.start_date BETWEEN v_current_month_start AND v_current_month_end
+               THEN COALESCE(a.reg_all,0) ELSE 0 END)  AS regs_cm,
+      SUM(CASE WHEN e.status='Approved' AND e.start_date < v_today
+                    AND e.start_date BETWEEN v_current_month_start AND v_current_month_end
+               THEN COALESCE(a.att_all,0) ELSE 0 END)  AS att_cm,
+      SUM(CASE WHEN e.status='Approved' AND e.start_date < v_today
+                    AND e.start_date BETWEEN v_current_month_start AND v_current_month_end
+               THEN COALESCE(a.eval_all,0) ELSE 0 END) AS eval_cm,
+
+      SUM(CASE WHEN e.status='Approved' AND e.start_date < v_today
+                    AND e.start_date BETWEEN v_last_month_start AND v_last_month_end
+               THEN COALESCE(a.reg_all,0) ELSE 0 END)  AS regs_lm,
+      SUM(CASE WHEN e.status='Approved' AND e.start_date < v_today
+                    AND e.start_date BETWEEN v_last_month_start AND v_last_month_end
+               THEN COALESCE(a.att_all,0) ELSE 0 END)  AS att_lm,
+      SUM(CASE WHEN e.status='Approved' AND e.start_date < v_today
+                    AND e.start_date BETWEEN v_last_month_start AND v_last_month_end
+               THEN COALESCE(a.eval_all,0) ELSE 0 END) AS eval_lm
+    FROM ev_org e
+    LEFT JOIN att_by_event a ON a.event_id = e.event_id
+    GROUP BY e.organization_id
+  ),
+  org_trend_src AS (
+    SELECT
+      e.organization_id, e.event_id, e.title, e.start_date,
+      COALESCE(a.att_all,0) AS att_all, COALESCE(a.reg_only,0) AS reg_only,
+      ROW_NUMBER() OVER (PARTITION BY e.organization_id ORDER BY e.start_date DESC) AS rn
+    FROM ev_org e
+    LEFT JOIN att_by_event a ON a.event_id = e.event_id
+    WHERE e.status='Approved' AND e.start_date < v_today
+  ),
+  org_trend AS (
+    SELECT
+      organization_id,
+      CAST(
+        CONCAT(
+          '[',
+          IFNULL(GROUP_CONCAT(
+            CAST(JSON_OBJECT(
+              'event', title,
+              'attended', att_all,
+              'notAttended', reg_only
+            ) AS CHAR)
+            ORDER BY start_date DESC SEPARATOR ','
+          ), ''),
+          ']'
+        ) AS JSON
+      ) AS attendance_trend
+    FROM org_trend_src
+    WHERE rn <= 10
+    GROUP BY organization_id
+  ),
+  org_feedback_src AS (
+    SELECT
+      e.organization_id, e.event_id, e.title, e.start_date,
+      COALESCE(a.att_all,0) AS att_all, COALESCE(a.eval_all,0) AS eval_all,
+      ROW_NUMBER() OVER (PARTITION BY e.organization_id ORDER BY e.start_date DESC) AS rn
+    FROM ev_org e
+    LEFT JOIN att_by_event a ON a.event_id = e.event_id
+    WHERE e.status='Approved' AND e.start_date < v_today
+  ),
+  org_feedback AS (
+    SELECT
+      organization_id,
+      CAST(
+        CONCAT(
+          '[',
+          IFNULL(GROUP_CONCAT(
+            CAST(JSON_OBJECT(
+              'event', title,
+              'feedback', CASE WHEN att_all > 0 THEN ROUND(eval_all*100.0/att_all,0) ELSE 0 END
+            ) AS CHAR)
+            ORDER BY start_date DESC SEPARATOR ','
+          ), ''),
+          ']'
+        ) AS JSON
+      ) AS feedback_json
+    FROM org_feedback_src
+    WHERE rn <= 10
+    GROUP BY organization_id
+  ),
+  org_month AS (
+    SELECT
+      ol.organization_id,
+      CAST(
+        CONCAT(
+          '[',
+          GROUP_CONCAT(
+            CAST(JSON_OBJECT(
+              'month', DATE_FORMAT(m.month_date,'%b'),
+              'events',
+                COALESCE((
+                  SELECT COUNT(*)
+                  FROM ev_org e
+                  WHERE e.organization_id = ol.organization_id
+                    AND e.status='Approved'
+                    AND e.start_date < v_today
+                    AND e.start_date >= m.month_date
+                    AND e.start_date <  DATE_ADD(m.month_date, INTERVAL 1 MONTH)
+                ),0)
+            ) AS CHAR)
+            ORDER BY m.month_date ASC SEPARATOR ','
+          ),
+          ']'
+        ) AS JSON
+      ) AS month_json
+    FROM org_latest ol
+    CROSS JOIN months m
+    GROUP BY ol.organization_id
+  )
+
+  /* ===== Single SELECT (CTEs visible here) ===== */
   SELECT *
   FROM (
-    /* 1) SDAO + System row (no cycle dependency) */
+    /* 1) SDAO/System — only when no org filter */
     SELECT
       NULL AS organization_id,
       'SDAO' AS organization_name,
 
-      /* Completed (past) this month = approved with start_date < today */
-      (SELECT COUNT(*)
-       FROM tbl_event e
-       WHERE e.event_type IN ('SDAO','System')
-         AND e.status='Approved'
-         AND e.start_date < v_today
-         AND e.start_date BETWEEN v_current_month_start AND v_current_month_end) AS completed_events,
+      sc.completed_cm                            AS completed_events,
+      sc.completed_lm                            AS last_month_completed,
+      CASE WHEN sc.completed_lm = 0 THEN NULL ELSE sc.completed_cm - sc.completed_lm END AS completed_events_change,
 
-      /* Completed (past) last month */
-      (SELECT COUNT(*)
-       FROM tbl_event e
-       WHERE e.event_type IN ('SDAO','System')
-         AND e.status='Approved'
-         AND e.start_date < v_today
-         AND e.start_date BETWEEN v_last_month_start AND v_last_month_end) AS last_month_completed,
+      sc.cancelled_cm                            AS cancelled_events,
+      sc.cancelled_lm                            AS last_month_cancelled,
+      CASE WHEN sc.cancelled_lm = 0 THEN NULL ELSE sc.cancelled_cm - sc.cancelled_lm END AS cancelled_events_change,
 
-      /* Completed change (null if last month 0) */
-      (CASE
-          WHEN (SELECT COUNT(*)
-                FROM tbl_event e
-                WHERE e.event_type IN ('SDAO','System')
-                  AND e.status='Approved'
-                  AND e.start_date < v_today
-                  AND e.start_date BETWEEN v_last_month_start AND v_last_month_end) = 0
-          THEN NULL
-          ELSE
-            (SELECT COUNT(*) FROM tbl_event e
-             WHERE e.event_type IN ('SDAO','System') AND e.status='Approved'
-               AND e.start_date < v_today
-               AND e.start_date BETWEEN v_current_month_start AND v_current_month_end)
-            -
-            (SELECT COUNT(*) FROM tbl_event e
-             WHERE e.event_type IN ('SDAO','System') AND e.status='Approved'
-               AND e.start_date < v_today
-               AND e.start_date BETWEEN v_last_month_start AND v_last_month_end)
-        END) AS completed_events_change,
+      CASE WHEN sr.regs_cm > 0 THEN ROUND(sr.att_cm*100.0/sr.regs_cm,2) ELSE 0 END AS avg_attendance_rate,
+      CASE WHEN sr.regs_lm > 0 THEN ROUND(sr.att_lm*100.0/sr.regs_lm,2) ELSE 0 END AS last_month_avg_attendance_rate,
+      CASE WHEN sr.regs_lm = 0 THEN NULL
+           ELSE (ROUND(sr.att_cm*100.0/NULLIF(sr.regs_cm,0),2) - ROUND(sr.att_lm*100.0/sr.regs_lm,2)) END AS attendance_rate_change,
 
-      /* Cancelled this month */
-      (SELECT COUNT(*)
-       FROM tbl_event e
-       WHERE e.event_type IN ('SDAO','System')
-         AND e.status='Rejected'
-         AND e.start_date BETWEEN v_current_month_start AND v_current_month_end) AS cancelled_events,
+      CASE WHEN sr.att_cm > 0 THEN ROUND(sr.eval_cm*100.0/sr.att_cm,2) ELSE 0 END AS avg_feedback_rate,
+      CASE WHEN sr.att_lm > 0 THEN ROUND(sr.eval_lm*100.0/sr.att_lm,2) ELSE 0 END AS last_month_avg_feedback_rate,
+      CASE WHEN sr.att_lm = 0 THEN NULL
+           ELSE (ROUND(sr.eval_cm*100.0/NULLIF(sr.att_cm,0),2) - ROUND(sr.eval_lm*100.0/sr.att_lm,2)) END AS feedback_rate_change,
 
-      /* Cancelled last month */
-      (SELECT COUNT(*)
-       FROM tbl_event e
-       WHERE e.event_type IN ('SDAO','System')
-         AND e.status='Rejected'
-         AND e.start_date BETWEEN v_last_month_start AND v_last_month_end) AS last_month_cancelled,
-
-      /* Cancelled change (null if last month 0) */
-      (CASE
-          WHEN (SELECT COUNT(*)
-                FROM tbl_event e
-                WHERE e.event_type IN ('SDAO','System')
-                  AND e.status='Rejected'
-                  AND e.start_date BETWEEN v_last_month_start AND v_last_month_end) = 0
-          THEN NULL
-          ELSE
-            (SELECT COUNT(*) FROM tbl_event e
-             WHERE e.event_type IN ('SDAO','System') AND e.status='Rejected'
-               AND e.start_date BETWEEN v_current_month_start AND v_current_month_end)
-            -
-            (SELECT COUNT(*) FROM tbl_event e
-             WHERE e.event_type IN ('SDAO','System') AND e.status='Rejected'
-               AND e.start_date BETWEEN v_last_month_start AND v_last_month_end)
-        END) AS cancelled_events_change,
-
-      /* Avg attendance rate (past) this month: attended=(Attended+Evaluated) / (Registered+Attended+Evaluated) */
-      (
-        SELECT CASE WHEN SUM(reg_cnt) > 0
-                    THEN ROUND(SUM(att_cnt)*100.0 / SUM(reg_cnt), 2)
-                    ELSE 0 END
-        FROM (
-          SELECT
-            SUM(CASE WHEN ea.status IN ('Registered','Attended','Evaluated') THEN 1 ELSE 0 END) AS reg_cnt,
-            SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END)            AS att_cnt
-          FROM tbl_event e
-          LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-          WHERE e.event_type IN ('SDAO','System')
-            AND e.status='Approved'
-            AND e.start_date < v_today
-            AND e.start_date BETWEEN v_current_month_start AND v_current_month_end
-        ) t
-      ) AS avg_attendance_rate,
-
-      /* Avg attendance rate (past) last month */
-      (
-        SELECT CASE WHEN SUM(reg_cnt) > 0
-                    THEN ROUND(SUM(att_cnt)*100.0 / SUM(reg_cnt), 2)
-                    ELSE 0 END
-        FROM (
-          SELECT
-            SUM(CASE WHEN ea.status IN ('Registered','Attended','Evaluated') THEN 1 ELSE 0 END) AS reg_cnt,
-            SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END)            AS att_cnt
-          FROM tbl_event e
-          LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-          WHERE e.event_type IN ('SDAO','System')
-            AND e.status='Approved'
-            AND e.start_date < v_today
-            AND e.start_date BETWEEN v_last_month_start AND v_last_month_end
-        ) t
-      ) AS last_month_avg_attendance_rate,
-
-      /* Attendance rate change (null if last month 0) */
-      (
-        CASE
-          WHEN (
-            SELECT SUM(CASE WHEN ea.status IN ('Registered','Attended','Evaluated') THEN 1 ELSE 0 END)
-            FROM tbl_event e
-            LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-            WHERE e.event_type IN ('SDAO','System')
-              AND e.status='Approved'
-              AND e.start_date < v_today
-              AND e.start_date BETWEEN v_last_month_start AND v_last_month_end
-          ) = 0 THEN NULL
-          ELSE
-            (
-              SELECT CASE WHEN SUM(reg_cnt) > 0
-                          THEN ROUND(SUM(att_cnt)*100.0 / SUM(reg_cnt), 2)
-                          ELSE 0 END
-              FROM (
-                SELECT
-                  SUM(CASE WHEN ea.status IN ('Registered','Attended','Evaluated') THEN 1 ELSE 0 END) AS reg_cnt,
-                  SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END)            AS att_cnt
-                FROM tbl_event e
-                LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-                WHERE e.event_type IN ('SDAO','System')
-                  AND e.status='Approved'
-                  AND e.start_date < v_today
-                  AND e.start_date BETWEEN v_current_month_start AND v_current_month_end
-              ) cm
-            ) -
-            (
-              SELECT CASE WHEN SUM(reg_cnt) > 0
-                          THEN ROUND(SUM(att_cnt)*100.0 / SUM(reg_cnt), 2)
-                          ELSE 0 END
-              FROM (
-                SELECT
-                  SUM(CASE WHEN ea.status IN ('Registered','Attended','Evaluated') THEN 1 ELSE 0 END) AS reg_cnt,
-                  SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END)            AS att_cnt
-                FROM tbl_event e
-                LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-                WHERE e.event_type IN ('SDAO','System')
-                  AND e.status='Approved'
-                  AND e.start_date < v_today
-                  AND e.start_date BETWEEN v_last_month_start AND v_last_month_end
-              ) lm
-            )
-        END
-      ) AS attendance_rate_change,
-
-      /* Avg feedback rate (past) this month: Evaluated / (Attended+Evaluated) */
-      (
-        SELECT CASE WHEN SUM(att_cnt) > 0
-                    THEN ROUND(SUM(eval_cnt)*100.0 / SUM(att_cnt), 2)
-                    ELSE 0 END
-        FROM (
-          SELECT
-            SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END) AS att_cnt,
-            SUM(CASE WHEN ea.status='Evaluated' THEN 1 ELSE 0 END)                AS eval_cnt
-          FROM tbl_event e
-          LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-          WHERE e.event_type IN ('SDAO','System')
-            AND e.status='Approved'
-            AND e.start_date < v_today
-            AND e.start_date BETWEEN v_current_month_start AND v_current_month_end
-        ) t
-      ) AS avg_feedback_rate,
-
-      /* Avg feedback rate (past) last month */
-      (
-        SELECT CASE WHEN SUM(att_cnt) > 0
-                    THEN ROUND(SUM(eval_cnt)*100.0 / SUM(att_cnt), 2)
-                    ELSE 0 END
-        FROM (
-          SELECT
-            SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END) AS att_cnt,
-            SUM(CASE WHEN ea.status='Evaluated' THEN 1 ELSE 0 END)                AS eval_cnt
-          FROM tbl_event e
-          LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-          WHERE e.event_type IN ('SDAO','System')
-            AND e.status='Approved'
-            AND e.start_date < v_today
-            AND e.start_date BETWEEN v_last_month_start AND v_last_month_end
-        ) t
-      ) AS last_month_avg_feedback_rate,
-
-      /* Feedback rate change (null if last month 0) */
-      (
-        CASE
-          WHEN (
-            SELECT SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END)
-            FROM tbl_event e
-            LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-            WHERE e.event_type IN ('SDAO','System')
-              AND e.status='Approved'
-              AND e.start_date < v_today
-              AND e.start_date BETWEEN v_last_month_start AND v_last_month_end
-          ) = 0 THEN NULL
-          ELSE
-            (
-              SELECT CASE WHEN SUM(att_cnt) > 0
-                          THEN ROUND(SUM(eval_cnt)*100.0 / SUM(att_cnt), 2)
-                          ELSE 0 END
-              FROM (
-                SELECT
-                  SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END) AS att_cnt,
-                  SUM(CASE WHEN ea.status='Evaluated' THEN 1 ELSE 0 END)                AS eval_cnt
-                FROM tbl_event e
-                LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-                WHERE e.event_type IN ('SDAO','System')
-                  AND e.status='Approved'
-                  AND e.start_date < v_today
-                  AND e.start_date BETWEEN v_current_month_start AND v_current_month_end
-              ) cm
-            ) -
-            (
-              SELECT CASE WHEN SUM(att_cnt) > 0
-                          THEN ROUND(SUM(eval_cnt)*100.0 / SUM(att_cnt), 2)
-                          ELSE 0 END
-              FROM (
-                SELECT
-                  SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END) AS att_cnt,
-                  SUM(CASE WHEN ea.status='Evaluated' THEN 1 ELSE 0 END)                AS eval_cnt
-                FROM tbl_event e
-                LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-                WHERE e.event_type IN ('SDAO','System')
-                  AND e.status='Approved'
-                  AND e.start_date < v_today
-                  AND e.start_date BETWEEN v_last_month_start AND v_last_month_end
-              ) lm
-            )
-        END
-      ) AS feedback_rate_change,
-
-      /* Attendance trend (past, last 10 SDAO events) */
-      (
-        SELECT
-          CASE WHEN COUNT(*) = 0 THEN JSON_ARRAY()
-               ELSE CAST(
-                 CONCAT(
-                   '[',
-                   GROUP_CONCAT(
-                     CAST(JSON_OBJECT(
-                       'event', event_title,
-                       'attended', attended_count,
-                       'notAttended', not_attended_count
-                     ) AS CHAR)
-                     ORDER BY start_date DESC SEPARATOR ','
-                   ),
-                   ']'
-                 ) AS JSON
-               )
-          END
-        FROM (
-          SELECT
-            e.title AS event_title,
-            e.start_date,
-            SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END) AS attended_count,
-            SUM(CASE WHEN ea.status = 'Registered' THEN 1 ELSE 0 END) AS not_attended_count
-          FROM tbl_event e
-          LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-          WHERE e.event_type IN ('SDAO','System')
-            AND e.status='Approved'
-            AND e.start_date < v_today
-          GROUP BY e.event_id, e.title, e.start_date
-          ORDER BY e.start_date DESC
-          LIMIT 10
-        ) tt
-      ) AS attendance_trend,
-
-      /* Event feedback per event (past, last 10 SDAO events) */
-      (
-        SELECT
-          CASE WHEN COUNT(*) = 0 THEN JSON_ARRAY()
-               ELSE CAST(
-                 CONCAT(
-                   '[',
-                   GROUP_CONCAT(
-                     CAST(JSON_OBJECT(
-                       'event', event_title,
-                       'feedback', feedback_rate
-                     ) AS CHAR)
-                     ORDER BY start_date DESC SEPARATOR ','
-                   ),
-                   ']'
-                 ) AS JSON
-               )
-          END
-        FROM (
-          SELECT
-            e.title AS event_title,
-            e.start_date,
-            CASE WHEN SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END) > 0
-                 THEN ROUND(
-                   SUM(CASE WHEN ea.status='Evaluated' THEN 1 ELSE 0 END)*100.0 /
-                   SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END), 0)
-                 ELSE 0 END AS feedback_rate
-          FROM tbl_event e
-          LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-          WHERE e.event_type IN ('SDAO','System')
-            AND e.status='Approved'
-            AND e.start_date < v_today
-          GROUP BY e.event_id, e.title, e.start_date
-          ORDER BY e.start_date DESC
-          LIMIT 10
-        ) tf
-      ) AS event_feedback_rate,
-
-      /* Events per month (past SDAO, last 12 months) */
-      (
-        SELECT
-          CAST(
-            CONCAT(
-              '[',
-              GROUP_CONCAT(
-                CAST(JSON_OBJECT(
-                  'month', month_name,
-                  'events', event_count
-                ) AS CHAR)
-                ORDER BY month_date ASC SEPARATOR ','
-              ),
-              ']'
-            ) AS JSON
-          )
-        FROM (
-          SELECT
-            m.month_date,
-            DATE_FORMAT(m.month_date, '%b') AS month_name,
-            COALESCE((
-              SELECT COUNT(*)
-              FROM tbl_event e
-              WHERE e.event_type IN ('SDAO','System')
-                AND e.status='Approved'
-                AND e.start_date < v_today
-                AND e.start_date >= DATE_FORMAT(m.month_date, '%Y-%m-01')
-                AND e.start_date <  DATE_ADD(DATE_FORMAT(m.month_date, '%Y-%m-01'), INTERVAL 1 MONTH)
-            ),0) AS event_count
-          FROM (
-            SELECT DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL n MONTH) AS month_date
-            FROM (
-              SELECT 11 AS n UNION SELECT 10 UNION SELECT 9 UNION SELECT 8 UNION
-              SELECT 7 UNION SELECT 6 UNION SELECT 5 UNION SELECT 4 UNION
-              SELECT 3 UNION SELECT 2 UNION SELECT 1 UNION SELECT 0
-            ) m
-          ) m
-        ) mm
-      ) AS events_per_month,
+      st.attendance_trend,
+      sfe.feedback_json AS event_feedback_rate,
+      sm.month_json     AS events_per_month,
 
       1 AS sort_order
+    FROM sdao_counts sc
+    JOIN sdao_rates  sr ON 1=1
+    JOIN sdao_trend  st ON 1=1
+    JOIN sdao_feedback_per_event sfe ON 1=1
+    JOIN sdao_month_json sm ON 1=1
+    WHERE p_organization_id IS NULL
 
     UNION ALL
 
-    /* 2) All Organizations (latest cycle only) */
+    /* 2) All Organizations — only when no org filter */
     SELECT
       -1 AS organization_id,
       'All Organizations' AS organization_name,
 
-      /* Completed (past) this month */
-      (SELECT COUNT(*)
-       FROM tbl_event e
-       INNER JOIN (
-         SELECT organization_id, MAX(cycle_number) AS max_cycle
-         FROM tbl_renewal_cycle GROUP BY organization_id
-       ) lc ON lc.organization_id = e.organization_id
-       WHERE e.event_type='Organization'
-         AND e.cycle_number = lc.max_cycle
-         AND e.status='Approved'
-         AND e.start_date < v_today
-         AND e.start_date BETWEEN v_current_month_start AND v_current_month_end) AS completed_events,
+      ac.completed_cm                            AS completed_events,
+      ac.completed_lm                            AS last_month_completed,
+      CASE WHEN ac.completed_lm = 0 THEN NULL ELSE ac.completed_cm - ac.completed_lm END AS completed_events_change,
 
-      /* Completed (past) last month */
-      (SELECT COUNT(*)
-       FROM tbl_event e
-       INNER JOIN (
-         SELECT organization_id, MAX(cycle_number) AS max_cycle
-         FROM tbl_renewal_cycle GROUP BY organization_id
-       ) lc ON lc.organization_id = e.organization_id
-       WHERE e.event_type='Organization'
-         AND e.cycle_number = lc.max_cycle
-         AND e.status='Approved'
-         AND e.start_date < v_today
-         AND e.start_date BETWEEN v_last_month_start AND v_last_month_end) AS last_month_completed,
+      ac.cancelled_cm                            AS cancelled_events,
+      ac.cancelled_lm                            AS last_month_cancelled,
+      CASE WHEN ac.cancelled_lm = 0 THEN NULL ELSE ac.cancelled_cm - ac.cancelled_lm END AS cancelled_events_change,
 
-      /* Completed change (null if last 0) */
-      (CASE
-          WHEN (SELECT COUNT(*)
-                FROM tbl_event e
-                INNER JOIN (
-                  SELECT organization_id, MAX(cycle_number) AS max_cycle
-                  FROM tbl_renewal_cycle GROUP BY organization_id
-                ) lc ON lc.organization_id = e.organization_id
-                WHERE e.event_type='Organization'
-                  AND e.cycle_number = lc.max_cycle
-                  AND e.status='Approved'
-                  AND e.start_date < v_today
-                  AND e.start_date BETWEEN v_last_month_start AND v_last_month_end) = 0
-          THEN NULL
-          ELSE
-            (SELECT COUNT(*)
-             FROM tbl_event e
-             INNER JOIN (
-               SELECT organization_id, MAX(cycle_number) AS max_cycle
-               FROM tbl_renewal_cycle GROUP BY organization_id
-             ) lc ON lc.organization_id = e.organization_id
-             WHERE e.event_type='Organization'
-               AND e.cycle_number = lc.max_cycle
-               AND e.status='Approved'
-               AND e.start_date < v_today
-               AND e.start_date BETWEEN v_current_month_start AND v_current_month_end)
-            -
-            (SELECT COUNT(*)
-             FROM tbl_event e
-             INNER JOIN (
-               SELECT organization_id, MAX(cycle_number) AS max_cycle
-               FROM tbl_renewal_cycle GROUP BY organization_id
-             ) lc ON lc.organization_id = e.organization_id
-             WHERE e.event_type='Organization'
-               AND e.cycle_number = lc.max_cycle
-               AND e.status='Approved'
-               AND e.start_date < v_today
-               AND e.start_date BETWEEN v_last_month_start AND v_last_month_end)
-        END) AS completed_events_change,
+      CASE WHEN ar.regs_cm > 0 THEN ROUND(ar.att_cm*100.0/ar.regs_cm,2) ELSE 0 END AS avg_attendance_rate,
+      CASE WHEN ar.regs_lm > 0 THEN ROUND(ar.att_lm*100.0/ar.regs_lm,2) ELSE 0 END AS last_month_avg_attendance_rate,
+      CASE WHEN ar.regs_lm = 0 THEN NULL
+           ELSE (ROUND(ar.att_cm*100.0/NULLIF(ar.regs_cm,0),2) - ROUND(ar.att_lm*100.0/ar.regs_lm,2)) END AS attendance_rate_change,
 
-      /* Cancelled and changes (same as before, no 'past' filter) */
-      (SELECT COUNT(*)
-       FROM tbl_event e
-       INNER JOIN (
-         SELECT organization_id, MAX(cycle_number) AS max_cycle
-         FROM tbl_renewal_cycle GROUP BY organization_id
-       ) lc ON lc.organization_id = e.organization_id
-       WHERE e.event_type='Organization'
-         AND e.cycle_number = lc.max_cycle
-         AND e.status='Rejected'
-         AND e.start_date BETWEEN v_current_month_start AND v_current_month_end) AS cancelled_events,
+      CASE WHEN ar.att_cm > 0 THEN ROUND(ar.eval_cm*100.0/ar.att_cm,2) ELSE 0 END AS avg_feedback_rate,
+      CASE WHEN ar.att_lm > 0 THEN ROUND(ar.eval_lm*100.0/ar.att_lm,2) ELSE 0 END AS last_month_avg_feedback_rate,
+      CASE WHEN ar.att_lm = 0 THEN NULL
+           ELSE (ROUND(ar.eval_cm*100.0/NULLIF(ar.att_cm,0),2) - ROUND(ar.eval_lm*100.0/ar.att_lm,2)) END AS feedback_rate_change,
 
-      (SELECT COUNT(*)
-       FROM tbl_event e
-       INNER JOIN (
-         SELECT organization_id, MAX(cycle_number) AS max_cycle
-         FROM tbl_renewal_cycle GROUP BY organization_id
-       ) lc ON lc.organization_id = e.organization_id
-       WHERE e.event_type='Organization'
-         AND e.cycle_number = lc.max_cycle
-         AND e.status='Rejected'
-         AND e.start_date BETWEEN v_last_month_start AND v_last_month_end) AS last_month_cancelled,
-
-      (CASE
-          WHEN (SELECT COUNT(*)
-                FROM tbl_event e
-                INNER JOIN (
-                  SELECT organization_id, MAX(cycle_number) AS max_cycle
-                  FROM tbl_renewal_cycle GROUP BY organization_id
-                ) lc ON lc.organization_id = e.organization_id
-                WHERE e.event_type='Organization'
-                  AND e.cycle_number = lc.max_cycle
-                  AND e.status='Rejected'
-                  AND e.start_date BETWEEN v_last_month_start AND v_last_month_end) = 0
-          THEN NULL
-          ELSE
-            (SELECT COUNT(*)
-             FROM tbl_event e
-             INNER JOIN (
-               SELECT organization_id, MAX(cycle_number) AS max_cycle
-               FROM tbl_renewal_cycle GROUP BY organization_id
-             ) lc ON lc.organization_id = e.organization_id
-             WHERE e.event_type='Organization'
-               AND e.cycle_number = lc.max_cycle
-               AND e.status='Rejected'
-               AND e.start_date BETWEEN v_current_month_start AND v_current_month_end)
-            -
-            (SELECT COUNT(*)
-             FROM tbl_event e
-             INNER JOIN (
-               SELECT organization_id, MAX(cycle_number) AS max_cycle
-               FROM tbl_renewal_cycle GROUP BY organization_id
-             ) lc ON lc.organization_id = e.organization_id
-             WHERE e.event_type='Organization'
-               AND e.cycle_number = lc.max_cycle
-               AND e.status='Rejected'
-               AND e.start_date BETWEEN v_last_month_start AND v_last_month_end)
-        END) AS cancelled_events_change,
-
-      /* Avg attendance rate (past) this month */
-      (
-        SELECT CASE WHEN SUM(reg_cnt) > 0
-                    THEN ROUND(SUM(att_cnt)*100.0 / SUM(reg_cnt), 2)
-                    ELSE 0 END
-        FROM (
-          SELECT
-            SUM(CASE WHEN ea.status IN ('Registered','Attended','Evaluated') THEN 1 ELSE 0 END) AS reg_cnt,
-            SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END)            AS att_cnt
-          FROM tbl_event e
-          INNER JOIN (
-            SELECT organization_id, MAX(cycle_number) AS max_cycle
-            FROM tbl_renewal_cycle GROUP BY organization_id
-          ) lc ON lc.organization_id = e.organization_id
-          LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-          WHERE e.event_type='Organization'
-            AND e.cycle_number = lc.max_cycle
-            AND e.status='Approved'
-            AND e.start_date < v_today
-            AND e.start_date BETWEEN v_current_month_start AND v_current_month_end
-        ) t
-      ) AS avg_attendance_rate,
-
-      (
-        SELECT CASE WHEN SUM(reg_cnt) > 0
-                    THEN ROUND(SUM(att_cnt)*100.0 / SUM(reg_cnt), 2)
-                    ELSE 0 END
-        FROM (
-          SELECT
-            SUM(CASE WHEN ea.status IN ('Registered','Attended','Evaluated') THEN 1 ELSE 0 END) AS reg_cnt,
-            SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END)            AS att_cnt
-          FROM tbl_event e
-          INNER JOIN (
-            SELECT organization_id, MAX(cycle_number) AS max_cycle
-            FROM tbl_renewal_cycle GROUP BY organization_id
-          ) lc ON lc.organization_id = e.organization_id
-          LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-          WHERE e.event_type='Organization'
-            AND e.cycle_number = lc.max_cycle
-            AND e.status='Approved'
-            AND e.start_date < v_today
-            AND e.start_date BETWEEN v_last_month_start AND v_last_month_end
-        ) t
-      ) AS last_month_avg_attendance_rate,
-
-      /* Attendance rate change (null if last month 0) */
-      (
-        CASE
-          WHEN (
-            SELECT SUM(CASE WHEN ea.status IN ('Registered','Attended','Evaluated') THEN 1 ELSE 0 END)
-            FROM tbl_event e
-            INNER JOIN (
-              SELECT organization_id, MAX(cycle_number) AS max_cycle
-              FROM tbl_renewal_cycle GROUP BY organization_id
-            ) lc ON lc.organization_id = e.organization_id
-            LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-            WHERE e.event_type='Organization'
-              AND e.cycle_number = lc.max_cycle
-              AND e.status='Approved'
-              AND e.start_date < v_today
-              AND e.start_date BETWEEN v_last_month_start AND v_last_month_end
-          ) = 0 THEN NULL
-          ELSE
-            (
-              SELECT CASE WHEN SUM(reg_cnt) > 0
-                          THEN ROUND(SUM(att_cnt)*100.0 / SUM(reg_cnt), 2)
-                          ELSE 0 END
-              FROM (
-                SELECT
-                  SUM(CASE WHEN ea.status IN ('Registered','Attended','Evaluated') THEN 1 ELSE 0 END) AS reg_cnt,
-                  SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END)            AS att_cnt
-                FROM tbl_event e
-                INNER JOIN (
-                  SELECT organization_id, MAX(cycle_number) AS max_cycle
-                  FROM tbl_renewal_cycle GROUP BY organization_id
-                ) lc ON lc.organization_id = e.organization_id
-                LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-                WHERE e.event_type='Organization'
-                  AND e.cycle_number = lc.max_cycle
-                  AND e.status='Approved'
-                  AND e.start_date < v_today
-                  AND e.start_date BETWEEN v_current_month_start AND v_current_month_end
-              ) cm
-            ) -
-            (
-              SELECT CASE WHEN SUM(reg_cnt) > 0
-                          THEN ROUND(SUM(att_cnt)*100.0 / SUM(reg_cnt), 2)
-                          ELSE 0 END
-              FROM (
-                SELECT
-                  SUM(CASE WHEN ea.status IN ('Registered','Attended','Evaluated') THEN 1 ELSE 0 END) AS reg_cnt,
-                  SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END)            AS att_cnt
-                FROM tbl_event e
-                INNER JOIN (
-                  SELECT organization_id, MAX(cycle_number) AS max_cycle
-                  FROM tbl_renewal_cycle GROUP BY organization_id
-                ) lc ON lc.organization_id = e.organization_id
-                LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-                WHERE e.event_type='Organization'
-                  AND e.cycle_number = lc.max_cycle
-                  AND e.status='Approved'
-                  AND e.start_date < v_today
-                  AND e.start_date BETWEEN v_last_month_start AND v_last_month_end
-              ) lm
-            )
-        END
-      ) AS attendance_rate_change,
-
-      /* Avg feedback rate (past) this month */
-      (
-        SELECT CASE WHEN SUM(att_cnt) > 0
-                    THEN ROUND(SUM(eval_cnt)*100.0 / SUM(att_cnt), 2)
-                    ELSE 0 END
-        FROM (
-          SELECT
-            SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END) AS att_cnt,
-            SUM(CASE WHEN ea.status='Evaluated' THEN 1 ELSE 0 END)                AS eval_cnt
-          FROM tbl_event e
-          INNER JOIN (
-            SELECT organization_id, MAX(cycle_number) AS max_cycle
-            FROM tbl_renewal_cycle GROUP BY organization_id
-          ) lc ON lc.organization_id = e.organization_id
-          LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-          WHERE e.event_type='Organization'
-            AND e.cycle_number = lc.max_cycle
-            AND e.status='Approved'
-            AND e.start_date < v_today
-            AND e.start_date BETWEEN v_current_month_start AND v_current_month_end
-        ) t
-      ) AS avg_feedback_rate,
-
-      /* Avg feedback rate (past) last month */
-      (
-        SELECT CASE WHEN SUM(att_cnt) > 0
-                    THEN ROUND(SUM(eval_cnt)*100.0 / SUM(att_cnt), 2)
-                    ELSE 0 END
-        FROM (
-          SELECT
-            SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END) AS att_cnt,
-            SUM(CASE WHEN ea.status='Evaluated' THEN 1 ELSE 0 END)                AS eval_cnt
-          FROM tbl_event e
-          INNER JOIN (
-            SELECT organization_id, MAX(cycle_number) AS max_cycle
-            FROM tbl_renewal_cycle GROUP BY organization_id
-          ) lc ON lc.organization_id = e.organization_id
-          LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-          WHERE e.event_type='Organization'
-            AND e.cycle_number = lc.max_cycle
-            AND e.status='Approved'
-            AND e.start_date < v_today
-            AND e.start_date BETWEEN v_last_month_start AND v_last_month_end
-        ) t
-      ) AS last_month_avg_feedback_rate,
-
-      /* Feedback rate change (null if last month 0) */
-      (
-        CASE
-          WHEN (
-            SELECT SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END)
-            FROM tbl_event e
-            INNER JOIN (
-              SELECT organization_id, MAX(cycle_number) AS max_cycle
-              FROM tbl_renewal_cycle GROUP BY organization_id
-            ) lc ON lc.organization_id = e.organization_id
-            LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-            WHERE e.event_type='Organization'
-              AND e.cycle_number = lc.max_cycle
-              AND e.status='Approved'
-              AND e.start_date < v_today
-              AND e.start_date BETWEEN v_last_month_start AND v_last_month_end
-          ) = 0 THEN NULL
-          ELSE
-            (
-              SELECT CASE WHEN SUM(att_cnt) > 0
-                          THEN ROUND(SUM(eval_cnt)*100.0 / SUM(att_cnt), 2)
-                          ELSE 0 END
-              FROM (
-                SELECT
-                  SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END) AS att_cnt,
-                  SUM(CASE WHEN ea.status='Evaluated' THEN 1 ELSE 0 END)                AS eval_cnt
-                FROM tbl_event e
-                INNER JOIN (
-                  SELECT organization_id, MAX(cycle_number) AS max_cycle
-                  FROM tbl_renewal_cycle GROUP BY organization_id
-                ) lc ON lc.organization_id = e.organization_id
-                LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-                WHERE e.event_type='Organization'
-                  AND e.cycle_number = lc.max_cycle
-                  AND e.status='Approved'
-                  AND e.start_date < v_today
-                  AND e.start_date BETWEEN v_current_month_start AND v_current_month_end
-              ) cm
-            ) -
-            (
-              SELECT CASE WHEN SUM(att_cnt) > 0
-                          THEN ROUND(SUM(eval_cnt)*100.0 / SUM(att_cnt), 2)
-                          ELSE 0 END
-              FROM (
-                SELECT
-                  SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END) AS att_cnt,
-                  SUM(CASE WHEN ea.status='Evaluated' THEN 1 ELSE 0 END)                AS eval_cnt
-                FROM tbl_event e
-                INNER JOIN (
-                  SELECT organization_id, MAX(cycle_number) AS max_cycle
-                  FROM tbl_renewal_cycle GROUP BY organization_id
-                ) lc ON lc.organization_id = e.organization_id
-                LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-                WHERE e.event_type='Organization'
-                  AND e.cycle_number = lc.max_cycle
-                  AND e.status='Approved'
-                  AND e.start_date < v_today
-                  AND e.start_date BETWEEN v_last_month_start AND v_last_month_end
-              ) lm
-            )
-        END
-      ) AS feedback_rate_change,
-
-      /* Attendance trend (past, latest cycles) */
-      (
-        SELECT
-          CASE WHEN COUNT(*) = 0 THEN JSON_ARRAY()
-               ELSE CAST(
-                 CONCAT(
-                   '[',
-                   GROUP_CONCAT(
-                     CAST(JSON_OBJECT(
-                       'event', event_title,
-                       'attended', attended_count,
-                       'notAttended', not_attended_count
-                     ) AS CHAR)
-                     ORDER BY start_date DESC SEPARATOR ','
-                   ),
-                   ']'
-                 ) AS JSON
-               )
-          END
-        FROM (
-          SELECT
-            e.title AS event_title,
-            e.start_date,
-            SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END) AS attended_count,
-            SUM(CASE WHEN ea.status = 'Registered' THEN 1 ELSE 0 END) AS not_attended_count
-          FROM tbl_event e
-          INNER JOIN (
-            SELECT organization_id, MAX(cycle_number) AS max_cycle
-            FROM tbl_renewal_cycle GROUP BY organization_id
-          ) lc ON lc.organization_id=e.organization_id
-          LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-          WHERE e.event_type='Organization'
-            AND e.cycle_number = lc.max_cycle
-            AND e.status='Approved'
-            AND e.start_date < v_today
-          GROUP BY e.event_id, e.title, e.start_date
-          ORDER BY e.start_date DESC
-          LIMIT 10
-        ) tt
-      ) AS attendance_trend,
-
-      /* Event feedback per event (past, latest cycles) */
-      (
-        SELECT
-          CASE WHEN COUNT(*) = 0 THEN JSON_ARRAY()
-               ELSE CAST(
-                 CONCAT(
-                   '[',
-                   GROUP_CONCAT(
-                     CAST(JSON_OBJECT(
-                       'event', event_title,
-                       'feedback', feedback_rate
-                     ) AS CHAR)
-                     ORDER BY start_date DESC SEPARATOR ','
-                   ),
-                   ']'
-                 ) AS JSON
-               )
-          END
-        FROM (
-          SELECT
-            e.title AS event_title,
-            e.start_date,
-            CASE WHEN SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END) > 0
-                 THEN ROUND(
-                   SUM(CASE WHEN ea.status='Evaluated' THEN 1 ELSE 0 END)*100.0 /
-                   SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END), 0)
-                 ELSE 0 END AS feedback_rate
-          FROM tbl_event e
-          INNER JOIN (
-            SELECT organization_id, MAX(cycle_number) AS max_cycle
-            FROM tbl_renewal_cycle GROUP BY organization_id
-          ) lc ON lc.organization_id=e.organization_id
-          LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-          WHERE e.event_type='Organization'
-            AND e.cycle_number = lc.max_cycle
-            AND e.status='Approved'
-            AND e.start_date < v_today
-          GROUP BY e.event_id, e.title, e.start_date
-          ORDER BY e.start_date DESC
-          LIMIT 10
-        ) tf
-      ) AS event_feedback_rate,
-
-      /* Events per month (past, latest cycles, last 12 months) */
-      (
-        SELECT
-          CAST(
-            CONCAT(
-              '[',
-              GROUP_CONCAT(
-                CAST(JSON_OBJECT(
-                  'month', month_name,
-                  'events', event_count
-                ) AS CHAR)
-                ORDER BY month_date ASC SEPARATOR ','
-              ),
-              ']'
-            ) AS JSON
-          )
-        FROM (
-          SELECT
-            m.month_date,
-            DATE_FORMAT(m.month_date, '%b') AS month_name,
-            COALESCE((
-              SELECT COUNT(*)
-              FROM tbl_event e
-              INNER JOIN (
-                SELECT organization_id, MAX(cycle_number) AS max_cycle
-                FROM tbl_renewal_cycle GROUP BY organization_id
-              ) lc ON lc.organization_id=e.organization_id
-              WHERE e.event_type='Organization'
-                AND e.cycle_number = lc.max_cycle
-                AND e.status='Approved'
-                AND e.start_date < v_today
-                AND e.start_date >= DATE_FORMAT(m.month_date, '%Y-%m-01')
-                AND e.start_date <  DATE_ADD(DATE_FORMAT(m.month_date, '%Y-%m-01'), INTERVAL 1 MONTH)
-            ),0) AS event_count
-          FROM (
-            SELECT DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL n MONTH) AS month_date
-            FROM (
-              SELECT 11 AS n UNION SELECT 10 UNION SELECT 9 UNION SELECT 8 UNION
-              SELECT 7 UNION SELECT 6 UNION SELECT 5 UNION SELECT 4 UNION
-              SELECT 3 UNION SELECT 2 UNION SELECT 1 UNION SELECT 0
-            ) m
-          ) m
-        ) mm
-      ) AS events_per_month,
+      at.attendance_trend,
+      afe.feedback_json AS event_feedback_rate,
+      am.month_json     AS events_per_month,
 
       2 AS sort_order
+    FROM all_counts ac
+    JOIN all_rates  ar  ON 1=1
+    JOIN all_trend  at  ON 1=1
+    JOIN all_feedback_per_event afe ON 1=1
+    JOIN all_month_json am ON 1=1
+    WHERE p_organization_id IS NULL
 
     UNION ALL
 
-    /* 3) Each organization (latest cycle only) */
+    /* 3) Per-organization rows — all orgs when NULL, or single org when set */
     SELECT
-      o.organization_id,
-      ov.name AS organization_name,
+      ol.organization_id,
+      ol.organization_name,
 
-      /* Completed (past) this month */
-      (SELECT COUNT(*)
-       FROM tbl_event e
-       INNER JOIN (
-         SELECT organization_id, MAX(cycle_number) AS max_cycle
-         FROM tbl_renewal_cycle GROUP BY organization_id
-       ) lc ON lc.organization_id=e.organization_id
-       WHERE e.event_type='Organization'
-         AND e.organization_id=o.organization_id
-         AND e.cycle_number = lc.max_cycle
-         AND e.status='Approved'
-         AND e.start_date < v_today
-         AND e.start_date BETWEEN v_current_month_start AND v_current_month_end) AS completed_events,
+      COALESCE(oc.completed_cm,0) AS completed_events,
+      COALESCE(oc.completed_lm,0) AS last_month_completed,
+      CASE WHEN COALESCE(oc.completed_lm,0) = 0 THEN NULL
+           ELSE COALESCE(oc.completed_cm,0) - COALESCE(oc.completed_lm,0) END AS completed_events_change,
 
-      /* Completed (past) last month */
-      (SELECT COUNT(*)
-       FROM tbl_event e
-       INNER JOIN (
-         SELECT organization_id, MAX(cycle_number) AS max_cycle
-         FROM tbl_renewal_cycle GROUP BY organization_id
-       ) lc ON lc.organization_id=e.organization_id
-       WHERE e.event_type='Organization'
-         AND e.organization_id=o.organization_id
-         AND e.cycle_number = lc.max_cycle
-         AND e.status='Approved'
-         AND e.start_date < v_today
-         AND e.start_date BETWEEN v_last_month_start AND v_last_month_end) AS last_month_completed,
+      COALESCE(oc.cancelled_cm,0) AS cancelled_events,
+      COALESCE(oc.cancelled_lm,0) AS last_month_cancelled,
+      CASE WHEN COALESCE(oc.cancelled_lm,0) = 0 THEN NULL
+           ELSE COALESCE(oc.cancelled_cm,0) - COALESCE(oc.cancelled_lm,0) END AS cancelled_events_change,
 
-      /* Completed change (null if last 0) */
-      (CASE
-          WHEN (SELECT COUNT(*)
-                FROM tbl_event e
-                INNER JOIN (
-                  SELECT organization_id, MAX(cycle_number) AS max_cycle
-                  FROM tbl_renewal_cycle GROUP BY organization_id
-                ) lc ON lc.organization_id=e.organization_id
-                WHERE e.event_type='Organization'
-                  AND e.organization_id=o.organization_id
-                  AND e.cycle_number = lc.max_cycle
-                  AND e.status='Approved'
-                  AND e.start_date < v_today
-                  AND e.start_date BETWEEN v_last_month_start AND v_last_month_end) = 0
-          THEN NULL
-          ELSE
-            (SELECT COUNT(*)
-             FROM tbl_event e
-             INNER JOIN (
-               SELECT organization_id, MAX(cycle_number) AS max_cycle
-               FROM tbl_renewal_cycle GROUP BY organization_id
-             ) lc ON lc.organization_id=e.organization_id
-             WHERE e.event_type='Organization'
-               AND e.organization_id=o.organization_id
-               AND e.cycle_number = lc.max_cycle
-               AND e.status='Approved'
-               AND e.start_date < v_today
-               AND e.start_date BETWEEN v_current_month_start AND v_current_month_end)
-            -
-            (SELECT COUNT(*)
-             FROM tbl_event e
-             INNER JOIN (
-               SELECT organization_id, MAX(cycle_number) AS max_cycle
-               FROM tbl_renewal_cycle GROUP BY organization_id
-             ) lc ON lc.organization_id=e.organization_id
-             WHERE e.event_type='Organization'
-               AND e.organization_id=o.organization_id
-               AND e.cycle_number = lc.max_cycle
-               AND e.status='Approved'
-               AND e.start_date < v_today
-               AND e.start_date BETWEEN v_last_month_start AND v_last_month_end)
-        END) AS completed_events_change,
+      CASE WHEN COALESCE(or8.regs_cm,0) > 0 THEN ROUND(COALESCE(or8.att_cm,0)*100.0/COALESCE(or8.regs_cm,0),2) ELSE 0 END AS avg_attendance_rate,
+      CASE WHEN COALESCE(or8.regs_lm,0) > 0 THEN ROUND(COALESCE(or8.att_lm,0)*100.0/COALESCE(or8.regs_lm,0),2) ELSE 0 END AS last_month_avg_attendance_rate,
+      CASE WHEN COALESCE(or8.regs_lm,0) = 0 THEN NULL
+           ELSE (ROUND(COALESCE(or8.att_cm,0)*100.0/NULLIF(or8.regs_cm,0),2) -
+                 ROUND(COALESCE(or8.att_lm,0)*100.0/COALESCE(or8.regs_lm,0),2)) END AS attendance_rate_change,
 
-      /* Cancelled this month */
-      (SELECT COUNT(*)
-       FROM tbl_event e
-       INNER JOIN (
-         SELECT organization_id, MAX(cycle_number) AS max_cycle
-         FROM tbl_renewal_cycle GROUP BY organization_id
-       ) lc ON lc.organization_id=e.organization_id
-       WHERE e.event_type='Organization'
-         AND e.organization_id=o.organization_id
-         AND e.cycle_number = lc.max_cycle
-         AND e.status='Rejected'
-         AND e.start_date BETWEEN v_current_month_start AND v_current_month_end) AS cancelled_events,
+      CASE WHEN COALESCE(or8.att_cm,0) > 0 THEN ROUND(COALESCE(or8.eval_cm,0)*100.0/COALESCE(or8.att_cm,0),2) ELSE 0 END AS avg_feedback_rate,
+      CASE WHEN COALESCE(or8.att_lm,0) > 0 THEN ROUND(COALESCE(or8.eval_lm,0)*100.0/COALESCE(or8.att_lm,0),2) ELSE 0 END AS last_month_avg_feedback_rate,
+      CASE WHEN COALESCE(or8.att_lm,0) = 0 THEN NULL
+           ELSE (ROUND(COALESCE(or8.eval_cm,0)*100.0/NULLIF(or8.att_cm,0),2) -
+                 ROUND(COALESCE(or8.eval_lm,0)*100.0/COALESCE(or8.att_lm,0),2)) END AS feedback_rate_change,
 
-      /* Cancelled last month */
-      (SELECT COUNT(*)
-       FROM tbl_event e
-       INNER JOIN (
-         SELECT organization_id, MAX(cycle_number) AS max_cycle
-         FROM tbl_renewal_cycle GROUP BY organization_id
-       ) lc ON lc.organization_id=e.organization_id
-       WHERE e.event_type='Organization'
-         AND e.organization_id=o.organization_id
-         AND e.cycle_number = lc.max_cycle
-         AND e.status='Rejected'
-         AND e.start_date BETWEEN v_last_month_start AND v_last_month_end) AS last_month_cancelled,
-
-      /* Cancelled change (null if last 0) */
-      (CASE
-          WHEN (SELECT COUNT(*)
-                FROM tbl_event e
-                INNER JOIN (
-                  SELECT organization_id, MAX(cycle_number) AS max_cycle
-                  FROM tbl_renewal_cycle GROUP BY organization_id
-                ) lc ON lc.organization_id=e.organization_id
-                WHERE e.event_type='Organization'
-                  AND e.organization_id=o.organization_id
-                  AND e.cycle_number = lc.max_cycle
-                  AND e.status='Rejected'
-                  AND e.start_date BETWEEN v_last_month_start AND v_last_month_end) = 0
-          THEN NULL
-          ELSE
-            (SELECT COUNT(*)
-             FROM tbl_event e
-             INNER JOIN (
-               SELECT organization_id, MAX(cycle_number) AS max_cycle
-               FROM tbl_renewal_cycle GROUP BY organization_id
-             ) lc ON lc.organization_id=e.organization_id
-             WHERE e.event_type='Organization'
-               AND e.organization_id=o.organization_id
-               AND e.cycle_number = lc.max_cycle
-               AND e.status='Rejected'
-               AND e.start_date BETWEEN v_current_month_start AND v_current_month_end)
-            -
-            (SELECT COUNT(*)
-             FROM tbl_event e
-             INNER JOIN (
-               SELECT organization_id, MAX(cycle_number) AS max_cycle
-               FROM tbl_renewal_cycle GROUP BY organization_id
-             ) lc ON lc.organization_id=e.organization_id
-             WHERE e.event_type='Organization'
-               AND e.organization_id=o.organization_id
-               AND e.cycle_number = lc.max_cycle
-               AND e.status='Rejected'
-               AND e.start_date BETWEEN v_last_month_start AND v_last_month_end)
-        END) AS cancelled_events_change,
-
-      /* Avg attendance rate (past) this month */
-      (
-        SELECT CASE WHEN SUM(reg_cnt) > 0
-                    THEN ROUND(SUM(att_cnt)*100.0 / SUM(reg_cnt), 2)
-                    ELSE 0 END
-        FROM (
-          SELECT
-            SUM(CASE WHEN ea.status IN ('Registered','Attended','Evaluated') THEN 1 ELSE 0 END) AS reg_cnt,
-            SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END)            AS att_cnt
-          FROM tbl_event e
-          INNER JOIN (
-            SELECT organization_id, MAX(cycle_number) AS max_cycle
-            FROM tbl_renewal_cycle GROUP BY organization_id
-          ) lc ON lc.organization_id=e.organization_id
-          LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-          WHERE e.event_type='Organization'
-            AND e.organization_id=o.organization_id
-            AND e.cycle_number = lc.max_cycle
-            AND e.status='Approved'
-            AND e.start_date < v_today
-            AND e.start_date BETWEEN v_current_month_start AND v_current_month_end
-        ) t
-      ) AS avg_attendance_rate,
-
-      /* Avg attendance rate (past) last month */
-      (
-        SELECT CASE WHEN SUM(reg_cnt) > 0
-                    THEN ROUND(SUM(att_cnt)*100.0 / SUM(reg_cnt), 2)
-                    ELSE 0 END
-        FROM (
-          SELECT
-            SUM(CASE WHEN ea.status IN ('Registered','Attended','Evaluated') THEN 1 ELSE 0 END) AS reg_cnt,
-            SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END)            AS att_cnt
-          FROM tbl_event e
-          INNER JOIN (
-            SELECT organization_id, MAX(cycle_number) AS max_cycle
-            FROM tbl_renewal_cycle GROUP BY organization_id
-          ) lc ON lc.organization_id=e.organization_id
-          LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-          WHERE e.event_type='Organization'
-            AND e.organization_id=o.organization_id
-            AND e.cycle_number = lc.max_cycle
-            AND e.status='Approved'
-            AND e.start_date < v_today
-            AND e.start_date BETWEEN v_last_month_start AND v_last_month_end
-        ) t
-      ) AS last_month_avg_attendance_rate,
-
-      /* Attendance rate change (null if last 0) */
-      (
-        CASE
-          WHEN (
-            SELECT SUM(CASE WHEN ea.status IN ('Registered','Attended','Evaluated') THEN 1 ELSE 0 END)
-            FROM tbl_event e
-            INNER JOIN (
-              SELECT organization_id, MAX(cycle_number) AS max_cycle
-              FROM tbl_renewal_cycle GROUP BY organization_id
-            ) lc ON lc.organization_id=e.organization_id
-            LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-            WHERE e.event_type='Organization'
-              AND e.organization_id=o.organization_id
-              AND e.cycle_number = lc.max_cycle
-              AND e.status='Approved'
-              AND e.start_date < v_today
-              AND e.start_date BETWEEN v_last_month_start AND v_last_month_end
-          ) = 0 THEN NULL
-          ELSE
-            (
-              SELECT CASE WHEN SUM(reg_cnt) > 0
-                          THEN ROUND(SUM(att_cnt)*100.0 / SUM(reg_cnt), 2)
-                          ELSE 0 END
-              FROM (
-                SELECT
-                  SUM(CASE WHEN ea.status IN ('Registered','Attended','Evaluated') THEN 1 ELSE 0 END) AS reg_cnt,
-                  SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END)            AS att_cnt
-                FROM tbl_event e
-                INNER JOIN (
-                  SELECT organization_id, MAX(cycle_number) AS max_cycle
-                  FROM tbl_renewal_cycle GROUP BY organization_id
-                ) lc ON lc.organization_id=e.organization_id
-                LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-                WHERE e.event_type='Organization'
-                  AND e.organization_id=o.organization_id
-                  AND e.cycle_number = lc.max_cycle
-                  AND e.status='Approved'
-                  AND e.start_date < v_today
-                  AND e.start_date BETWEEN v_current_month_start AND v_current_month_end
-              ) cm
-            ) -
-            (
-              SELECT CASE WHEN SUM(reg_cnt) > 0
-                          THEN ROUND(SUM(att_cnt)*100.0 / SUM(reg_cnt), 2)
-                          ELSE 0 END
-              FROM (
-                SELECT
-                  SUM(CASE WHEN ea.status IN ('Registered','Attended','Evaluated') THEN 1 ELSE 0 END) AS reg_cnt,
-                  SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END)            AS att_cnt
-                FROM tbl_event e
-                INNER JOIN (
-                  SELECT organization_id, MAX(cycle_number) AS max_cycle
-                  FROM tbl_renewal_cycle GROUP BY organization_id
-                ) lc ON lc.organization_id=e.organization_id
-                LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-                WHERE e.event_type='Organization'
-                  AND e.organization_id=o.organization_id
-                  AND e.cycle_number = lc.max_cycle
-                  AND e.status='Approved'
-                  AND e.start_date < v_today
-                  AND e.start_date BETWEEN v_last_month_start AND v_last_month_end
-              ) lm
-            )
-        END
-      ) AS attendance_rate_change,
-
-      /* Avg feedback rate (past) this month */
-      (
-        SELECT CASE WHEN SUM(att_cnt) > 0
-                    THEN ROUND(SUM(eval_cnt)*100.0 / SUM(att_cnt), 2)
-                    ELSE 0 END
-        FROM (
-          SELECT
-            SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END) AS att_cnt,
-            SUM(CASE WHEN ea.status='Evaluated' THEN 1 ELSE 0 END)                AS eval_cnt
-          FROM tbl_event e
-          INNER JOIN (
-            SELECT organization_id, MAX(cycle_number) AS max_cycle
-            FROM tbl_renewal_cycle GROUP BY organization_id
-          ) lc ON lc.organization_id=e.organization_id
-          LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-          WHERE e.event_type='Organization'
-            AND e.organization_id=o.organization_id
-            AND e.cycle_number = lc.max_cycle
-            AND e.status='Approved'
-            AND e.start_date < v_today
-            AND e.start_date BETWEEN v_current_month_start AND v_current_month_end
-        ) t
-      ) AS avg_feedback_rate,
-
-      /* Avg feedback rate (past) last month */
-      (
-        SELECT CASE WHEN SUM(att_cnt) > 0
-                    THEN ROUND(SUM(eval_cnt)*100.0 / SUM(att_cnt), 2)
-                    ELSE 0 END
-        FROM (
-          SELECT
-            SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END) AS att_cnt,
-            SUM(CASE WHEN ea.status='Evaluated' THEN 1 ELSE 0 END)                AS eval_cnt
-          FROM tbl_event e
-          INNER JOIN (
-            SELECT organization_id, MAX(cycle_number) AS max_cycle
-            FROM tbl_renewal_cycle GROUP BY organization_id
-          ) lc ON lc.organization_id=e.organization_id
-          LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-          WHERE e.event_type='Organization'
-            AND e.organization_id=o.organization_id
-            AND e.cycle_number = lc.max_cycle
-            AND e.status='Approved'
-            AND e.start_date < v_today
-            AND e.start_date BETWEEN v_last_month_start AND v_last_month_end
-        ) t
-      ) AS last_month_avg_feedback_rate,
-
-      /* Feedback rate change (null if last 0) */
-      (
-        CASE
-          WHEN (
-            SELECT SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END)
-            FROM tbl_event e
-            INNER JOIN (
-              SELECT organization_id, MAX(cycle_number) AS max_cycle
-              FROM tbl_renewal_cycle GROUP BY organization_id
-            ) lc ON lc.organization_id=e.organization_id
-            LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-            WHERE e.event_type='Organization'
-              AND e.organization_id=o.organization_id
-              AND e.cycle_number = lc.max_cycle
-              AND e.status='Approved'
-              AND e.start_date < v_today
-              AND e.start_date BETWEEN v_last_month_start AND v_last_month_end
-          ) = 0 THEN NULL
-          ELSE
-            (
-              SELECT CASE WHEN SUM(att_cnt) > 0
-                          THEN ROUND(SUM(eval_cnt)*100.0 / SUM(att_cnt), 2)
-                          ELSE 0 END
-              FROM (
-                SELECT
-                  SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END) AS att_cnt,
-                  SUM(CASE WHEN ea.status='Evaluated' THEN 1 ELSE 0 END)                AS eval_cnt
-                FROM tbl_event e
-                INNER JOIN (
-                  SELECT organization_id, MAX(cycle_number) AS max_cycle
-                  FROM tbl_renewal_cycle GROUP BY organization_id
-                ) lc ON lc.organization_id=e.organization_id
-                LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-                WHERE e.event_type='Organization'
-                  AND e.organization_id=o.organization_id
-                  AND e.cycle_number = lc.max_cycle
-                  AND e.status='Approved'
-                  AND e.start_date < v_today
-                  AND e.start_date BETWEEN v_current_month_start AND v_current_month_end
-              ) cm
-            ) -
-            (
-              SELECT CASE WHEN SUM(att_cnt) > 0
-                          THEN ROUND(SUM(eval_cnt)*100.0 / SUM(att_cnt), 2)
-                          ELSE 0 END
-              FROM (
-                SELECT
-                  SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END) AS att_cnt,
-                  SUM(CASE WHEN ea.status='Evaluated' THEN 1 ELSE 0 END)                AS eval_cnt
-                FROM tbl_event e
-                INNER JOIN (
-                  SELECT organization_id, MAX(cycle_number) AS max_cycle
-                  FROM tbl_renewal_cycle GROUP BY organization_id
-                ) lc ON lc.organization_id=e.organization_id
-                LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-                WHERE e.event_type='Organization'
-                  AND e.organization_id=o.organization_id
-                  AND e.cycle_number = lc.max_cycle
-                  AND e.status='Approved'
-                  AND e.start_date < v_today
-                  AND e.start_date BETWEEN v_last_month_start AND v_last_month_end
-              ) lm
-            )
-        END
-      ) AS feedback_rate_change,
-
-      /* Attendance trend (past, latest cycle) */
-      (
-        SELECT
-          CASE WHEN COUNT(*) = 0 THEN JSON_ARRAY()
-               ELSE CAST(
-                 CONCAT(
-                   '[',
-                   GROUP_CONCAT(
-                     CAST(JSON_OBJECT(
-                       'event', event_title,
-                       'attended', attended_count,
-                       'notAttended', not_attended_count
-                     ) AS CHAR)
-                     ORDER BY start_date DESC SEPARATOR ','
-                   ),
-                   ']'
-                 ) AS JSON
-               )
-          END
-        FROM (
-          SELECT
-            e.title AS event_title,
-            e.start_date,
-            SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END) AS attended_count,
-            SUM(CASE WHEN ea.status = 'Registered' THEN 1 ELSE 0 END) AS not_attended_count
-          FROM tbl_event e
-          INNER JOIN (
-            SELECT organization_id, MAX(cycle_number) AS max_cycle
-            FROM tbl_renewal_cycle GROUP BY organization_id
-          ) lc ON lc.organization_id=e.organization_id
-          LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-          WHERE e.event_type='Organization'
-            AND e.organization_id=o.organization_id
-            AND e.cycle_number = lc.max_cycle
-            AND e.status='Approved'
-            AND e.start_date < v_today
-          GROUP BY e.event_id, e.title, e.start_date
-          ORDER BY e.start_date DESC
-          LIMIT 10
-        ) tt
-      ) AS attendance_trend,
-
-      /* Event feedback per event (past, latest cycle) */
-      (
-        SELECT
-          CASE WHEN COUNT(*) = 0 THEN JSON_ARRAY()
-               ELSE CAST(
-                 CONCAT(
-                   '[',
-                   GROUP_CONCAT(
-                     CAST(JSON_OBJECT(
-                       'event', event_title,
-                       'feedback', feedback_rate
-                     ) AS CHAR)
-                     ORDER BY start_date DESC SEPARATOR ','
-                   ),
-                   ']'
-                 ) AS JSON
-               )
-          END
-        FROM (
-          SELECT
-            e.title AS event_title,
-            e.start_date,
-            CASE WHEN SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END) > 0
-                 THEN ROUND(
-                   SUM(CASE WHEN ea.status='Evaluated' THEN 1 ELSE 0 END)*100.0 /
-                   SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END), 0)
-                 ELSE 0 END AS feedback_rate
-          FROM tbl_event e
-          INNER JOIN (
-            SELECT organization_id, MAX(cycle_number) AS max_cycle
-            FROM tbl_renewal_cycle GROUP BY organization_id
-          ) lc ON lc.organization_id=e.organization_id
-          LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-          WHERE e.event_type='Organization'
-            AND e.organization_id=o.organization_id
-            AND e.cycle_number = lc.max_cycle
-            AND e.status='Approved'
-            AND e.start_date < v_today
-          GROUP BY e.event_id, e.title, e.start_date
-          ORDER BY e.start_date DESC
-          LIMIT 10
-        ) tf
-      ) AS event_feedback_rate,
-
-      /* Events per month (past, latest cycle) */
-      (
-        SELECT
-          CAST(
-            CONCAT(
-              '[',
-              GROUP_CONCAT(
-                CAST(JSON_OBJECT(
-                  'month', month_name,
-                  'events', event_count
-                ) AS CHAR)
-                ORDER BY month_date ASC SEPARATOR ','
-              ),
-              ']'
-            ) AS JSON
-          )
-        FROM (
-          SELECT
-            m.month_date,
-            DATE_FORMAT(m.month_date, '%b') AS month_name,
-            COALESCE((
-              SELECT COUNT(*)
-              FROM tbl_event e
-              INNER JOIN (
-                SELECT organization_id, MAX(cycle_number) AS max_cycle
-                FROM tbl_renewal_cycle GROUP BY organization_id
-              ) lc ON lc.organization_id=e.organization_id
-              WHERE e.event_type='Organization'
-                AND e.organization_id=o.organization_id
-                AND e.cycle_number = lc.max_cycle
-                AND e.status='Approved'
-                AND e.start_date < v_today
-                AND e.start_date >= DATE_FORMAT(m.month_date, '%Y-%m-01')
-                AND e.start_date <  DATE_ADD(DATE_FORMAT(m.month_date, '%Y-%m-01'), INTERVAL 1 MONTH)
-            ),0) AS event_count
-          FROM (
-            SELECT DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL n MONTH) AS month_date
-            FROM (
-              SELECT 11 AS n UNION SELECT 10 UNION SELECT 9 UNION SELECT 8 UNION
-              SELECT 7 UNION SELECT 6 UNION SELECT 5 UNION SELECT 4 UNION
-              SELECT 3 UNION SELECT 2 UNION SELECT 1 UNION SELECT 0
-            ) m
-          ) m
-        ) mm
-      ) AS events_per_month,
+      ot.attendance_trend,
+      ofe.feedback_json AS event_feedback_rate,
+      om.month_json     AS events_per_month,
 
       3 AS sort_order
-
-    FROM tbl_organization o
-    INNER JOIN tbl_renewal_cycle rc ON rc.organization_id=o.organization_id
-    INNER JOIN (
-      SELECT organization_id, MAX(cycle_number) AS max_cycle
-      FROM tbl_renewal_cycle GROUP BY organization_id
-    ) lc ON lc.organization_id=o.organization_id AND rc.cycle_number=lc.max_cycle
-    INNER JOIN tbl_organization_version ov ON ov.org_version_id = rc.org_version_id
-    WHERE o.status='Approved'
-  ) all_rows
+    FROM org_latest ol
+    LEFT JOIN org_counts oc ON oc.organization_id = ol.organization_id
+    LEFT JOIN org_rates  or8 ON or8.organization_id = ol.organization_id
+    LEFT JOIN org_trend  ot ON ot.organization_id = ol.organization_id
+    LEFT JOIN org_feedback ofe ON ofe.organization_id = ol.organization_id
+    LEFT JOIN org_month   om ON om.organization_id = ol.organization_id
+    WHERE (p_organization_id IS NULL OR ol.organization_id = p_organization_id)
+  ) x
   ORDER BY sort_order, organization_name;
 
-ELSE
-  /* Specific organization only (latest cycle, same 18 columns) */
-  SELECT
-    o.organization_id,
-    ov.name AS organization_name,
-
-    /* Completed (past) this month */
-    (SELECT COUNT(*)
-     FROM tbl_event e
-     INNER JOIN (
-       SELECT organization_id, MAX(cycle_number) AS max_cycle
-       FROM tbl_renewal_cycle GROUP BY organization_id
-     ) lc ON lc.organization_id=e.organization_id
-     WHERE e.event_type='Organization'
-       AND e.organization_id=o.organization_id
-       AND e.cycle_number = lc.max_cycle
-       AND e.status='Approved'
-       AND e.start_date < v_today
-       AND e.start_date BETWEEN v_current_month_start AND v_current_month_end) AS completed_events,
-
-    /* Completed (past) last month */
-    (SELECT COUNT(*)
-     FROM tbl_event e
-     INNER JOIN (
-       SELECT organization_id, MAX(cycle_number) AS max_cycle
-       FROM tbl_renewal_cycle GROUP BY organization_id
-     ) lc ON lc.organization_id=e.organization_id
-     WHERE e.event_type='Organization'
-       AND e.organization_id=o.organization_id
-       AND e.cycle_number = lc.max_cycle
-       AND e.status='Approved'
-       AND e.start_date < v_today
-       AND e.start_date BETWEEN v_last_month_start AND v_last_month_end) AS last_month_completed,
-
-    /* Completed change (null if last 0) */
-    (CASE
-        WHEN (SELECT COUNT(*)
-              FROM tbl_event e
-              INNER JOIN (
-                SELECT organization_id, MAX(cycle_number) AS max_cycle
-                FROM tbl_renewal_cycle GROUP BY organization_id
-              ) lc ON lc.organization_id=e.organization_id
-              WHERE e.event_type='Organization'
-                AND e.organization_id=o.organization_id
-                AND e.cycle_number = lc.max_cycle
-                AND e.status='Approved'
-                AND e.start_date < v_today
-                AND e.start_date BETWEEN v_last_month_start AND v_last_month_end) = 0
-        THEN NULL
-        ELSE
-          (SELECT COUNT(*)
-           FROM tbl_event e
-           INNER JOIN (
-             SELECT organization_id, MAX(cycle_number) AS max_cycle
-             FROM tbl_renewal_cycle GROUP BY organization_id
-           ) lc ON lc.organization_id=e.organization_id
-           WHERE e.event_type='Organization'
-             AND e.organization_id=o.organization_id
-             AND e.cycle_number = lc.max_cycle
-             AND e.status='Approved'
-             AND e.start_date < v_today
-             AND e.start_date BETWEEN v_current_month_start AND v_current_month_end)
-          -
-          (SELECT COUNT(*)
-           FROM tbl_event e
-           INNER JOIN (
-             SELECT organization_id, MAX(cycle_number) AS max_cycle
-             FROM tbl_renewal_cycle GROUP BY organization_id
-           ) lc ON lc.organization_id=e.organization_id
-           WHERE e.event_type='Organization'
-             AND e.organization_id=o.organization_id
-             AND e.cycle_number = lc.max_cycle
-             AND e.status='Approved'
-             AND e.start_date < v_today
-             AND e.start_date BETWEEN v_last_month_start AND v_last_month_end)
-      END) AS completed_events_change,
-
-    /* Cancelled this month */
-    (SELECT COUNT(*)
-     FROM tbl_event e
-     INNER JOIN (
-       SELECT organization_id, MAX(cycle_number) AS max_cycle
-       FROM tbl_renewal_cycle GROUP BY organization_id
-     ) lc ON lc.organization_id=e.organization_id
-     WHERE e.event_type='Organization'
-       AND e.organization_id=o.organization_id
-       AND e.cycle_number = lc.max_cycle
-       AND e.status='Rejected'
-       AND e.start_date BETWEEN v_current_month_start AND v_current_month_end) AS cancelled_events,
-
-    /* Cancelled last month */
-    (SELECT COUNT(*)
-     FROM tbl_event e
-     INNER JOIN (
-       SELECT organization_id, MAX(cycle_number) AS max_cycle
-       FROM tbl_renewal_cycle GROUP BY organization_id
-     ) lc ON lc.organization_id=e.organization_id
-     WHERE e.event_type='Organization'
-       AND e.organization_id=o.organization_id
-       AND e.cycle_number = lc.max_cycle
-       AND e.status='Rejected'
-       AND e.start_date BETWEEN v_last_month_start AND v_last_month_end) AS last_month_cancelled,
-
-    /* Cancelled change (null if last 0) */
-    (CASE
-        WHEN (SELECT COUNT(*)
-              FROM tbl_event e
-              INNER JOIN (
-                SELECT organization_id, MAX(cycle_number) AS max_cycle
-                FROM tbl_renewal_cycle GROUP BY organization_id
-              ) lc ON lc.organization_id=e.organization_id
-              WHERE e.event_type='Organization'
-                AND e.organization_id=o.organization_id
-                AND e.cycle_number = lc.max_cycle
-                AND e.status='Rejected'
-                AND e.start_date BETWEEN v_last_month_start AND v_last_month_end) = 0
-        THEN NULL
-        ELSE
-          (SELECT COUNT(*)
-           FROM tbl_event e
-           INNER JOIN (
-             SELECT organization_id, MAX(cycle_number) AS max_cycle
-             FROM tbl_renewal_cycle GROUP BY organization_id
-           ) lc ON lc.organization_id=e.organization_id
-           WHERE e.event_type='Organization'
-             AND e.organization_id=o.organization_id
-             AND e.cycle_number = lc.max_cycle
-             AND e.status='Rejected'
-             AND e.start_date BETWEEN v_current_month_start AND v_current_month_end)
-          -
-          (SELECT COUNT(*)
-           FROM tbl_event e
-           INNER JOIN (
-             SELECT organization_id, MAX(cycle_number) AS max_cycle
-             FROM tbl_renewal_cycle GROUP BY organization_id
-           ) lc ON lc.organization_id=e.organization_id
-           WHERE e.event_type='Organization'
-             AND e.organization_id=o.organization_id
-             AND e.cycle_number = lc.max_cycle
-             AND e.status='Rejected'
-             AND e.start_date BETWEEN v_last_month_start AND v_last_month_end)
-      END) AS cancelled_events_change,
-
-    /* Avg attendance rate (past) this month */
-    (
-      SELECT CASE WHEN SUM(reg_cnt) > 0
-                  THEN ROUND(SUM(att_cnt)*100.0 / SUM(reg_cnt), 2)
-                  ELSE 0 END
-      FROM (
-        SELECT
-          SUM(CASE WHEN ea.status IN ('Registered','Attended','Evaluated') THEN 1 ELSE 0 END) AS reg_cnt,
-          SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END)            AS att_cnt
-        FROM tbl_event e
-        INNER JOIN (
-          SELECT organization_id, MAX(cycle_number) AS max_cycle
-          FROM tbl_renewal_cycle GROUP BY organization_id
-        ) lc ON lc.organization_id=e.organization_id
-        LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-        WHERE e.event_type='Organization'
-          AND e.organization_id=o.organization_id
-          AND e.cycle_number = lc.max_cycle
-          AND e.status='Approved'
-          AND e.start_date < v_today
-          AND e.start_date BETWEEN v_current_month_start AND v_current_month_end
-      ) t
-    ) AS avg_attendance_rate,
-
-    /* Avg attendance rate (past) last month */
-    (
-      SELECT CASE WHEN SUM(reg_cnt) > 0
-                  THEN ROUND(SUM(att_cnt)*100.0 / SUM(reg_cnt), 2)
-                  ELSE 0 END
-      FROM (
-        SELECT
-          SUM(CASE WHEN ea.status IN ('Registered','Attended','Evaluated') THEN 1 ELSE 0 END) AS reg_cnt,
-          SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END)            AS att_cnt
-        FROM tbl_event e
-        INNER JOIN (
-          SELECT organization_id, MAX(cycle_number) AS max_cycle
-          FROM tbl_renewal_cycle GROUP BY organization_id
-        ) lc ON lc.organization_id=e.organization_id
-        LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-        WHERE e.event_type='Organization'
-          AND e.organization_id=o.organization_id
-          AND e.cycle_number = lc.max_cycle
-          AND e.status='Approved'
-          AND e.start_date < v_today
-          AND e.start_date BETWEEN v_last_month_start AND v_last_month_end
-      ) t
-    ) AS last_month_avg_attendance_rate,
-
-    /* Attendance rate change (null if last 0) */
-    (
-      CASE
-        WHEN (
-          SELECT SUM(CASE WHEN ea.status IN ('Registered','Attended','Evaluated') THEN 1 ELSE 0 END)
-          FROM tbl_event e
-          INNER JOIN (
-            SELECT organization_id, MAX(cycle_number) AS max_cycle
-            FROM tbl_renewal_cycle GROUP BY organization_id
-          ) lc ON lc.organization_id=e.organization_id
-          LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-          WHERE e.event_type='Organization'
-            AND e.organization_id=o.organization_id
-            AND e.cycle_number = lc.max_cycle
-            AND e.status='Approved'
-            AND e.start_date < v_today
-            AND e.start_date BETWEEN v_last_month_start AND v_last_month_end
-        ) = 0 THEN NULL
-        ELSE
-          (
-            SELECT CASE WHEN SUM(reg_cnt) > 0
-                        THEN ROUND(SUM(att_cnt)*100.0 / SUM(reg_cnt), 2)
-                        ELSE 0 END
-            FROM (
-              SELECT
-                SUM(CASE WHEN ea.status IN ('Registered','Attended','Evaluated') THEN 1 ELSE 0 END) AS reg_cnt,
-                SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END)            AS att_cnt
-              FROM tbl_event e
-              INNER JOIN (
-                SELECT organization_id, MAX(cycle_number) AS max_cycle
-                FROM tbl_renewal_cycle GROUP BY organization_id
-              ) lc ON lc.organization_id=e.organization_id
-              LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-              WHERE e.event_type='Organization'
-                AND e.organization_id=o.organization_id
-                AND e.cycle_number = lc.max_cycle
-                AND e.status='Approved'
-                AND e.start_date < v_today
-                AND e.start_date BETWEEN v_current_month_start AND v_current_month_end
-            ) cm
-          ) -
-          (
-            SELECT CASE WHEN SUM(reg_cnt) > 0
-                        THEN ROUND(SUM(att_cnt)*100.0 / SUM(reg_cnt), 2)
-                        ELSE 0 END
-            FROM (
-              SELECT
-                SUM(CASE WHEN ea.status IN ('Registered','Attended','Evaluated') THEN 1 ELSE 0 END) AS reg_cnt,
-                SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END)            AS att_cnt
-              FROM tbl_event e
-              INNER JOIN (
-                SELECT organization_id, MAX(cycle_number) AS max_cycle
-                FROM tbl_renewal_cycle GROUP BY organization_id
-              ) lc ON lc.organization_id=e.organization_id
-              LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-              WHERE e.event_type='Organization'
-                AND e.organization_id=o.organization_id
-                AND e.cycle_number = lc.max_cycle
-                AND e.status='Approved'
-                AND e.start_date < v_today
-                AND e.start_date BETWEEN v_last_month_start AND v_last_month_end
-            ) lm
-          )
-      END
-    ) AS attendance_rate_change,
-
-    /* Avg feedback rate (past) this month */
-    (
-      SELECT CASE WHEN SUM(att_cnt) > 0
-                  THEN ROUND(SUM(eval_cnt)*100.0 / SUM(att_cnt), 2)
-                  ELSE 0 END
-      FROM (
-        SELECT
-          SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END) AS att_cnt,
-          SUM(CASE WHEN ea.status='Evaluated' THEN 1 ELSE 0 END)                AS eval_cnt
-        FROM tbl_event e
-        INNER JOIN (
-          SELECT organization_id, MAX(cycle_number) AS max_cycle
-          FROM tbl_renewal_cycle GROUP BY organization_id
-        ) lc ON lc.organization_id=e.organization_id
-        LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-        WHERE e.event_type='Organization'
-          AND e.organization_id=o.organization_id
-          AND e.cycle_number = lc.max_cycle
-          AND e.status='Approved'
-          AND e.start_date < v_today
-          AND e.start_date BETWEEN v_current_month_start AND v_current_month_end
-      ) t
-    ) AS avg_feedback_rate,
-
-    /* Avg feedback rate (past) last month */
-    (
-      SELECT CASE WHEN SUM(att_cnt) > 0
-                  THEN ROUND(SUM(eval_cnt)*100.0 / SUM(att_cnt), 2)
-                  ELSE 0 END
-      FROM (
-        SELECT
-          SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END) AS att_cnt,
-          SUM(CASE WHEN ea.status='Evaluated' THEN 1 ELSE 0 END)                AS eval_cnt
-        FROM tbl_event e
-        INNER JOIN (
-          SELECT organization_id, MAX(cycle_number) AS max_cycle
-          FROM tbl_renewal_cycle GROUP BY organization_id
-        ) lc ON lc.organization_id=e.organization_id
-        LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-        WHERE e.event_type='Organization'
-          AND e.organization_id=o.organization_id
-          AND e.cycle_number = lc.max_cycle
-          AND e.status='Approved'
-          AND e.start_date < v_today
-          AND e.start_date BETWEEN v_last_month_start AND v_last_month_end
-      ) t
-    ) AS last_month_avg_feedback_rate,
-
-    /* Feedback rate change (null if last 0) */
-    (
-      CASE
-        WHEN (
-          SELECT SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END)
-          FROM tbl_event e
-          INNER JOIN (
-            SELECT organization_id, MAX(cycle_number) AS max_cycle
-            FROM tbl_renewal_cycle GROUP BY organization_id
-          ) lc ON lc.organization_id=e.organization_id
-          LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-          WHERE e.event_type='Organization'
-            AND e.organization_id=o.organization_id
-            AND e.cycle_number = lc.max_cycle
-            AND e.status='Approved'
-            AND e.start_date < v_today
-            AND e.start_date BETWEEN v_last_month_start AND v_last_month_end
-        ) = 0 THEN NULL
-        ELSE
-          (
-            SELECT CASE WHEN SUM(att_cnt) > 0
-                        THEN ROUND(SUM(eval_cnt)*100.0 / SUM(att_cnt), 2)
-                        ELSE 0 END
-            FROM (
-              SELECT
-                SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END) AS att_cnt,
-                SUM(CASE WHEN ea.status='Evaluated' THEN 1 ELSE 0 END)                AS eval_cnt
-              FROM tbl_event e
-              INNER JOIN (
-                SELECT organization_id, MAX(cycle_number) AS max_cycle
-                FROM tbl_renewal_cycle GROUP BY organization_id
-              ) lc ON lc.organization_id=e.organization_id
-              LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-              WHERE e.event_type='Organization'
-                AND e.organization_id=o.organization_id
-                AND e.cycle_number = lc.max_cycle
-                AND e.status='Approved'
-                AND e.start_date < v_today
-                AND e.start_date BETWEEN v_current_month_start AND v_current_month_end
-            ) cm
-          ) -
-          (
-            SELECT CASE WHEN SUM(att_cnt) > 0
-                        THEN ROUND(SUM(eval_cnt)*100.0 / SUM(att_cnt), 2)
-                        ELSE 0 END
-            FROM (
-              SELECT
-                SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END) AS att_cnt,
-                SUM(CASE WHEN ea.status='Evaluated' THEN 1 ELSE 0 END)                AS eval_cnt
-              FROM tbl_event e
-              INNER JOIN (
-                SELECT organization_id, MAX(cycle_number) AS max_cycle
-                FROM tbl_renewal_cycle GROUP BY organization_id
-              ) lc ON lc.organization_id=e.organization_id
-              LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-              WHERE e.event_type='Organization'
-                AND e.organization_id=o.organization_id
-                AND e.cycle_number = lc.max_cycle
-                AND e.status='Approved'
-                AND e.start_date < v_today
-                AND e.start_date BETWEEN v_last_month_start AND v_last_month_end
-            ) lm
-          )
-      END
-    ) AS feedback_rate_change,
-
-    /* Attendance trend (past, latest cycle) */
-    (
-      SELECT
-        CASE WHEN COUNT(*) = 0 THEN JSON_ARRAY()
-             ELSE CAST(
-               CONCAT(
-                 '[',
-                 GROUP_CONCAT(
-                   CAST(JSON_OBJECT(
-                     'event', event_title,
-                     'attended', attended_count,
-                     'notAttended', not_attended_count
-                   ) AS CHAR)
-                   ORDER BY start_date DESC SEPARATOR ','
-                 ),
-                 ']'
-               ) AS JSON
-             )
-        END
-      FROM (
-        SELECT
-          e.title AS event_title,
-          e.start_date,
-          SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END) AS attended_count,
-          SUM(CASE WHEN ea.status = 'Registered' THEN 1 ELSE 0 END) AS not_attended_count
-        FROM tbl_event e
-        INNER JOIN (
-          SELECT organization_id, MAX(cycle_number) AS max_cycle
-          FROM tbl_renewal_cycle GROUP BY organization_id
-        ) lc ON lc.organization_id=e.organization_id
-        LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-        WHERE e.event_type='Organization'
-          AND e.organization_id=o.organization_id
-          AND e.cycle_number = lc.max_cycle
-          AND e.status='Approved'
-          AND e.start_date < v_today
-        GROUP BY e.event_id, e.title, e.start_date
-        ORDER BY e.start_date DESC
-        LIMIT 10
-      ) t
-    ) AS attendance_trend,
-
-    /* Event feedback per event (past, latest cycle) */
-    (
-      SELECT
-        CASE WHEN COUNT(*) = 0 THEN JSON_ARRAY()
-             ELSE CAST(
-               CONCAT(
-                 '[',
-                 GROUP_CONCAT(
-                   CAST(JSON_OBJECT(
-                     'event', event_title,
-                     'feedback', feedback_rate
-                   ) AS CHAR)
-                   ORDER BY start_date DESC SEPARATOR ','
-                 ),
-                 ']'
-               ) AS JSON
-             )
-        END
-      FROM (
-        SELECT
-          e.title AS event_title,
-          e.start_date,
-          CASE WHEN SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END) > 0
-               THEN ROUND(
-                 SUM(CASE WHEN ea.status='Evaluated' THEN 1 ELSE 0 END)*100.0 /
-                 SUM(CASE WHEN ea.status IN ('Attended','Evaluated') THEN 1 ELSE 0 END), 0)
-               ELSE 0 END AS feedback_rate
-        FROM tbl_event e
-        INNER JOIN (
-          SELECT organization_id, MAX(cycle_number) AS max_cycle
-          FROM tbl_renewal_cycle GROUP BY organization_id
-        ) lc ON lc.organization_id=e.organization_id
-        LEFT JOIN tbl_event_attendance ea ON ea.event_id=e.event_id AND ea.deleted_at IS NULL
-        WHERE e.event_type='Organization'
-          AND e.organization_id=o.organization_id
-          AND e.cycle_number = lc.max_cycle
-          AND e.status='Approved'
-          AND e.start_date < v_today
-        GROUP BY e.event_id, e.title, e.start_date
-        ORDER BY e.start_date DESC
-        LIMIT 10
-      ) tf
-    ) AS event_feedback_rate,
-
-    /* Events per month (past, latest cycle) */
-    (
-      SELECT
-        CAST(
-          CONCAT(
-            '[',
-            GROUP_CONCAT(
-              CAST(JSON_OBJECT(
-                'month', month_name,
-                'events', event_count
-              ) AS CHAR)
-              ORDER BY month_date ASC SEPARATOR ','
-            ),
-            ']'
-          ) AS JSON
-        )
-      FROM (
-        SELECT
-          m.month_date,
-          DATE_FORMAT(m.month_date, '%b') AS month_name,
-          COALESCE((
-            SELECT COUNT(*)
-            FROM tbl_event e
-            INNER JOIN (
-              SELECT organization_id, MAX(cycle_number) AS max_cycle
-              FROM tbl_renewal_cycle GROUP BY organization_id
-            ) lc ON lc.organization_id=e.organization_id
-            WHERE e.event_type='Organization'
-              AND e.organization_id=o.organization_id
-              AND e.cycle_number = lc.max_cycle
-              AND e.status='Approved'
-              AND e.start_date < v_today
-              AND e.start_date >= DATE_FORMAT(m.month_date, '%Y-%m-01')
-              AND e.start_date <  DATE_ADD(DATE_FORMAT(m.month_date, '%Y-%m-01'), INTERVAL 1 MONTH)
-          ),0) AS event_count
-        FROM (
-          SELECT DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL n MONTH) AS month_date
-          FROM (
-            SELECT 11 AS n UNION SELECT 10 UNION SELECT 9 UNION SELECT 8 UNION
-            SELECT 7 UNION SELECT 6 UNION SELECT 5 UNION SELECT 4 UNION
-            SELECT 3 UNION SELECT 2 UNION SELECT 1 UNION SELECT 0
-          ) m
-        ) m
-      ) mm
-    ) AS events_per_month,
-
-    3 AS sort_order
-
-  FROM tbl_organization o
-  INNER JOIN tbl_renewal_cycle rc ON rc.organization_id=o.organization_id
-  INNER JOIN (
-    SELECT organization_id, MAX(cycle_number) AS max_cycle
-    FROM tbl_renewal_cycle GROUP BY organization_id
-  ) lc ON lc.organization_id=o.organization_id AND rc.cycle_number=lc.max_cycle
-  INNER JOIN tbl_organization_version ov ON ov.org_version_id = rc.org_version_id
-  WHERE o.status='Approved' AND o.organization_id = p_organization_id;
-END IF;
 END$$
 DELIMITER ;
 
