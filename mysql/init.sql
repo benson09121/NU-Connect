@@ -3107,20 +3107,6 @@ BEGIN
     ORDER BY step ASC
     LIMIT 1;
 
-    -- IF v_approver_id IS NOT NULL THEN
-    --     SELECT email INTO v_last_approver_email FROM tbl_user WHERE user_id = v_approver_id LIMIT 1;
-    --     CALL CreateNotification(
-    --         CONCAT('Approval Needed: ', COALESCE(v_submitted_org_name, 'Application')),
-    --         'A new application is ready for your review. Please check the application documents and provide your approval decision.',
-    --         v_url,
-    --         'approval',
-    --         p_application_id,
-    --         p_initiated_by,
-    --         JSON_ARRAY(v_last_approver_email),
-    --         'approval_required'
-    --     );
-    -- END IF;
-
     IF EXISTS (
         SELECT 1 FROM tbl_approval_process 
         WHERE application_id = p_application_id
@@ -3137,33 +3123,6 @@ BEGIN
     END IF;
 END$$
 DELIMITER ;
-
--- CREATE DEFINER='admin'@'%' PROCEDURE NotiftyApprover(
---     IN p_application_id INT
--- )
--- BEGIN
---  SELECT approval_id, approver_id
---     INTO v_approver_id
---     FROM tbl_approval_process
---     WHERE application_id = p_application_id
---       AND status = 'Pending'
---     ORDER BY step ASC
---     LIMIT 1;
-
-
---         SELECT email INTO v_last_approver_email FROM tbl_user WHERE user_id = v_approver_id LIMIT 1;
---         CALL CreateNotification(
---             CONCAT('Approval Needed: ', COALESCE(v_submitted_org_name, 'Application')),
---             'A new application is ready for your review. Please check the application documents and provide your approval decision.',
---             v_url,
---             'approval',
---             p_application_id,
---             p_initiated_by,
---             JSON_ARRAY(v_last_approver_email),
---             'approval_required'
---         );
--- END $$
--- DELIMITER ;
 
 DELIMITER $$
 CREATE DEFINER=`admin`@`%` PROCEDURE CreateOrganizationApplication(
@@ -4708,6 +4667,17 @@ BEGIN
         SET status = 'Approved',
             organization_id = v_new_org_id
         WHERE application_id = p_application_id;
+
+        -- Gather executive officer emails for invitation (only if final step)
+        DECLARE v_exec_emails JSON DEFAULT NULL;
+        SELECT JSON_ARRAYAGG(u.email)
+          INTO v_exec_emails
+        FROM tbl_organization_members m
+        JOIN tbl_user u ON m.user_id = u.user_id
+        WHERE m.organization_id = v_new_org_id
+          AND m.cycle_number = v_effective_cycle_number
+          AND m.member_type = 'Executive'
+          AND u.status = 'Pending';
     END IF;
 
     -- Commit transaction
@@ -4748,7 +4718,8 @@ BEGIN
         'other', JSON_OBJECT(
             'last_step', v_last_step,
             'org_version_id', v_org_version_id,
-            'organization_logo', v_org_logo
+            'organization_logo', v_org_logo,
+            'executive_emails', IFNULL(v_exec_emails, JSON_ARRAY())
         )
     ) AS result
     FROM tbl_approval_process ap
@@ -4758,9 +4729,6 @@ BEGIN
     LIMIT 1;
 END $$
 DELIMITER ;
-
-
-
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE RejectApplication(
@@ -6720,70 +6688,135 @@ DELIMITER ;
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE TerminateActiveApplicationPeriod(
-    IN p_terminated_by VARCHAR(200)
+    IN p_terminated_by VARCHAR(200)  -- user_id of the staff/admin closing the period
 )
 BEGIN
+    /* ===== Declarations (top only) ===== */
     DECLARE v_period_id INT;
     DECLARE v_terminator_email VARCHAR(100);
     DECLARE v_admin_emails JSON;
+    DECLARE v_applicant_emails JSON;
     DECLARE v_start_date DATE;
     DECLARE v_end_date DATE;
     DECLARE v_start_time TIME;
     DECLARE v_end_time TIME;
+    DECLARE v_rejected_count INT DEFAULT 0;
 
-    -- Find the current active period
+    /* ===== Locate the currently active period ===== */
     SELECT period_id, start_date, end_date, start_time, end_time
       INTO v_period_id, v_start_date, v_end_date, v_start_time, v_end_time
       FROM tbl_application_period
-      WHERE is_active = 1
-      ORDER BY created_at DESC
-      LIMIT 1;
+     WHERE is_active = 1
+     ORDER BY created_at DESC
+     LIMIT 1;
 
     IF v_period_id IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'No active application period found';
     END IF;
 
-    -- Get terminator's email
-    SELECT email INTO v_terminator_email FROM tbl_user WHERE user_id = p_terminated_by LIMIT 1;
+    /* ===== Resolve/validate terminator email ===== */
+    SELECT email INTO v_terminator_email
+      FROM tbl_user
+     WHERE user_id = p_terminated_by
+     LIMIT 1;
 
-    -- Mark as inactive
-    UPDATE tbl_application_period SET is_active = 0 WHERE period_id = v_period_id;
+    IF v_terminator_email IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Terminator user not found';
+    END IF;
 
-    -- Get all admin/adviser emails
-    SELECT JSON_ARRAYAGG(email) INTO v_admin_emails
-    FROM tbl_user
-    WHERE role_id IN (2, 3, 4) AND status = 'Active';
+    START TRANSACTION;
 
-    -- Notify (CreateNotification signature: title, message, url, entity_type, entity_id, sender_id, recipient_emails, action)
-    CALL CreateNotification(
-        'Application Period Closed',
-        CONCAT('The application period from ', DATE_FORMAT(v_start_date, '%M %d, %Y at %h:%i %p'), ' to ', DATE_FORMAT(v_end_date, '%M %d, %Y at %h:%i %p'), ' has been closed. No further applications will be accepted.'),
-        NULL,               -- url (nullable)
-        'system',           -- entity_type
-        v_period_id,        -- entity_id
-        p_terminated_by,    -- sender_id
-        v_admin_emails,     -- recipient_emails (JSON)
-        'application_period_terminated'
-    );
+      /* Mark the active period as inactive */
+      UPDATE tbl_application_period
+         SET is_active = 0
+       WHERE period_id = v_period_id;
 
-    -- Log (LogAction signature: p_user_email, p_action, p_type, p_meta_data, p_redirect_url, p_file_path)
-    CALL LogAction(
-        v_terminator_email,
-        CONCAT('Terminated application period: ', DATE_FORMAT(v_start_date, '%M %d, %Y'), ' - ', DATE_FORMAT(v_end_date, '%M %d, %Y')),
-        'Application Period Management',
-        JSON_OBJECT(
+      /* Collect all Pending applicants' emails under this period (to notify) */
+      SELECT JSON_ARRAYAGG(u.email) INTO v_applicant_emails
+        FROM tbl_application a
+        JOIN tbl_user u ON u.user_id = a.applicant_user_id
+       WHERE a.period_id = v_period_id
+         AND a.status = 'Pending';
+
+      /* Reject all Pending applications under this period */
+      UPDATE tbl_application
+         SET status = 'Rejected'
+       WHERE period_id = v_period_id
+         AND status = 'Pending';
+
+      SET v_rejected_count = ROW_COUNT();
+
+      /* Collect active admin/adviser emails (to notify system-wide close) */
+      SELECT JSON_ARRAYAGG(email) INTO v_admin_emails
+        FROM tbl_user
+       WHERE role_id IN (2,3,4)  -- adjust to your role mapping
+         AND status = 'Active';
+
+      /* Notify admins */
+      CALL CreateNotification(
+          'Application Period Closed',
+          CONCAT(
+            'The application period from ',
+            DATE_FORMAT(v_start_date, '%M %d, %Y at %h:%i %p'),
+            ' to ',
+            DATE_FORMAT(v_end_date, '%M %d, %Y at %h:%i %p'),
+            ' has been closed. No further applications will be accepted.'
+          ),
+          NULL,                 -- url
+          'system',             -- entity_type
+          v_period_id,          -- entity_id
+          p_terminated_by,      -- sender_id
+          COALESCE(v_admin_emails, JSON_ARRAY()), -- recipients JSON
+          'application_period_terminated'
+      );
+
+      /* Notify affected applicants (only if any were rejected) */
+      IF v_rejected_count > 0 THEN
+        CALL CreateNotification(
+            'Your Application Was Closed',
+            CONCAT(
+              'The application period (',
+              DATE_FORMAT(v_start_date, '%M %d, %Y'),
+              ' - ',
+              DATE_FORMAT(v_end_date, '%M %d, %Y'),
+              ') has been closed. All pending applications in this period were rejected.'
+            ),
+            NULL,                 -- url
+            'application',        -- entity_type
+            v_period_id,          -- entity_id (period context)
+            p_terminated_by,      -- sender_id
+            COALESCE(v_applicant_emails, JSON_ARRAY()), -- recipients JSON
+            'application_rejected_due_to_period_close'
+        );
+      END IF;
+
+      /* Log action */
+      CALL LogAction(
+          v_terminator_email,
+          CONCAT(
+            'Terminated application period: ',
+            DATE_FORMAT(v_start_date, '%M %d, %Y'),
+            ' - ',
+            DATE_FORMAT(v_end_date, '%M %d, %Y'),
+            ' (Rejected ', v_rejected_count, ' pending application(s))'
+          ),
+          'Application Period Management',
+          JSON_OBJECT(
             'period_id', v_period_id,
             'start_date', v_start_date,
             'end_date', v_end_date,
             'start_time', v_start_time,
             'end_time', v_end_time,
-            'action', 'Terminated active application period'
-        ),
-        CONCAT('/admin/application-periods/', v_period_id),
-        NULL
-    );
+            'rejected_count', v_rejected_count,
+            'action', 'Terminate active application period'
+          ),
+          CONCAT('/admin/application-periods/', v_period_id),
+          NULL
+      );
 
-    SELECT v_period_id AS terminated_period_id;
+    COMMIT;
+
+    SELECT v_period_id AS terminated_period_id, v_rejected_count AS rejected_pending_applications;
 END$$
 DELIMITER ;
 

@@ -60,10 +60,43 @@ async function createTransaction(data, proofImagePath = null) {
   }
 }
 
-async function updateTransaction(data){
+async function updateTransaction(params) {
   const conn = await pool.getConnection();
-  try{
+  try {
+    // Destructure parameters with defaults
     const {
+      transaction_id,
+      user_email,
+      payment_description = null,
+      amount = null,
+      status = null,
+      proof_image = null,
+      receipt_no = null,
+      category_code = null,
+      payer_name = null,
+      payee_name = null,
+      payer_name_override = null,
+      event_remarks = null
+    } = params;
+
+    // Ensure all parameters are properly defined (use null instead of undefined)
+    const safeParams = [
+      transaction_id || null,
+      user_email || null,
+      payment_description,
+      amount,
+      status,
+      proof_image,
+      receipt_no,
+      category_code,
+      payer_name,
+      payee_name,
+      payer_name_override,
+      event_remarks
+    ];
+
+    // Log the parameters for debugging
+    console.log('[transactionModel.updateTransaction] Parameters:', {
       transaction_id,
       user_email,
       payment_description,
@@ -76,29 +109,24 @@ async function updateTransaction(data){
       payee_name,
       payer_name_override,
       event_remarks
-    } = data;
+    });
 
-    const safeProof = (proof_image === undefined || proof_image === '') ? null : proof_image;
+    // Build the SQL query with proper parameter placeholders
+    const sql = `CALL UpdateTransaction(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+    
+    console.log('[transactionModel.updateTransaction] SQL:', sql);
+    console.log('[transactionModel.updateTransaction] Safe params:', safeParams);
 
-    const [rows] = await conn.query(
-      'CALL UpdateTransaction(?,?,?,?,?,?,?,?,?,?,?,?);',
-      [
-        transaction_id,
-        user_email,
-        payment_description ?? null,
-        amount ?? null,
-        status ?? null,
-        safeProof,
-        receipt_no ?? null,
-        category_code ?? null,
-        payer_name ?? null,
-        payee_name ?? null,
-        payer_name_override ?? null,
-        event_remarks ?? null
-      ]
-    );
-    return firstRowFromSP(rows);
-  } finally { conn.release(); }
+    // Execute the stored procedure
+    const [results] = await conn.query(sql, safeParams);
+    
+    return results;
+  } catch (error) {
+    console.error('[transactionModel.updateTransaction] Error:', error);
+    throw error;
+  } finally {
+    conn.release();
+  }
 }
 
 async function archiveTransaction({ transaction_id, user_email, reason }){

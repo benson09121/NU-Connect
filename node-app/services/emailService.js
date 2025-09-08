@@ -14,6 +14,14 @@ const isEmailConfigured = () => {
   return hasUser && hasPass;
 };
 
+// Azure AD helper function
+async function getAccessToken(cca) {
+    const response = await cca.acquireTokenByClientCredential({
+        scopes: ["https://graph.microsoft.com/.default"],
+    });
+    return response.accessToken;
+}
+
 if (!isEmailConfigured()) {
   console.warn('📧 Gmail credentials not properly configured. Email functionality will be disabled.');
 } else {
@@ -866,10 +874,15 @@ async function resendInvitationEmail(email) {
   const cca = new msal.ConfidentialClientApplication(msalConfig);
 
   try {
-    // Check if user exists and is pending
+    // Check if user exists (allow pending users)
     const user = await userModel.getUserByEmail(email);
-    if (!user || user.status !== 'Pending') {
-      throw new Error('Pending user not found or user may already be active');
+    if (!user) {
+      throw new Error('User not found in the system');
+    }
+    
+    // Allow resending to pending users specifically
+    if (user.status !== 'Pending') {
+      throw new Error('Can only resend invitations to users with Pending status');
     }
 
     // Get new access token
