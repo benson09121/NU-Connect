@@ -4667,17 +4667,6 @@ BEGIN
         SET status = 'Approved',
             organization_id = v_new_org_id
         WHERE application_id = p_application_id;
-
-        -- Gather executive officer emails for invitation (only if final step)
-        DECLARE v_exec_emails JSON DEFAULT NULL;
-        SELECT JSON_ARRAYAGG(u.email)
-          INTO v_exec_emails
-        FROM tbl_organization_members m
-        JOIN tbl_user u ON m.user_id = u.user_id
-        WHERE m.organization_id = v_new_org_id
-          AND m.cycle_number = v_effective_cycle_number
-          AND m.member_type = 'Executive'
-          AND u.status = 'Pending';
     END IF;
 
     -- Commit transaction
@@ -4718,8 +4707,7 @@ BEGIN
         'other', JSON_OBJECT(
             'last_step', v_last_step,
             'org_version_id', v_org_version_id,
-            'organization_logo', v_org_logo,
-            'executive_emails', IFNULL(v_exec_emails, JSON_ARRAY())
+            'organization_logo', v_org_logo
         )
     ) AS result
     FROM tbl_approval_process ap
