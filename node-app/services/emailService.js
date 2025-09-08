@@ -1,4 +1,7 @@
 const nodemailer = require('nodemailer');
+const msal = require('@azure/msal-node');
+const axios = require('axios');
+const userModel = require('../web/models/userModel');
 
 // Validate environment variables
 const isEmailConfigured = () => {
@@ -10,6 +13,14 @@ const isEmailConfigured = () => {
   
   return hasUser && hasPass;
 };
+
+// Azure AD helper function
+async function getAccessToken(cca) {
+    const response = await cca.acquireTokenByClientCredential({
+        scopes: ["https://graph.microsoft.com/.default"],
+    });
+    return response.accessToken;
+}
 
 if (!isEmailConfigured()) {
   console.warn('📧 Gmail credentials not properly configured. Email functionality will be disabled.');
@@ -846,10 +857,88 @@ function generateRejectionTemplate(rejectionReason, canReapply) {
   `;
 }
 
+async function resendInvitationEmail(email) {
+  if (!transporter) {
+    console.warn('📧 Email service not configured. Skipping email resend.');
+    return { success: false, message: 'Email service not configured' };
+  }
+
+  const msalConfig = {
+    auth: {
+      clientId: process.env.AZURE_CLIENT_ID,
+      authority: `https://login.microsoftonline.com/${process.env.AZURE_TENANT_ID}`,
+      clientSecret: process.env.AZURE_CLIENT_SECRET,
+    }
+  };
+
+  const cca = new msal.ConfidentialClientApplication(msalConfig);
+
+  try {
+    // Check if user exists (allow pending users)
+    const user = await userModel.getUserByEmail(email);
+    if (!user) {
+      throw new Error('User not found in the system');
+    }
+    
+    // Allow resending to pending users specifically
+    if (user.status !== 'Pending') {
+      throw new Error('Can only resend invitations to users with Pending status');
+    }
+
+    // Get new access token
+    const token = await getAccessToken(cca);
+
+    // Create new invitation with fresh redemption URL
+    const response = await axios.post(
+      "https://graph.microsoft.com/v1.0/invitations",
+      {
+        invitedUserEmailAddress: email,
+        inviteRedirectUrl: process.env.AZURE_REDIRECT_URL,
+        sendInvitationMessage: false // We'll send our custom email
+      },
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+
+    const redemptionUrl = response.data.inviteRedeemUrl;
+    console.log(`🔄 Generated new redemption URL for ${email}`);
+
+    // Optional: Update user record with new redemption URL
+    await userModel.updateRedemptionUrl(email, redemptionUrl);
+
+    // Send custom invitation email with isResend flag
+    const emailResult = await sendInvitationEmail(email, redemptionUrl, true);
+
+    if (emailResult.success) {
+      console.log(`✅ Invitation resent successfully to ${email}`);
+      return {
+        success: true,
+        message: 'Invitation resent successfully',
+        messageId: emailResult.messageId
+      };
+    } else {
+      return emailResult;
+    }
+
+  } catch (error) {
+    console.error('❌ Failed to resend invitation email:', error.message);
+
+    // Handle specific error cases
+    if (error.response?.status === 400) {
+      console.error('💡 User may already exist in Azure AD or invitation is invalid');
+    } else if (error.code === 'EAUTH') {
+      console.error('💡 Azure authentication failed. Check your credentials.');
+    }
+
+    return { success: false, error: error.message };
+  }
+}
+
+
 module.exports = {
   sendInvitationEmail,
   sendRejectionEmail,
   testEmailConfig,
   sendTestEmail,
-  diagnoseEmailDelivery
+  diagnoseEmailDelivery,
+  resendInvitationEmail
 };

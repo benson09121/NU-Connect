@@ -143,33 +143,21 @@ async function update(req, res) {
     }
 
     // Handle file upload and removal logic
-    let proofImagePath = proof_image ?? null; // default to provided value
+    let proofImagePath = undefined; // Initialize as undefined to distinguish from null
 
-    // Remove proof image if requested
-    if (remove_proof_image === true || remove_proof_image === 'true') {
-      if (currentTransaction?.proof_image) {
-        try {
-          const oldFilePath = path.join('/app', currentTransaction.proof_image);
-          if (fs.existsSync(oldFilePath)) {
-            fs.unlinkSync(oldFilePath);
-            console.log('Removed old proof image:', oldFilePath);
-          }
-        } catch (deleteErr) {
-          console.warn('Failed to delete old proof image:', deleteErr.message);
-        }
-      }
-      proofImagePath = null;
-    }
-    // If new file is uploaded, handle upload and remove old file
-    else if (req.files && req.files.proof_image) {
+    // Check if new file is uploaded FIRST (this takes priority)
+    if (req.files && req.files.proof_image) {
       const file = req.files.proof_image;
       const ext = path.extname(file.name).toLowerCase().trim();
       const allowedExt = ['.jpg', '.jpeg', '.png', '.gif', '.pdf', '.webp'];
+      
       if (!allowedExt.includes(ext)) {
-        return res.status(400).json({ message: 'Invalid file type. Allowed: jpg, jpeg, png, gif, pdf, webp' });
+        return res.status(400).json({ 
+          message: 'Invalid file type. Allowed: jpg, jpeg, png, gif, pdf, webp' 
+        });
       }
 
-      // Remove old file if it exists
+      // Remove old file if it exists BEFORE saving new one
       if (currentTransaction?.proof_image) {
         try {
           const oldFilePath = path.join('/app', currentTransaction.proof_image);
@@ -182,32 +170,88 @@ async function update(req, res) {
         }
       }
 
-      // Save new file
+      // Determine save path based on organization_id
       let relPath, absPath;
       if (organization_id) {
         const safeOrgId = String(organization_id).replace(/[^0-9]/g, '');
-        if (!safeOrgId) return res.status(400).json({ message: 'Invalid organization_id' });
+        if (!safeOrgId) {
+          return res.status(400).json({ message: 'Invalid organization_id' });
+        }
         const safeName = `proof-${Date.now()}${ext}`;
         const orgDir = path.join('/app/organizations', safeOrgId, 'transactions');
-        if (!fs.existsSync(orgDir)) fs.mkdirSync(orgDir, { recursive: true });
+        if (!fs.existsSync(orgDir)) {
+          fs.mkdirSync(orgDir, { recursive: true });
+        }
         absPath = path.join(orgDir, safeName);
         relPath = path.posix.join('organizations', safeOrgId, 'transactions', safeName);
       } else {
         // For SDAO/system users, store in a generic system directory
         const sysDir = path.join('/app/organizations', 'system', 'transactions');
-        if (!fs.existsSync(sysDir)) fs.mkdirSync(sysDir, { recursive: true });
+        if (!fs.existsSync(sysDir)) {
+          fs.mkdirSync(sysDir, { recursive: true });
+        }
         const safeName = `proof-${Date.now()}${ext}`;
         absPath = path.join(sysDir, safeName);
         relPath = path.posix.join('organizations', 'system', 'transactions', safeName);
       }
-      fs.writeFileSync(absPath, file.data);
-      proofImagePath = relPath;
-      console.log('Saved new proof image:', absPath);
+
+      // Save new file
+      try {
+        fs.writeFileSync(absPath, file.data);
+        proofImagePath = relPath;
+        console.log('Saved new proof image:', absPath);
+      } catch (saveErr) {
+        console.error('Failed to save new proof image:', saveErr);
+        return res.status(500).json({ 
+          message: 'Failed to save uploaded file' 
+        });
+      }
     }
-    // If no new file and no removal flag, keep existing proof_image path
-    else if (!proof_image && currentTransaction?.proof_image) {
-      proofImagePath = currentTransaction.proof_image;
+    // If no new file uploaded, check if removal is requested
+    else if (remove_proof_image === true || remove_proof_image === 'true') {
+      if (currentTransaction?.proof_image) {
+        try {
+          const oldFilePath = path.join('/app', currentTransaction.proof_image);
+          if (fs.existsSync(oldFilePath)) {
+            fs.unlinkSync(oldFilePath);
+            console.log('Removed proof image per request:', oldFilePath);
+          }
+        } catch (deleteErr) {
+          console.warn('Failed to delete proof image:', deleteErr.message);
+        }
+      }
+      proofImagePath = null; // Explicitly set to null to remove from database
     }
+    // If proof_image was explicitly provided in body (URL/path), use that value
+    else if (proof_image !== undefined && proof_image !== null) {
+      // If it's different from current, remove old file
+      if (currentTransaction?.proof_image && currentTransaction.proof_image !== proof_image) {
+        try {
+          const oldFilePath = path.join('/app', currentTransaction.proof_image);
+          if (fs.existsSync(oldFilePath)) {
+            fs.unlinkSync(oldFilePath);
+            console.log('Removed old proof image (path changed):', oldFilePath);
+          }
+        } catch (deleteErr) {
+          console.warn('Failed to delete old proof image:', deleteErr.message);
+        }
+      }
+      proofImagePath = proof_image;
+    }
+    // Otherwise, keep the existing proof_image (don't modify it)
+    // proofImagePath remains undefined, which won't update the field
+
+    console.log('Update transaction - proof image handling:', {
+      hasNewFile: !!(req.files && req.files.proof_image),
+      removeRequested: remove_proof_image === true || remove_proof_image === 'true',
+      proofImageFromBody: proof_image,
+      finalProofImagePath: proofImagePath,
+      currentProofImage: currentTransaction?.proof_image
+    });
+
+    // CRITICAL FIX: Convert undefined to null for SQL compatibility
+    // MySQL procedures cannot handle JavaScript undefined values
+    const sqlSafeProofImage = proofImagePath === undefined ? null : proofImagePath;
 
     const raw = await transactionModel.updateTransaction({
       transaction_id,
@@ -215,7 +259,7 @@ async function update(req, res) {
       payment_description,
       amount,
       status,
-      proof_image: proofImagePath,
+      proof_image: sqlSafeProofImage,  // Use null instead of undefined
       receipt_no,
       category_code,
       payer_name,
@@ -419,6 +463,28 @@ async function getTransactionFile(req, res) {
   }
 }
 
+async function getTransactionsByOrganization(req, res) {
+  try {
+    const { organization_id } = req.params;
+    const { sessionId } = req.query;
+
+    if (!organization_id) {
+      return res.status(400).json({ message: 'Organization ID is required' });
+    }
+
+    // Subscribe to real-time updates for this organization's transactions
+    if (sessionId) {
+      subscribeToChannel(sessionId, `transactions:organization:${organization_id}`);
+    }
+
+    const rows = await transactionModel.getTransactionsByOrganization(organization_id);
+    res.json(rows);
+  } catch (e) {
+    console.error('[transactions.getTransactionsByOrganization]', e);
+    res.status(500).json({ message: e.sqlMessage || e.message });
+  }
+}
+
 module.exports = {
   create,
   update,
@@ -429,5 +495,6 @@ module.exports = {
   getPaymentTypes,
   getFinancialCategories,
   getTransactionTypes,
-  getTransactionFile
+  getTransactionFile,
+  getTransactionsByOrganization
 };
