@@ -56,9 +56,23 @@ async function handleLogin(user) {
     }
 }
 
+async function getUserByEmail(email) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('SELECT * FROM tbl_user WHERE email = ?', [email]);
+        return rows[0] && rows[0][0] ? rows[0][0] : null;
+    } catch (error) {
+        console.error('Error fetching user by email:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
 module.exports = {
     getPermissions,
     createUser,
     checkUserExists,
-    handleLogin
+    handleLogin,
+    getUserByEmail
 };

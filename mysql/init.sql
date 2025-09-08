@@ -9707,13 +9707,10 @@ BEGIN
         created_at
     FROM tbl_college
     ORDER BY name;
-END$$
+END $$
 DELIMITER ;
 
 DELIMITER $$
-/* ===========================
-   CreateCollege
-   =========================== */
 CREATE DEFINER='admin'@'%' PROCEDURE CreateCollege(
     IN p_name          VARCHAR(100),
     IN p_abbreviation  VARCHAR(20),
@@ -9756,43 +9753,36 @@ BEGIN
     /* Friendly payload */
     SELECT 'College created successfully' AS message, c.*
     FROM tbl_college c WHERE c.college_id = v_college_id;
-END$$
+END $$
 DELIMITER ;
 
-
-/* ===========================
-   UpdateCollege
-   - Blocks updates when Archived
-   =========================== */
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE UpdateCollege(
-    IN p_college_id    INT,
-    IN p_name          VARCHAR(100),
-    IN p_abbreviation  VARCHAR(20),
-    IN p_user_email    VARCHAR(100)
+    IN p_college_id   INT,
+    IN p_name         VARCHAR(100),
+    IN p_abbreviation VARCHAR(20),
+    IN p_user_email   VARCHAR(100)
 )
 BEGIN
     DECLARE v_exists INT DEFAULT 0;
     DECLARE v_status VARCHAR(10);
     DECLARE v_old JSON;
 
-    /* Duplicate handler */
     DECLARE EXIT HANDLER FOR 1062
     BEGIN
-        SIGNAL SQLSTATE '45000'
-            SET MESSAGE_TEXT = 'College name or abbreviation already exists';
+      SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT='College name or abbreviation already exists';
     END;
 
-    /* Exists? */
-    SELECT COUNT(*), status
-      INTO v_exists, v_status
-    FROM tbl_college
-    WHERE college_id = p_college_id
-    LIMIT 1;
-
+    -- Existence check (no aggregate mixing)
+    SELECT COUNT(*) INTO v_exists
+    FROM tbl_college WHERE college_id = p_college_id;
     IF v_exists = 0 THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='College not found';
     END IF;
+
+    SELECT status INTO v_status
+    FROM tbl_college WHERE college_id = p_college_id LIMIT 1;
 
     IF v_status = 'Archived' THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Cannot update an archived college';
@@ -9805,7 +9795,6 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='College abbreviation is required';
     END IF;
 
-    /* Snapshot for audit */
     SELECT JSON_OBJECT(
              'college_id', college_id,
              'name', name,
@@ -9819,39 +9808,27 @@ BEGIN
     FROM tbl_college
     WHERE college_id = p_college_id;
 
-    /* Update */
     UPDATE tbl_college
        SET name = TRIM(p_name),
            abbreviation = TRIM(p_abbreviation)
      WHERE college_id = p_college_id;
 
-    /* Audit */
     CALL LogAction(
         p_user_email,
         CONCAT('Updated college "', TRIM(p_name), '" (', TRIM(p_abbreviation), ')'),
         'College.Update',
-        JSON_OBJECT(
-          'before', v_old,
-          'after', JSON_OBJECT(
-              'college_id', p_college_id,
-              'name', TRIM(p_name),
-              'abbreviation', TRIM(p_abbreviation)
-          )
-        ),
+        JSON_OBJECT('before', v_old,
+                    'after', JSON_OBJECT('college_id', p_college_id,
+                                         'name', TRIM(p_name),
+                                         'abbreviation', TRIM(p_abbreviation))),
         NULL, NULL
     );
 
     SELECT 'College updated successfully' AS message, c.*
     FROM tbl_college c WHERE c.college_id = p_college_id;
-END$$
+END $$
 DELIMITER ;
 
-
-/* ===========================
-   ArchiveCollege
-   - Requires no Active programs under it
-   - Sets archived_* fields and status
-   =========================== */
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE ArchiveCollege(
     IN p_college_id INT,
@@ -9863,40 +9840,44 @@ BEGIN
     DECLARE v_status VARCHAR(10);
     DECLARE v_user_id VARCHAR(200);
     DECLARE v_active_programs INT DEFAULT 0;
+    DECLARE v_has_prog_table INT DEFAULT 0;
 
-    /* Resolve archiver (also validates email) */
+    -- Resolve archiver user_id
     SELECT user_id INTO v_user_id
     FROM tbl_user WHERE email = p_user_email LIMIT 1;
     IF v_user_id IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='User email not found';
     END IF;
 
-    /* College exists and current status */
-    SELECT COUNT(*), status
-      INTO v_exists, v_status
-    FROM tbl_college
-    WHERE college_id = p_college_id
-    LIMIT 1;
-
+    -- Existence check
+    SELECT COUNT(*) INTO v_exists
+    FROM tbl_college WHERE college_id = p_college_id;
     IF v_exists = 0 THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='College not found';
     END IF;
 
+    SELECT status INTO v_status
+    FROM tbl_college WHERE college_id = p_college_id LIMIT 1;
     IF v_status = 'Archived' THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='College is already archived';
     END IF;
 
-    /* Block if there are Active programs under the college (if tbl_program exists) */
-    SELECT COUNT(*) INTO v_active_programs
-    FROM tbl_program
-    WHERE college_id = p_college_id AND status = 'Active';
+    -- Check programs only if table exists (optional but safe)
+    SELECT COUNT(*) INTO v_has_prog_table
+    FROM INFORMATION_SCHEMA.TABLES
+    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'tbl_program';
 
-    IF v_active_programs > 0 THEN
-        SIGNAL SQLSTATE '45000'
-            SET MESSAGE_TEXT='Cannot archive college with Active programs. Archive/move programs first.';
+    IF v_has_prog_table > 0 THEN
+        SELECT COUNT(*) INTO v_active_programs
+        FROM tbl_program
+        WHERE college_id = p_college_id AND status = 'Active';
+
+        IF v_active_programs > 0 THEN
+            SIGNAL SQLSTATE '45000'
+                SET MESSAGE_TEXT='Cannot archive college with Active programs. Archive/move programs first.';
+        END IF;
     END IF;
 
-    /* Archive */
     UPDATE tbl_college
        SET status = 'Archived',
            archived_at = CURRENT_TIMESTAMP,
@@ -9904,7 +9885,6 @@ BEGIN
            archived_reason = p_reason
      WHERE college_id = p_college_id;
 
-    /* Audit */
     CALL LogAction(
         p_user_email,
         CONCAT('Archived college ID ', p_college_id),
@@ -9915,13 +9895,9 @@ BEGIN
 
     SELECT 'College archived successfully' AS message, c.*
     FROM tbl_college c WHERE c.college_id = p_college_id;
-END$$
+END $$
 DELIMITER ;
 
-/* ===========================
-   UnarchiveCollege
-   - Restores to Active, clears archive fields
-   =========================== */
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE UnarchiveCollege(
     IN p_college_id INT,
@@ -9931,22 +9907,20 @@ BEGIN
     DECLARE v_exists INT DEFAULT 0;
     DECLARE v_status VARCHAR(10);
 
-    /* Exists + status */
-    SELECT COUNT(*), status
-      INTO v_exists, v_status
-    FROM tbl_college
-    WHERE college_id = p_college_id
-    LIMIT 1;
-
+    -- Existence check
+    SELECT COUNT(*) INTO v_exists
+    FROM tbl_college WHERE college_id = p_college_id;
     IF v_exists = 0 THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='College not found';
     END IF;
+
+    SELECT status INTO v_status
+    FROM tbl_college WHERE college_id = p_college_id LIMIT 1;
 
     IF v_status = 'Active' THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='College is already Active';
     END IF;
 
-    /* Unarchive */
     UPDATE tbl_college
        SET status = 'Active',
            archived_at = NULL,
@@ -9954,7 +9928,6 @@ BEGIN
            archived_reason = NULL
      WHERE college_id = p_college_id;
 
-    /* Audit */
     CALL LogAction(
         p_user_email,
         CONCAT('Unarchived college ID ', p_college_id),
@@ -9965,9 +9938,8 @@ BEGIN
 
     SELECT 'College unarchived successfully' AS message, c.*
     FROM tbl_college c WHERE c.college_id = p_college_id;
-END$$
+END $$
 DELIMITER ;
-
 
 /* -------- CreateProgram (fixed DECLARE order + EXIT handler + stable last_insert_id) -------- */
 DELIMITER $$
@@ -13526,7 +13498,8 @@ VALUES("CREATE_EVENT","Organization"),
 ("APPLY_RENEWAL_ORGANIZATION","Organization"),
 ("VIEW_TRANSACTIONS","Global"),
 ("MANAGE_TRANSACTIONS","Global"),
-("MANAGE_SDAO_EVENT","SDAO");
+("MANAGE_SDAO_EVENT","SDAO"),
+("MANAGE_COLLEGES","SDAO");
 
 
 INSERT INTO tbl_role_permission (role_id, permission_id) 
@@ -13554,6 +13527,8 @@ VALUES
 (4,27),
 (4,30),
 (4,31),
+(4,32),
+(4,33),
 (2,6),
 (2,9),
 (2,14),

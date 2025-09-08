@@ -1,4 +1,7 @@
 const nodemailer = require('nodemailer');
+const msal = require('@azure/msal-node');
+const axios = require('axios');
+const userModel = require('../web/models/userModel');
 
 // Validate environment variables
 const isEmailConfigured = () => {
