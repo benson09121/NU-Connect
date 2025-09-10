@@ -549,18 +549,18 @@ async function createEventApplication(req, res) {
 
 async function getEventApplicationRequirement(req, res) {
   const requirement_name = req.query.requirement_name;
-  let org_name = req.query.organization_name;
+  let organization_id = req.query.organization_id;
+  let organization_version_id = req.query.organization_version_id;
   let event_id = req.query.event_id;
-  let cycle_number = req.query.cycle_number;
-  org_name = encodeURIComponent(org_name);
+  organization_id = encodeURIComponent(organization_id);
+  organization_version_id = encodeURIComponent(organization_version_id);
   event_id = encodeURIComponent(event_id);
-  cycle_number = encodeURIComponent(cycle_number);
 
   try {
     res.header('Access-Control-Allow-Origin', 'http://localhost:5173');
     res.setHeader(
       'X-Accel-Redirect',
-      `/protected-organization-requirements/${org_name}/${cycle_number}/events/${event_id}/requirements/${requirement_name}`
+      `/protected-organization-requirements/${organization_id}/${organization_version_id}/events/${event_id}/requirements/${requirement_name}`
     );
     const match = requirement_name.match(/requirement-(\d+)-(.+)/);
     const downloadName = match ? match[0] : requirement_name;
@@ -1233,13 +1233,15 @@ async function getSampleCertificate(req, res) {
 }
 
 async function getEventPublicationImage(req, res) {
-  let { event_id, image_name, cycle_number, organization_name, organization_id } = req.query;
+  let { image_name, event_id, organization_id, organization_version_id } = req.query;
 
   if (!event_id || !image_name) {
     return res.status(400).json({
       error: "Missing required parameters: event_id, image_name"
     });
   }
+   organization_id = encodeURIComponent(organization_id || '');
+   organization_version_id = encodeURIComponent(organization_version_id || '');
 
   // Determine if it's an SDAO event
   const isSDAO = !organization_id || organization_id === 'null' || organization_id === '' || organization_id === 'undefined';
@@ -1260,17 +1262,16 @@ async function getEventPublicationImage(req, res) {
         error: "Missing required parameters: organization_name, cycle_number for organization event"
       });
     }
-    const organization_name_encoded = encodeURIComponent(organization_name);
     physicalPath = path.join(
       '/app/organizations',
-      organization_name,
-      String(cycle_number),
+      String(organization_id),
+      String(organization_version_id),
       'events',
       String(event_id),
       'publication_images',
       image_name
     );
-    xAccelPath = `/protected-organization-requirements/${organization_name_encoded}/${cycle_number}/events/${event_id}/publication_images/${image_name_encoded}`;
+    xAccelPath = `/protected-organization-requirements/${organization_id}/${organization_version_id}/events/${event_id}/publication_images/${image_name_encoded}`;
   }
 
   // Log for debugging

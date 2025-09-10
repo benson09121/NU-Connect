@@ -2,11 +2,12 @@ const pool = require('../../config/db');
 const { redisClient } = require('../../config/redis');
 const { Auth } = require("./userIdModel");
 
-async function getAllEvents() {
+async function getAllEvents(user_id) {
 
     const connection = await pool.getConnection();
     try {
-        const [rows] = await connection.query('CALL GetAllEvents(?);', [Auth.get_userId]);
+        const [rows] = await connection.query('CALL GetAllEvents(?);',[user_id]);
+        console.log(rows);
         return rows[0];
     } finally {
         connection.release();

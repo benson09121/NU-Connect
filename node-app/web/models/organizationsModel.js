@@ -120,8 +120,8 @@ async function getOrganizationDetails(org_id, org_version_id){
       
 async function getUserByEmail(email) {
     const connection = await pool.getConnection();
-    try {
-        const [rows] = await connection.query('SELECT * FROM tbl_user WHERE email = ?', [email]);
+        try {
+            const [rows] = await connection.query('CALL GetEmail(?);', [email]);
         return rows[0] || null;
     } finally {
         connection.release();

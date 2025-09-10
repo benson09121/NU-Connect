@@ -11,6 +11,7 @@ SET GLOBAL time_zone = '+08:00';
 SET GLOBAL event_scheduler = ON;
 
 DROP DATABASE IF EXISTS db_nuconnect;
+
 CREATE DATABASE db_nuconnect;
 USE db_nuconnect;
 CREATE TABLE tbl_role(
@@ -445,83 +446,6 @@ CREATE TABLE tbl_event (
     INDEX idx_status (status)
 );
 
--- Trigger to validate event data before insert
-DELIMITER $$
-CREATE TRIGGER trg_event_validate_before_insert
-    BEFORE INSERT ON tbl_event
-    FOR EACH ROW
-BEGIN
-    -- For Organization events, both organization_id and cycle_number must be NOT NULL
-    IF NEW.event_type = 'Organization' THEN
-        IF NEW.organization_id IS NULL OR NEW.cycle_number IS NULL THEN
-            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Organization events must have both organization_id and cycle_number';
-        END IF;
-        
-        -- Validate that the organization_id and cycle_number combination exists in tbl_renewal_cycle
-        IF NOT EXISTS (
-            SELECT 1 FROM tbl_renewal_cycle 
-            WHERE organization_id = NEW.organization_id 
-            AND cycle_number = NEW.cycle_number
-        ) THEN
-            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Invalid organization_id and cycle_number combination';
-        END IF;
-    END IF;
-    
-    -- For SDAO and System events, organization_id and cycle_number should be NULL
-    IF NEW.event_type IN ('SDAO', 'System') THEN
-        SET NEW.organization_id = NULL;
-        SET NEW.cycle_number = NULL;
-    END IF;
-    
-    -- Validate date range
-    IF NEW.start_date > NEW.end_date THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Start date cannot be after end date';
-    END IF;
-    
-    -- Validate time range for same-day events
-    IF NEW.start_date = NEW.end_date AND NEW.start_time >= NEW.end_time THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Start time must be before end time for same-day events';
-    END IF;
-END$$
-
--- Trigger to validate event data before update
-CREATE TRIGGER trg_event_validate_before_update
-    BEFORE UPDATE ON tbl_event
-    FOR EACH ROW
-BEGIN
-    -- For Organization events, both organization_id and cycle_number must be NOT NULL
-    IF NEW.event_type = 'Organization' THEN
-        IF NEW.organization_id IS NULL OR NEW.cycle_number IS NULL THEN
-            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Organization events must have both organization_id and cycle_number';
-        END IF;
-        
-        -- Validate that the organization_id and cycle_number combination exists in tbl_renewal_cycle
-        IF NOT EXISTS (
-            SELECT 1 FROM tbl_renewal_cycle 
-            WHERE organization_id = NEW.organization_id 
-            AND cycle_number = NEW.cycle_number
-        ) THEN
-            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Invalid organization_id and cycle_number combination';
-        END IF;
-    END IF;
-    
-    -- For SDAO and System events, organization_id and cycle_number should be NULL
-    IF NEW.event_type IN ('SDAO', 'System') THEN
-        SET NEW.organization_id = NULL;
-        SET NEW.cycle_number = NULL;
-    END IF;
-    
-    -- Validate date range
-    IF NEW.start_date > NEW.end_date THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Start date cannot be after end date';
-    END IF;
-    
-    -- Validate time range for same-day events
-    IF NEW.start_date = NEW.end_date AND NEW.start_time >= NEW.end_time THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Start time must be before end time for same-day events';
-    END IF;
-END$$
-DELIMITER ;
 
 CREATE TABLE tbl_blocked_period (
     blocked_period_id INT AUTO_INCREMENT PRIMARY KEY,
@@ -879,14 +803,6 @@ CREATE TABLE tbl_transaction (
       REFERENCES tbl_transaction_type_category(transaction_type_id, category_id)
 );
 
--- Indexes for reporting and performance
-CREATE INDEX idx_transaction_date ON tbl_transaction(transaction_date);
-CREATE INDEX idx_transaction_status ON tbl_transaction(status);
-CREATE INDEX idx_transaction_user ON tbl_transaction(user_id);
-CREATE INDEX idx_transaction_type ON tbl_transaction(transaction_type_id);
-CREATE INDEX idx_transaction_payment_type ON tbl_transaction(payment_type_id);
-CREATE INDEX idx_transaction_category ON tbl_transaction(category_id);
-CREATE INDEX idx_transaction_archived ON tbl_transaction(archived_at);
 
 -- Membership Specialization Table
 CREATE TABLE tbl_transaction_membership (
@@ -957,6 +873,97 @@ CREATE TABLE tbl_ai_message (
   INDEX idx_message_scope (conversation_id, message_scope)
 );
 
+CREATE TABLE tbl_member_permission_override (
+    override_id INT AUTO_INCREMENT PRIMARY KEY,
+    member_id INT NOT NULL, -- from tbl_organization_members
+    permission_id INT NOT NULL,
+    is_allowed BOOLEAN NOT NULL, -- TRUE = force allow, FALSE = force deny
+    FOREIGN KEY (member_id) REFERENCES tbl_organization_members(member_id),
+    FOREIGN KEY (permission_id) REFERENCES tbl_permission(permission_id)
+);
+
+
+-- TRIGGERS
+
+
+-- Trigger to validate event data before insert
+DELIMITER $$
+CREATE TRIGGER trg_event_validate_before_insert
+    BEFORE INSERT ON tbl_event
+    FOR EACH ROW
+BEGIN
+    -- For Organization events, both organization_id and cycle_number must be NOT NULL
+    IF NEW.event_type = 'Organization' THEN
+        IF NEW.organization_id IS NULL OR NEW.cycle_number IS NULL THEN
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Organization events must have both organization_id and cycle_number';
+        END IF;
+        
+        -- Validate that the organization_id and cycle_number combination exists in tbl_renewal_cycle
+        IF NOT EXISTS (
+            SELECT 1 FROM tbl_renewal_cycle 
+            WHERE organization_id = NEW.organization_id 
+            AND cycle_number = NEW.cycle_number
+        ) THEN
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Invalid organization_id and cycle_number combination';
+        END IF;
+    END IF;
+    
+    -- For SDAO and System events, organization_id and cycle_number should be NULL
+    IF NEW.event_type IN ('SDAO', 'System') THEN
+        SET NEW.organization_id = NULL;
+        SET NEW.cycle_number = NULL;
+    END IF;
+    
+    -- Validate date range
+    IF NEW.start_date > NEW.end_date THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Start date cannot be after end date';
+    END IF;
+    
+    -- Validate time range for same-day events
+    IF NEW.start_date = NEW.end_date AND NEW.start_time >= NEW.end_time THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Start time must be before end time for same-day events';
+    END IF;
+END$$
+
+-- Trigger to validate event data before update
+CREATE TRIGGER trg_event_validate_before_update
+    BEFORE UPDATE ON tbl_event
+    FOR EACH ROW
+BEGIN
+    -- For Organization events, both organization_id and cycle_number must be NOT NULL
+    IF NEW.event_type = 'Organization' THEN
+        IF NEW.organization_id IS NULL OR NEW.cycle_number IS NULL THEN
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Organization events must have both organization_id and cycle_number';
+        END IF;
+        
+        -- Validate that the organization_id and cycle_number combination exists in tbl_renewal_cycle
+        IF NOT EXISTS (
+            SELECT 1 FROM tbl_renewal_cycle 
+            WHERE organization_id = NEW.organization_id 
+            AND cycle_number = NEW.cycle_number
+        ) THEN
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Invalid organization_id and cycle_number combination';
+        END IF;
+    END IF;
+    
+    -- For SDAO and System events, organization_id and cycle_number should be NULL
+    IF NEW.event_type IN ('SDAO', 'System') THEN
+        SET NEW.organization_id = NULL;
+        SET NEW.cycle_number = NULL;
+    END IF;
+    
+    -- Validate date range
+    IF NEW.start_date > NEW.end_date THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Start date cannot be after end date';
+    END IF;
+    
+    -- Validate time range for same-day events
+    IF NEW.start_date = NEW.end_date AND NEW.start_time >= NEW.end_time THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Start time must be before end time for same-day events';
+    END IF;
+END$$
+DELIMITER ;
+
 DELIMITER $$
 
 /* ---- Block creating a Program under an archived College ---- */
@@ -994,14 +1001,7 @@ BEGIN
     END IF;
 END$$
 
-CREATE TABLE tbl_member_permission_override (
-    override_id INT AUTO_INCREMENT PRIMARY KEY,
-    member_id INT NOT NULL, -- from tbl_organization_members
-    permission_id INT NOT NULL,
-    is_allowed BOOLEAN NOT NULL, -- TRUE = force allow, FALSE = force deny
-    FOREIGN KEY (member_id) REFERENCES tbl_organization_members(member_id),
-    FOREIGN KEY (permission_id) REFERENCES tbl_permission(permission_id)
-);
+
 /* ---- Block new org versions for archived orgs ---- */
 CREATE TRIGGER trg_org_version_before_insert
 BEFORE INSERT ON tbl_organization_version
@@ -1026,7 +1026,6 @@ BEGIN
     END IF;
 END$$
 DELIMITER ;
-
 
 -- PROCEDURES
 use db_nuconnect;
@@ -1161,6 +1160,7 @@ BEGIN
         o.name AS organization_name,
         e.description,
         e.venue,
+        e.image,
         e.start_time,
         e.end_time,
         e.start_date,
@@ -2092,12 +2092,13 @@ CREATE DEFINER='admin'@'%' PROCEDURE SubmitEvaluation(IN p_json_data JSON)
 BEGIN
     DECLARE v_evaluation_id INT;
     DECLARE v_user_id VARCHAR(200);
+    DECLARE v_user_email VARCHAR(100);
     DECLARE v_event_id INT;
     DECLARE v_question_count INT;
     DECLARE v_counter INT DEFAULT 0;
     DECLARE v_question_id INT;
     DECLARE v_answer TEXT;
-    
+
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
         ROLLBACK;
@@ -2106,9 +2107,15 @@ BEGIN
 
     START TRANSACTION;
 
-    -- Extract basic information
-    SET v_user_id = JSON_UNQUOTE(JSON_EXTRACT(p_json_data, '$.user_id'));
+    -- Extract user_email and event_id from JSON
+    SET v_user_email = JSON_UNQUOTE(JSON_EXTRACT(p_json_data, '$.user_email'));
     SET v_event_id = CAST(JSON_UNQUOTE(JSON_EXTRACT(p_json_data, '$.event_id')) AS UNSIGNED);
+
+    -- Resolve user_id from user_email
+    SELECT user_id INTO v_user_id FROM tbl_user WHERE email = v_user_email LIMIT 1;
+    IF v_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'User not found for provided email';
+    END IF;
 
     -- Create evaluation record
     INSERT INTO tbl_evaluation (event_id, user_id)
@@ -3710,7 +3717,7 @@ DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetEvents()
 BEGIN
     SELECT 
-        e.event_id as id,
+        e.event_id AS id,
         e.title,
         e.description,
         e.image,
@@ -3726,7 +3733,15 @@ BEGIN
         e.venue,
         e.organization_id,
         o.name AS organization_name,
-        rc.cycle_number,
+        -- Get the org_version_id for this event's org/cycle, then get the cycle_number for that version
+        (
+            SELECT rc.org_version_id
+            FROM tbl_renewal_cycle rc
+            WHERE rc.organization_id = e.organization_id
+              AND rc.cycle_number = e.cycle_number
+            LIMIT 1
+        ) AS organization_version_id,
+        e.cycle_number,
         e.status,
         e.type,
         e.user_id,
@@ -3744,8 +3759,7 @@ BEGIN
             WHERE ec.event_id = e.event_id
         ) AS collaborators
     FROM tbl_event e
-    LEFT JOIN tbl_organization o ON e.organization_id = o.organization_id
-    LEFT JOIN tbl_renewal_cycle rc ON e.organization_id = rc.organization_id AND e.cycle_number = rc.cycle_number;
+    LEFT JOIN tbl_organization o ON e.organization_id = o.organization_id;
 END $$
 DELIMITER ;
 
@@ -13401,6 +13415,15 @@ DELIMITER ;
 
 
 -- INDEXES
+
+-- for reporting and performance
+CREATE INDEX idx_transaction_date ON tbl_transaction(transaction_date);
+CREATE INDEX idx_transaction_status ON tbl_transaction(status);
+CREATE INDEX idx_transaction_user ON tbl_transaction(user_id);
+CREATE INDEX idx_transaction_type ON tbl_transaction(transaction_type_id);
+CREATE INDEX idx_transaction_payment_type ON tbl_transaction(payment_type_id);
+CREATE INDEX idx_transaction_category ON tbl_transaction(category_id);
+CREATE INDEX idx_transaction_archived ON tbl_transaction(archived_at);
 
 CREATE INDEX idx_org_members_user ON tbl_organization_members(user_id);
 CREATE INDEX idx_event_program ON tbl_event_course(program_id);

@@ -15,16 +15,27 @@ const authMiddleware = async (req, res, next) => {
     if (err) {
       return res.status(401).json({ message: "Invalid token" });
     }
+    // Adjust for new decoded structure
+    const userInfo = decoded.result?.[0]?.user_info;
+    if (!userInfo) {
+      return res.status(401).json({ message: "Invalid token structure" });
+    }
     req.user = {
-      id: decoded.result.user_id,
-      email: decoded.result.email,
-      first_name: decoded.result.f_name,
-      last_name: decoded.result.l_name,
+      email: userInfo.email,
+      first_name: userInfo.f_name,
+      last_name: userInfo.l_name,
+      role: userInfo.role,
+      program_id: userInfo.program_id,
+      program_name: userInfo.program_name,
+      permissions: userInfo.permissions,
+      organizations: userInfo.organizations,
+      pending_application: userInfo.pending_application,
     };
-    Auth.id = decoded.result.user_id;
-    Auth.first_name = decoded.result.f_name;
-    Auth.last_name = decoded.result.l_name;
-    req.userId = decoded.result.user_id;
+    Auth.id = userInfo.email; // If you have user_id, use it here
+    Auth.email = userInfo.email;
+    Auth.first_name = userInfo.f_name;
+    Auth.last_name = userInfo.l_name;
+    req.userId = userInfo.email; // If you have user_id, use it here
     next();
   });
 };

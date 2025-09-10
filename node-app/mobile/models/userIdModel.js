@@ -12,7 +12,7 @@ const Auth = {
 
   set last_name(value) {
     this.lastname = value;
-  },
+  },  
 
   get get_first_name() {
     return this.firstname;
