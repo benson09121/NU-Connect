@@ -103,6 +103,7 @@ async function create(req, res) {
   }
 }
 
+// controllers/transactions.js (update)
 async function update(req, res) {
   try {
     const {
@@ -110,182 +111,234 @@ async function update(req, res) {
       payment_description,
       amount,
       status,
-      proof_image, // may be a string path or undefined
+      proof_image,            // explicit path (optional)
       receipt_no,
       category_code,
       payer_name,
       payee_name,
       payer_name_override,
       event_remarks,
-      organization_id, // needed for file path if uploading new file
-      remove_proof_image // flag to indicate if proof image should be removed
+      organization_id,        // preferred for pathing when uploading a new file
+      remove_proof_image      // flag to remove existing file+db (true/1/'true')
     } = req.body;
 
-    if (!transaction_id) return res.status(400).json({ message: 'transaction_id required' });
+    if (!transaction_id) {
+      return res.status(400).json({ message: 'transaction_id required' });
+    }
 
-    // Fetch current transaction for existing proof_image path
-    let currentTransaction = null;
+    // ---- helpers (same behavior as create) ----
+    const sanitizeOrgId = (id) => {
+      if (id === null || id === undefined) return null;
+      
+      // Convert to string and trim
+      let s = String(id).trim();
+      
+      // If it's already a clean number, return it
+      if (/^\d+$/.test(s)) {
+        return s;
+      }
+      
+      // Extract only digits
+      const digits = s.replace(/[^0-9]/g, '');
+      
+      // Return null if no digits found, otherwise return the first numeric part
+      if (!digits.length) return null;
+      
+      // Take only the first sequence of digits to prevent concatenation
+      const firstNumber = digits.match(/^\d+/);
+      return firstNumber ? firstNumber[0] : null;
+    };
+
+    const buildOrgTxnPaths = (safeOrgId, filename) => {
+      if (safeOrgId) {
+        const dir = path.join('/app/organizations', safeOrgId, 'transactions');
+        const rel = path.posix.join('organizations', safeOrgId, 'transactions', filename);
+        return { absDir: dir, relPath: rel, absPath: path.join(dir, filename) };
+      } else {
+        const dir = path.join('/app/organizations', 'system', 'transactions');
+        const rel = path.posix.join('organizations', 'system', 'transactions', filename);
+        return { absDir: dir, relPath: rel, absPath: path.join(dir, filename) };
+      }
+    };
+
+    // ---- fetch existing transaction (for current image & deriving org) ----
+    let current = { proof_image: null };
+    let derivedOrgId = null;
     try {
       const conn = await pool.getConnection();
       try {
-        const [currentRows] = await conn.query(
+        const [curRows] = await conn.query(
           'SELECT proof_image FROM tbl_transaction WHERE transaction_id = ?',
           [transaction_id]
         );
-        if (currentRows.length > 0) {
-          currentTransaction = currentRows[0];
+        if (curRows.length) current = curRows[0];
+
+        // derive org_id if not provided:
+        if (!organization_id) {
+          // 1) membership link
+          const [mRows] = await conn.query(
+            'SELECT organization_id FROM tbl_transaction_membership WHERE transaction_id = ? LIMIT 1',
+            [transaction_id]
+          );
+          if (mRows.length && mRows[0].organization_id != null) {
+            derivedOrgId = mRows[0].organization_id;
+          } else {
+            // 2) event link → event org
+            const [eRows] = await conn.query(
+              `SELECT e.organization_id
+                 FROM tbl_transaction_event te
+                 JOIN tbl_event e ON e.event_id = te.event_id
+                WHERE te.transaction_id = ? LIMIT 1`,
+              [transaction_id]
+            );
+            if (eRows.length && eRows[0].organization_id != null) {
+              derivedOrgId = eRows[0].organization_id;
+            }
+          }
         }
       } finally {
         conn.release();
       }
     } catch (err) {
-      console.warn('Could not fetch current transaction:', err.message);
+      console.warn('[transactions.update] Could not fetch current/derive org:', err.message);
     }
 
-    // Handle file upload and removal logic
-    let proofImagePath = undefined; // Initialize as undefined to distinguish from null
+    // choose org for STORAGE (same as create)
+    const chosenOrgId = organization_id ?? derivedOrgId ?? null;
+    const safeOrgId = sanitizeOrgId(chosenOrgId);
 
-    // Check if new file is uploaded FIRST (this takes priority)
+    // ----- FILE HANDLING (KEEP / REPLACE / REMOVE) -----
+    let proofImagePath = undefined; // undefined => "no change" to DB
+    const removeFlag =
+      remove_proof_image === true ||
+      remove_proof_image === 1 ||
+      remove_proof_image === '1' ||
+      (typeof remove_proof_image === 'string' && remove_proof_image.toLowerCase() === 'true');
+
+    // REPLACE: new upload takes priority
     if (req.files && req.files.proof_image) {
       const file = req.files.proof_image;
       const ext = path.extname(file.name).toLowerCase().trim();
       const allowedExt = ['.jpg', '.jpeg', '.png', '.gif', '.pdf', '.webp'];
-      
+
       if (!allowedExt.includes(ext)) {
-        return res.status(400).json({ 
-          message: 'Invalid file type. Allowed: jpg, jpeg, png, gif, pdf, webp' 
+        return res.status(400).json({
+          message: 'Invalid file type. Allowed: jpg, jpeg, png, gif, pdf, webp',
         });
       }
 
-      // Remove old file if it exists BEFORE saving new one
-      if (currentTransaction?.proof_image) {
+      // delete old first (best-effort)
+      if (current?.proof_image) {
         try {
-          const oldFilePath = path.join('/app', currentTransaction.proof_image);
+          const oldFilePath = path.join('/app', current.proof_image);
           if (fs.existsSync(oldFilePath)) {
             fs.unlinkSync(oldFilePath);
-            console.log('Removed old proof image:', oldFilePath);
+            console.log('[transactions.update] Removed old proof image:', oldFilePath);
           }
         } catch (deleteErr) {
-          console.warn('Failed to delete old proof image:', deleteErr.message);
+          console.warn('[transactions.update] Failed to delete old proof image:', deleteErr.message);
         }
       }
 
-      // Determine save path based on organization_id
-      let relPath, absPath;
-      if (organization_id) {
-        const safeOrgId = String(organization_id).replace(/[^0-9]/g, '');
-        if (!safeOrgId) {
-          return res.status(400).json({ message: 'Invalid organization_id' });
-        }
-        const safeName = `proof-${Date.now()}${ext}`;
-        const orgDir = path.join('/app/organizations', safeOrgId, 'transactions');
-        if (!fs.existsSync(orgDir)) {
-          fs.mkdirSync(orgDir, { recursive: true });
-        }
-        absPath = path.join(orgDir, safeName);
-        relPath = path.posix.join('organizations', safeOrgId, 'transactions', safeName);
-      } else {
-        // For SDAO/system users, store in a generic system directory
-        const sysDir = path.join('/app/organizations', 'system', 'transactions');
-        if (!fs.existsSync(sysDir)) {
-          fs.mkdirSync(sysDir, { recursive: true });
-        }
-        const safeName = `proof-${Date.now()}${ext}`;
-        absPath = path.join(sysDir, safeName);
-        relPath = path.posix.join('organizations', 'system', 'transactions', safeName);
-      }
-
-      // Save new file
+      // save new using the SAME directory logic as "create"
+      const filename = `proof-${Date.now()}${ext}`;
+      const { absDir, absPath, relPath } = buildOrgTxnPaths(safeOrgId, filename);
       try {
+        if (!fs.existsSync(absDir)) fs.mkdirSync(absDir, { recursive: true });
         fs.writeFileSync(absPath, file.data);
         proofImagePath = relPath;
-        console.log('Saved new proof image:', absPath);
+        console.log('[transactions.update] Saved new proof image:', absPath);
       } catch (saveErr) {
-        console.error('Failed to save new proof image:', saveErr);
-        return res.status(500).json({ 
-          message: 'Failed to save uploaded file' 
-        });
+        console.error('[transactions.update] Failed to save uploaded file:', saveErr);
+        return res.status(500).json({ message: 'Failed to save uploaded file' });
       }
     }
-    // If no new file uploaded, check if removal is requested
-    else if (remove_proof_image === true || remove_proof_image === 'true') {
-      if (currentTransaction?.proof_image) {
+    // REMOVE: explicit request
+    else if (removeFlag) {
+      if (current?.proof_image) {
         try {
-          const oldFilePath = path.join('/app', currentTransaction.proof_image);
+          const oldFilePath = path.join('/app', current.proof_image);
           if (fs.existsSync(oldFilePath)) {
             fs.unlinkSync(oldFilePath);
-            console.log('Removed proof image per request:', oldFilePath);
+            console.log('[transactions.update] Removed proof image per request:', oldFilePath);
           }
         } catch (deleteErr) {
-          console.warn('Failed to delete proof image:', deleteErr.message);
+          console.warn('[transactions.update] Failed to delete proof image:', deleteErr.message);
         }
       }
-      proofImagePath = null; // Explicitly set to null to remove from database
+      proofImagePath = null; // set column to NULL
     }
-    // If proof_image was explicitly provided in body (URL/path), use that value
+    // KEEP / CHANGE-BY-PATH: client provided a path string explicitly
     else if (proof_image !== undefined && proof_image !== null) {
-      // If it's different from current, remove old file
-      if (currentTransaction?.proof_image && currentTransaction.proof_image !== proof_image) {
+      // if changed, delete the previous file
+      if (current?.proof_image && current.proof_image !== proof_image) {
         try {
-          const oldFilePath = path.join('/app', currentTransaction.proof_image);
+          const oldFilePath = path.join('/app', current.proof_image);
           if (fs.existsSync(oldFilePath)) {
             fs.unlinkSync(oldFilePath);
-            console.log('Removed old proof image (path changed):', oldFilePath);
+            console.log('[transactions.update] Removed old proof image (path changed):', oldFilePath);
           }
         } catch (deleteErr) {
-          console.warn('Failed to delete old proof image:', deleteErr.message);
+          console.warn('[transactions.update] Failed to delete old proof image:', deleteErr.message);
         }
       }
+      // trust the provided path (e.g., moving between orgs is out-of-scope here)
       proofImagePath = proof_image;
     }
-    // Otherwise, keep the existing proof_image (don't modify it)
-    // proofImagePath remains undefined, which won't update the field
+    // else: no change
 
-    console.log('Update transaction - proof image handling:', {
+    console.log('[transactions.update] Proof image handling:', {
+      orgForStorage: safeOrgId ?? 'system',
       hasNewFile: !!(req.files && req.files.proof_image),
-      removeRequested: remove_proof_image === true || remove_proof_image === 'true',
+      removeRequested: removeFlag,
       proofImageFromBody: proof_image,
       finalProofImagePath: proofImagePath,
-      currentProofImage: currentTransaction?.proof_image
+      currentProofImage: current?.proof_image,
     });
 
-    // CRITICAL FIX: Convert undefined to null for SQL compatibility
-    // MySQL procedures cannot handle JavaScript undefined values
-    const sqlSafeProofImage = proofImagePath === undefined ? null : proofImagePath;
-
+    // Execute SP (tri-state handled in proc with removeFlag + p_proof_image)
     const raw = await transactionModel.updateTransaction({
       transaction_id,
       user_email: req.user.email,
       payment_description,
       amount,
       status,
-      proof_image: sqlSafeProofImage,  // Use null instead of undefined
+      proof_image: proofImagePath ?? null, // null/''/path → proc decides with removeFlag
       receipt_no,
       category_code,
       payer_name,
       payee_name,
       payer_name_override,
-      event_remarks
+      event_remarks,
+      remove_proof_image: removeFlag,
     });
 
     const payload = unwrapSPResult(raw);
 
-    // Publish real-time event
+    // Publish real-time update
     try {
       publishToChannel('transactions', {
         operation: 'UPDATE',
         data: payload,
         user: req.user?.email || null,
-        timestamp: new Date()
+        timestamp: new Date(),
       });
+      if (payload?.transaction_id) {
+        publishToChannel(`transactions:${payload.transaction_id}`, {
+          operation: 'UPDATE',
+          data: payload,
+          user: req.user?.email || null,
+          timestamp: new Date(),
+        });
+      }
     } catch (pubErr) {
       console.warn('[transactions.update] publish error:', pubErr.message);
     }
 
-    res.json(payload);
+    return res.json(payload);
   } catch (e) {
     console.error('[transactions.update]', e);
-    res.status(500).json({ message: e.sqlMessage || e.message });
+    return res.status(500).json({ message: e.sqlMessage || e.message });
   }
 }
 

@@ -60,66 +60,54 @@ async function createTransaction(data, proofImagePath = null) {
   }
 }
 
+// models/transactionModel.js
 async function updateTransaction(params) {
   const conn = await pool.getConnection();
   try {
-    // Destructure parameters with defaults
     const {
       transaction_id,
       user_email,
       payment_description = null,
       amount = null,
       status = null,
-      proof_image = null,
+      proof_image = null,          // new path if replacing; null/'' ignored unless remove flag = 1
       receipt_no = null,
       category_code = null,
       payer_name = null,
       payee_name = null,
       payer_name_override = null,
-      event_remarks = null
+      event_remarks = null,
+      remove_proof_image = 0       // boolean-like (0/1)
     } = params;
 
-    // Ensure all parameters are properly defined (use null instead of undefined)
+    const removeFlag =
+      remove_proof_image === true ||
+      remove_proof_image === 1 ||
+      remove_proof_image === '1' ||
+      (typeof remove_proof_image === 'string' && remove_proof_image.toLowerCase() === 'true')
+        ? 1 : 0;
+
+    const sql = `CALL UpdateTransaction(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
     const safeParams = [
       transaction_id || null,
       user_email || null,
       payment_description,
       amount,
       status,
-      proof_image,
+      proof_image,          // may be null/''/path (proc handles tri-state with removeFlag)
       receipt_no,
       category_code,
       payer_name,
       payee_name,
       payer_name_override,
-      event_remarks
+      event_remarks,
+      removeFlag
     ];
 
-    // Log the parameters for debugging
-    console.log('[transactionModel.updateTransaction] Parameters:', {
-      transaction_id,
-      user_email,
-      payment_description,
-      amount,
-      status,
-      proof_image,
-      receipt_no,
-      category_code,
-      payer_name,
-      payee_name,
-      payer_name_override,
-      event_remarks
-    });
-
-    // Build the SQL query with proper parameter placeholders
-    const sql = `CALL UpdateTransaction(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
-    
     console.log('[transactionModel.updateTransaction] SQL:', sql);
-    console.log('[transactionModel.updateTransaction] Safe params:', safeParams);
+    console.log('[transactionModel.updateTransaction] Params:', safeParams);
 
-    // Execute the stored procedure
     const [results] = await conn.query(sql, safeParams);
-    
     return results;
   } catch (error) {
     console.error('[transactionModel.updateTransaction] Error:', error);
