@@ -206,4 +206,66 @@ router.get(
     organizationsController.getAllApplicationsByOrganization
 );
 
-module.exports = router
+router.get(
+    '/organization-committee-roles',
+    middleware.validateAzureJWT,
+    organizationsController.getOrganizationCommitteeRoles
+);
+
+router.get(
+    '/organization-executives-roles',
+    middleware.validateAzureJWT,
+    organizationsController.getOrganizationExecutives
+);
+
+router.get(
+    '/organization-permissions',
+    middleware.validateAzureJWT,
+    organizationsController.getOrganizationPermissions
+);
+
+router.get(
+    '/member-permission-overrides',
+    middleware.validateAzureJWT,
+    organizationsController.getMemberPermissionOverrides
+);
+
+router.get(
+  '/getEmailSuggestion-override',
+  middleware.validateAzureJWT,
+  organizationsController.getEmailSuggestionOverride
+);
+
+router.post(
+    '/add-override-permission',
+    middleware.validateAzureJWT,
+    organizationsController.addMemberPermissionOverride
+);
+
+router.post(
+    '/remove-member-permissions',
+    middleware.validateAzureJWT,
+    organizationsController.removeMemberPermissionOverride
+);
+
+router.put(
+    '/update-member-permissions',
+    middleware.validateAzureJWT,
+    organizationsController.updateMemberPermissionOverride
+);
+
+router.put('/update-committee-role-permissions',
+    middleware.validateAzureJWT,
+    middleware.hasPermission("UPDATE_COMMITTEE"),
+    organizationsController.updateCommitteePermissions
+);
+// Update executive role permissions
+router.put(
+    '/update-executive-role-permissions',
+    middleware.validateAzureJWT,
+    middleware.hasPermission("UPDATE_COMMITTEE"),
+    organizationsController.updateExecutivePermissions
+);
+
+
+module.exports = router;

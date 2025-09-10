@@ -329,22 +329,29 @@ CREATE TABLE tbl_committee (
     FOREIGN KEY (organization_id, cycle_number) REFERENCES tbl_renewal_cycle(organization_id, cycle_number) ON DELETE CASCADE
 );
 
-CREATE TABLE tbl_committee_members(
-    committee_member_id INT AUTO_INCREMENT PRIMARY KEY,
-    committee_id INT NOT NULL,
-    user_id VARCHAR(200) NOT NULL,
-    role ENUM('Committee Head', 'Committee Officer') DEFAULT 'Committee Officer',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (committee_id) REFERENCES tbl_committee(committee_id) ON DELETE CASCADE,
-    FOREIGN KEY (user_id) REFERENCES tbl_user(user_id) ON UPDATE CASCADE
-);
 
 CREATE TABLE tbl_committee_role (
     committee_role_id INT AUTO_INCREMENT PRIMARY KEY,
     committee_id INT NOT NULL,
-    role_name VARCHAR(100) NOT NULL,  -- e.g., 'Committee Head', 'Committee Member'
+    role_name ENUM('Committee Head', 'Committee Officer') DEFAULT 'Committee Officer',  -- e.g., 'Committee Head', 'Committee Member'
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (committee_id) REFERENCES tbl_committee(committee_id) ON DELETE CASCADE
+);
+
+ALTER TABLE tbl_committee_role 
+ADD CONSTRAINT unique_committee_head 
+    UNIQUE KEY (committee_id, role_name);
+
+
+CREATE TABLE tbl_committee_members(
+    committee_member_id INT AUTO_INCREMENT PRIMARY KEY,
+    committee_id INT NOT NULL,
+    user_id VARCHAR(200) NOT NULL,
+    committee_role_id INT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (committee_id) REFERENCES tbl_committee(committee_id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
+    FOREIGN KEY (committee_role_id) REFERENCES tbl_committee_role(committee_role_id) ON DELETE SET NULL
 );
 
 CREATE TABLE tbl_committee_role_permission (
@@ -355,6 +362,8 @@ CREATE TABLE tbl_committee_role_permission (
     FOREIGN KEY (committee_role_id) REFERENCES tbl_committee_role(committee_role_id) ON DELETE CASCADE,
     FOREIGN KEY (permission_id) REFERENCES tbl_permission(permission_id) ON DELETE CASCADE
 );
+
+
 
 CREATE TABLE tbl_archived_organization_members (
     archived_id INT AUTO_INCREMENT PRIMARY KEY,
@@ -931,7 +940,14 @@ CREATE TABLE tbl_ai_message (
 );
 
 
-
+CREATE TABLE tbl_member_permission_override (
+    override_id INT AUTO_INCREMENT PRIMARY KEY,
+    member_id INT NOT NULL, -- from tbl_organization_members
+    permission_id INT NOT NULL,
+    is_allowed BOOLEAN NOT NULL, -- TRUE = force allow, FALSE = force deny
+    FOREIGN KEY (member_id) REFERENCES tbl_organization_members(member_id),
+    FOREIGN KEY (permission_id) REFERENCES tbl_permission(permission_id)
+);
 
 -- PROCEDURES
 use db_nuconnect;
@@ -7425,6 +7441,7 @@ BEGIN
 END$$
 DELIMITER ;
 
+
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE UpdateExecutiveMember(
     IN p_organization_id INT,
@@ -7432,14 +7449,14 @@ CREATE DEFINER='admin'@'%' PROCEDURE UpdateExecutiveMember(
     IN p_program_name VARCHAR(200),
     IN p_role_title VARCHAR(100),
     IN p_rank_level INT,
-    IN p_action_by_email VARCHAR(100),
-    IN p_org_version_id INT
+    IN p_action_by_email VARCHAR(100)
 )
 BEGIN
     DECLARE v_user_id VARCHAR(200);
     DECLARE v_role_id INT;
     DECLARE v_rank_id INT;
     DECLARE v_executive_role_id INT;
+    DECLARE v_current_executive_role_id INT;
     DECLARE v_program_id INT;
     DECLARE v_action_by_user_id VARCHAR(200);
     DECLARE v_current_cycle INT;
@@ -7509,7 +7526,21 @@ BEGIN
     SET program_id = v_program_id, role_id = v_role_id
     WHERE user_id = v_user_id;
 
-    -- Update executive role or create if not exists (using current cycle)
+    -- Get the current executive role ID for this member
+    SELECT executive_role_id INTO v_current_executive_role_id
+    FROM tbl_organization_members
+    WHERE organization_id = p_organization_id
+      AND cycle_number = v_current_cycle
+      AND user_id = v_user_id
+      AND member_type = 'Executive'
+    LIMIT 1;
+
+    IF v_current_executive_role_id IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Executive member not found in organization';
+    END IF;
+
+    -- Check if there's already an executive role with the new title and rank
     SELECT executive_role_id INTO v_executive_role_id
     FROM tbl_executive_role
     WHERE organization_id = p_organization_id
@@ -7519,29 +7550,32 @@ BEGIN
     LIMIT 1;
 
     IF v_executive_role_id IS NULL THEN
-        INSERT INTO tbl_executive_role (
-            organization_id,
-            cycle_number,
-            role_title,
-            rank_id,
-            created_at
-        ) VALUES (
-            p_organization_id,
-            v_current_cycle,
-            p_role_title,
-            v_rank_id,
-            CURRENT_TIMESTAMP
-        );
-        SET v_executive_role_id = LAST_INSERT_ID();
+        -- No existing role with new title/rank combination, update the current role
+        UPDATE tbl_executive_role
+        SET role_title = p_role_title,
+            rank_id = v_rank_id
+        WHERE executive_role_id = v_current_executive_role_id;
+        
+        SET v_executive_role_id = v_current_executive_role_id;
+    ELSE
+        -- Role with new title/rank already exists, switch to that role
+        -- Update organization member's executive role
+        UPDATE tbl_organization_members
+        SET executive_role_id = v_executive_role_id
+        WHERE organization_id = p_organization_id
+          AND cycle_number = v_current_cycle
+          AND user_id = v_user_id
+          AND member_type = 'Executive';
+          
+        -- Check if the old role has any other members, if not, delete it
+        IF NOT EXISTS (
+            SELECT 1 FROM tbl_organization_members 
+            WHERE executive_role_id = v_current_executive_role_id
+        ) THEN
+            DELETE FROM tbl_executive_role 
+            WHERE executive_role_id = v_current_executive_role_id;
+        END IF;
     END IF;
-
-    -- Update organization member's executive role (using current cycle)
-    UPDATE tbl_organization_members
-    SET executive_role_id = v_executive_role_id
-    WHERE organization_id = p_organization_id
-      AND cycle_number = v_current_cycle
-      AND user_id = v_user_id
-      AND member_type = 'Executive';
 
     -- Log the action
     INSERT INTO tbl_logs (
@@ -7584,6 +7618,7 @@ BEGIN
         AND om.user_id = v_user_id;
 END$$
 DELIMITER ;
+
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE ArchiveExecutiveMember(
@@ -8090,23 +8125,34 @@ BEGIN
 END$$
 DELIMITER ;
 
+
 DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE GetAllCommitteeMembers(
+CREATE DEFINER=`admin`@`%` PROCEDURE GetAllCommitteeMembers(
     IN p_org_id INT,
     IN p_org_version_id INT
 )
 BEGIN
     DECLARE v_cycle_number INT;
-    -- Get the cycle_number for the given org_version_id
-    SELECT cycle_number INTO v_cycle_number
-    FROM tbl_renewal_cycle
-    WHERE org_version_id = p_org_version_id;
+
+    -- Resolve cycle_number for the given org and version (latest match if multiple)
+    SELECT rc.cycle_number
+      INTO v_cycle_number
+    FROM tbl_renewal_cycle rc
+    WHERE rc.organization_id = p_org_id
+      AND rc.org_version_id = p_org_version_id
+    ORDER BY rc.start_date DESC
+    LIMIT 1;
+
+    IF v_cycle_number IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'No matching cycle found for the given organization and version.';
+    END IF;
 
     SELECT 
         c.committee_id,
         c.name AS committee_name,
         cm.committee_member_id AS id,
-        cm.role,
+        cr.role_name AS role,               -- from role table
         cm.created_at AS member_since,
         u.user_id,
         u.f_name,
@@ -8115,152 +8161,287 @@ BEGIN
         p.name AS program_name,
         u.status AS user_status
     FROM tbl_committee c
-    JOIN tbl_committee_members cm ON c.committee_id = cm.committee_id
-    JOIN tbl_user u ON cm.user_id = u.user_id
-    LEFT JOIN tbl_program p ON u.program_id = p.program_id
+    JOIN tbl_committee_members cm 
+      ON c.committee_id = cm.committee_id
+    LEFT JOIN tbl_committee_role cr
+      ON cr.committee_role_id = cm.committee_role_id
+    JOIN tbl_user u 
+      ON cm.user_id = u.user_id
+    LEFT JOIN tbl_program p 
+      ON u.program_id = p.program_id
     WHERE c.organization_id = p_org_id
-        AND c.cycle_number = v_cycle_number
+      AND c.cycle_number = v_cycle_number
     ORDER BY 
         c.organization_id,
         c.cycle_number,
-        c.name;
+        c.name,
+        cr.role_name,
+        u.l_name,
+        u.f_name;
 END$$
 DELIMITER ;
 
-    DELIMITER $$
-    CREATE DEFINER='admin'@'%' PROCEDURE AddCommitteeMember(
-        IN p_committee_id INT,
-        IN p_user_email VARCHAR(100),
-        IN p_role ENUM('Committee Head', 'Committee Officer'),
-        IN p_action_by_email VARCHAR(100))
-    BEGIN
-        DECLARE v_action_by_user_id VARCHAR(200);
-        DECLARE v_user_id VARCHAR(200);
-        DECLARE v_committee_exists INT;
-        DECLARE v_organization_id INT;
-        DECLARE v_cycle_number INT;
-        DECLARE v_is_member INT;
-        DECLARE v_new_member_id INT;
 
-        -- Check if committee exists
-        SELECT organization_id, cycle_number 
-            INTO v_organization_id, v_cycle_number
-            FROM tbl_committee
-            WHERE committee_id = p_committee_id;
 
-            IF v_organization_id IS NULL THEN
-                SIGNAL SQLSTATE '45000' 
-                SET MESSAGE_TEXT = 'Committee not found';
-            END IF;
+DELIMITER $$
+CREATE DEFINER=`admin`@`%` PROCEDURE AddCommitteeMember(
+    IN p_committee_id INT,
+    IN p_user_email VARCHAR(100),
+    IN p_role ENUM('Committee Head', 'Committee Officer'),
+    IN p_action_by_email VARCHAR(100)
+)
+BEGIN
+    DECLARE v_action_by_user_id VARCHAR(200);
+    DECLARE v_user_id VARCHAR(200);
+    DECLARE v_organization_id INT;
+    DECLARE v_cycle_number INT;
+    DECLARE v_org_version_id INT;
+    DECLARE v_is_member INT;
+    DECLARE v_new_member_id INT;
+    DECLARE v_committee_role_id INT;
+    DECLARE v_role_name VARCHAR(50);
+    DECLARE v_web_access_permission_id INT;
+    DECLARE v_existing_permissions_count INT;
 
-        -- Get user_id of the action performer
-        SELECT user_id INTO v_action_by_user_id 
-        FROM tbl_user 
-        WHERE email = p_action_by_email 
-        LIMIT 1;
+    -- committee -> org + cycle
+    SELECT organization_id, cycle_number
+      INTO v_organization_id, v_cycle_number
+    FROM tbl_committee
+    WHERE committee_id = p_committee_id
+    LIMIT 1;
 
-        IF v_action_by_user_id IS NULL THEN
-            SIGNAL SQLSTATE '45000' 
+    IF v_organization_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' 
+            SET MESSAGE_TEXT = 'Committee not found';
+    END IF;
+
+    -- get org_version_id for this cycle (if any)
+    SELECT org_version_id INTO v_org_version_id
+    FROM tbl_renewal_cycle
+    WHERE organization_id = v_organization_id
+      AND cycle_number = v_cycle_number
+    LIMIT 1;
+
+    -- actor
+    SELECT user_id INTO v_action_by_user_id 
+    FROM tbl_user 
+    WHERE email = p_action_by_email 
+    LIMIT 1;
+
+    IF v_action_by_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' 
             SET MESSAGE_TEXT = 'Action performer not found';
-        END IF;
+    END IF;
 
-            -- Get user_id of the member to add
-        SELECT user_id INTO v_user_id 
-        FROM tbl_user 
-        WHERE email = p_user_email 
-        LIMIT 1;
+    -- user to add
+    SELECT user_id INTO v_user_id 
+    FROM tbl_user 
+    WHERE email = p_user_email 
+    LIMIT 1;
 
-        IF v_user_id IS NULL THEN
-            -- Insert new user with pending status
-            SET v_user_id = CONCAT('usr-', UUID_SHORT());
-            INSERT INTO tbl_user (
-                user_id,
-                email,
-                role_id,
-                status,
-                created_at,
-                updated_at
-            ) VALUES (
-                v_user_id,
-                p_user_email,
-                (SELECT role_id FROM tbl_role WHERE LOWER(role_name) = 'student' LIMIT 1),
-                'Pending',
-                CURRENT_TIMESTAMP,
-                CURRENT_TIMESTAMP
-            );
-        END IF;
-
-        -- Check if user is already in this committee
-        SELECT COUNT(*) INTO v_is_member
-        FROM tbl_committee_members
-        WHERE committee_id = p_committee_id
-        AND user_id = v_user_id;
-        
-        IF v_is_member > 0 THEN
-            SIGNAL SQLSTATE '45000' 
-            SET MESSAGE_TEXT = 'User is already a member of this committee';
-        END IF;
-
-        -- Add the committee member
-        INSERT INTO tbl_committee_members (
-            committee_id,
-            user_id,
-            role,
-            created_at
+    IF v_user_id IS NULL THEN
+        -- create pending student user
+        SET v_user_id = CONCAT('usr-', UUID_SHORT());
+        INSERT INTO tbl_user (
+            user_id, email, role_id, status, created_at, updated_at
         ) VALUES (
-            p_committee_id,
             v_user_id,
-            p_role,
+            p_user_email,
+            (SELECT role_id FROM tbl_role WHERE LOWER(role_name) = 'student' LIMIT 1),
+            'Pending',
+            CURRENT_TIMESTAMP,
             CURRENT_TIMESTAMP
         );
-        
-        SET v_new_member_id = LAST_INSERT_ID();
+    END IF;
 
-        -- Log the action
-            INSERT INTO tbl_logs (
-                user_id, 
-                action_type, 
-                type, 
-                meta_data,
-                timestamp
-            ) VALUES (
-                v_action_by_user_id,
-                CONCAT('Added member to committee: ', 
-                    (SELECT name FROM tbl_committee WHERE committee_id = p_committee_id)),
-                'committee_member_add',
+    -- prevent duplicate committee membership
+    SELECT COUNT(*)
+      INTO v_is_member
+    FROM tbl_committee_members
+    WHERE committee_id = p_committee_id
+      AND user_id = v_user_id;
+
+    IF v_is_member > 0 THEN
+        SIGNAL SQLSTATE '45000' 
+            SET MESSAGE_TEXT = 'User is already a member of this committee';
+    END IF;
+
+    -- ensure committee roles exist for this committee (Head, Officer)
+    INSERT IGNORE INTO tbl_committee_role (committee_id, role_name)
+    VALUES (p_committee_id, 'Committee Head'),
+           (p_committee_id, 'Committee Officer');
+
+    -- resolve role name + committee_role_id
+    SET v_role_name = CASE 
+        WHEN p_role = 'Committee Head' THEN 'Committee Head'
+        ELSE 'Committee Officer'
+    END;
+
+    SELECT committee_role_id
+      INTO v_committee_role_id
+    FROM tbl_committee_role
+    WHERE committee_id = p_committee_id
+      AND role_name = v_role_name
+    LIMIT 1;
+
+    -- Get WEB_ACCESS permission ID
+    SELECT permission_id INTO v_web_access_permission_id
+    FROM tbl_permission
+    WHERE permission_name = 'WEB_ACCESS'
+    LIMIT 1;
+
+    -- Check existing permissions for this committee role
+    SELECT COUNT(*) INTO v_existing_permissions_count
+    FROM tbl_committee_role_permission
+    WHERE committee_role_id = v_committee_role_id;
+
+    -- Handle permission assignment based on role and existing permissions
+    IF v_role_name = 'Committee Head' THEN
+        -- Committee Head: Always gets WEB_ACCESS permission
+        IF v_existing_permissions_count = 0 AND v_web_access_permission_id IS NOT NULL THEN
+            INSERT INTO tbl_committee_role_permission (committee_role_id, permission_id)
+            VALUES (v_committee_role_id, v_web_access_permission_id);
+        END IF;
+    ELSE
+        -- Committee Officer: Get permissions from existing officers or WEB_ACCESS as fallback
+        IF v_existing_permissions_count = 0 THEN
+            -- No existing permissions, check if there are other officers with permissions
+            BEGIN
+                DECLARE v_sample_officer_role_id INT DEFAULT NULL;
+                
+                -- Find another Committee Officer role with permissions in the same organization
+                SELECT cr.committee_role_id INTO v_sample_officer_role_id
+                FROM tbl_committee_role cr
+                JOIN tbl_committee c ON cr.committee_id = c.committee_id
+                WHERE c.organization_id = v_organization_id
+                  AND c.cycle_number = v_cycle_number
+                  AND cr.role_name = 'Committee Officer'
+                  AND cr.committee_role_id != v_committee_role_id
+                  AND EXISTS (
+                      SELECT 1 FROM tbl_committee_role_permission crp 
+                      WHERE crp.committee_role_id = cr.committee_role_id
+                  )
+                LIMIT 1;
+
+                IF v_sample_officer_role_id IS NOT NULL THEN
+                    -- Copy permissions from existing officer
+                    INSERT INTO tbl_committee_role_permission (committee_role_id, permission_id)
+                    SELECT v_committee_role_id, crp.permission_id
+                    FROM tbl_committee_role_permission crp
+                    WHERE crp.committee_role_id = v_sample_officer_role_id;
+                ELSE
+                    -- No existing officer permissions found, add WEB_ACCESS as default
+                    IF v_web_access_permission_id IS NOT NULL THEN
+                        INSERT INTO tbl_committee_role_permission (committee_role_id, permission_id)
+                        VALUES (v_committee_role_id, v_web_access_permission_id);
+                    END IF;
+                END IF;
+            END;
+        END IF;
+    END IF;
+
+    -- add the committee member (role-aware)
+    INSERT INTO tbl_committee_members (
+        committee_id, user_id, committee_role_id, created_at
+    ) VALUES (
+        p_committee_id, v_user_id, v_committee_role_id, CURRENT_TIMESTAMP
+    );
+
+    SET v_new_member_id = LAST_INSERT_ID();
+
+    -- ensure org membership row exists for this user (as Committee)
+    SELECT COUNT(*)
+      INTO v_is_member
+    FROM tbl_organization_members
+    WHERE organization_id = v_organization_id
+      AND cycle_number   = v_cycle_number
+      AND user_id        = v_user_id;
+
+    IF v_is_member = 0 THEN
+        INSERT INTO tbl_organization_members
+            (organization_id, cycle_number, user_id, org_version_id, member_type, status, joined_at)
+        VALUES
+            (v_organization_id, v_cycle_number, v_user_id, v_org_version_id, 'Committee', 'Active', CURRENT_TIMESTAMP);
+    END IF;
+
+    -- log action (aligned to tbl_logs schema)
+    INSERT INTO tbl_logs (
+        user_id, action_type, type, meta_data
+    ) VALUES (
+        v_action_by_user_id,
+        'COMMITTEE_MEMBER_ADD',
+        'committee_member_add',
+        JSON_OBJECT(
+            'committee_id', p_committee_id,
+            'user_id', v_user_id,
+            'committee_role', v_role_name,
+            'organization_id', v_organization_id,
+            'cycle_number', v_cycle_number,
+            'permissions_assigned', (
+                SELECT COUNT(*) FROM tbl_committee_role_permission 
+                WHERE committee_role_id = v_committee_role_id
+            )
+        )
+    );
+
+    -- return the newly added member row with enhanced information
+    SELECT 
+        c.committee_id,
+        c.name AS committee_name,
+        c.description AS committee_description,
+        cm.committee_member_id AS id,
+        cr.role_name AS role,
+        cm.created_at AS member_since,
+        u.user_id,
+        u.f_name,
+        u.l_name,
+        u.email,
+        u.status AS user_status,
+        p.name AS program_name,
+        p.abbreviation AS program_abbreviation,
+        col.name AS college_name,
+        om.member_id AS organization_member_id,
+        om.status AS organization_membership_status,
+        -- Committee role permissions
+        (
+            SELECT JSON_ARRAYAGG(
                 JSON_OBJECT(
-                    'committee_id', p_committee_id,
-                    'user_id', v_user_id,
-                    'role', p_role,
-                    'organization_id', v_organization_id,
-                    'cycle_number', v_cycle_number
-                ),
-                CURRENT_TIMESTAMP
-            );
-        
-        SELECT 
-            c.committee_id,
-            c.name AS committee_name,
-            cm.committee_member_id AS id,
-            cm.role,
-            cm.created_at AS member_since,
-            u.user_id,
-            u.f_name,
-            u.l_name,
-            u.email,
-            p.name AS program_name,
-            u.status AS user_status,
-            om.member_id
-        FROM tbl_committee c
-        JOIN tbl_committee_members cm ON c.committee_id = cm.committee_id
-        JOIN tbl_user u ON cm.user_id = u.user_id
-        JOIN tbl_organization_members om ON u.user_id = om.user_id
-        LEFT JOIN tbl_program p ON u.program_id = p.program_id
-        WHERE c.organization_id = v_organization_id
-            AND c.cycle_number = v_cycle_number
-            AND cm.committee_member_id = v_new_member_id;
-    END$$
-    DELIMITER ;
+                    'permission_id', perm.permission_id,
+                    'permission_name', perm.permission_name,
+                    'permission_scope', perm.scope
+                )
+            )
+            FROM tbl_committee_role_permission crp
+            JOIN tbl_permission perm ON crp.permission_id = perm.permission_id
+            WHERE crp.committee_role_id = cr.committee_role_id
+        ) AS role_permissions,
+        -- Organization info
+        o.name AS organization_name,
+        o.logo AS organization_logo
+    FROM tbl_committee c
+    JOIN tbl_committee_members cm 
+      ON c.committee_id = cm.committee_id
+    LEFT JOIN tbl_committee_role cr
+      ON cr.committee_role_id = cm.committee_role_id
+    JOIN tbl_user u 
+      ON cm.user_id = u.user_id
+    JOIN tbl_organization_members om 
+      ON om.user_id = u.user_id
+     AND om.organization_id = v_organization_id
+     AND om.cycle_number = v_cycle_number
+    LEFT JOIN tbl_program p 
+      ON u.program_id = p.program_id
+    LEFT JOIN tbl_college col
+      ON p.college_id = col.college_id
+    JOIN tbl_organization o
+      ON o.organization_id = v_organization_id
+    WHERE c.organization_id = v_organization_id
+      AND c.cycle_number = v_cycle_number
+      AND cm.committee_member_id = v_new_member_id;
+END$$
+DELIMITER ;
+
+
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE ScanTicket(
@@ -8547,12 +8728,12 @@ BEGIN
 END$$
 DELIMITER ;
 
+
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE UpdateCommitteeMember(
     IN p_committee_member_id INT,
     IN p_new_role ENUM('Committee Head', 'Committee Officer'),
-    IN p_action_by_email VARCHAR(100),
-    IN p_new_committee_id INT
+    IN p_action_by_email VARCHAR(100)
 )
 BEGIN
     DECLARE v_action_by_user_id VARCHAR(200);
@@ -8581,27 +8762,25 @@ BEGIN
         SET MESSAGE_TEXT = 'Committee member not found';
     END IF;
 
-    -- Update the committee and role
+    -- Update the role
     UPDATE tbl_committee_members
-    SET committee_id = p_new_committee_id,
-        role = p_new_role
+    SET role = p_new_role
     WHERE committee_member_id = p_committee_member_id;
 
     -- Log the action
     INSERT INTO tbl_logs (
         user_id,
-        action_type,
+        action,
         type,
         meta_data,
         timestamp
     ) VALUES (
         v_action_by_user_id,
-        CONCAT('Updated committee member: ', v_user_id, ' moved from committee ', v_committee_id, ' to ', p_new_committee_id, ' and role from ', v_old_role, ' to ', p_new_role),
+        CONCAT('Updated committee member role: ', v_user_id, ' in committee ', v_committee_id, ' from ', v_old_role, ' to ', p_new_role),
         'committee_member_update',
         JSON_OBJECT(
             'committee_member_id', p_committee_member_id,
-            'old_committee_id', v_committee_id,
-            'new_committee_id', p_new_committee_id,
+            'committee_id', v_committee_id,
             'user_id', v_user_id,
             'old_role', v_old_role,
             'new_role', p_new_role
@@ -8639,9 +8818,12 @@ BEGIN
     DECLARE v_action_by_user_id VARCHAR(200);
     DECLARE v_committee_id INT;
     DECLARE v_user_id VARCHAR(200);
-    DECLARE v_role ENUM('Committee Head', 'Committee Officer');
+    DECLARE v_role_name VARCHAR(50);
     DECLARE v_organization_id INT;
     DECLARE v_cycle_number INT;
+    DECLARE v_org_member_id INT;
+    DECLARE v_member_id_to_archive INT;
+    DECLARE v_member_id_source VARCHAR(30);
 
     -- Get user_id of the action performer
     SELECT user_id INTO v_action_by_user_id
@@ -8654,47 +8836,80 @@ BEGIN
         SET MESSAGE_TEXT = 'Action performer not found';
     END IF;
 
-    -- Get current member info
-    SELECT cm.committee_id, cm.user_id, cm.role, c.organization_id, c.cycle_number
-    INTO v_committee_id, v_user_id, v_role, v_organization_id, v_cycle_number
+    -- Get current member info (role via tbl_committee_role)
+    SELECT cm.committee_id,
+           cm.user_id,
+           cr.role_name,
+           c.organization_id,
+           c.cycle_number
+    INTO v_committee_id,
+         v_user_id,
+        v_role_name,
+         v_organization_id,
+         v_cycle_number
     FROM tbl_committee_members cm
-    JOIN tbl_committee c ON cm.committee_id = c.committee_id
-    WHERE cm.committee_member_id = p_committee_member_id;
+    JOIN tbl_committee c
+      ON cm.committee_id = c.committee_id
+    LEFT JOIN tbl_committee_role cr
+      ON cr.committee_role_id = cm.committee_role_id
+    WHERE cm.committee_member_id = p_committee_member_id
+    LIMIT 1;
 
     IF v_committee_id IS NULL THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'Committee member not found';
     END IF;
 
-    -- Archive the member
+    -- Try to find the corresponding organization member_id (for archive linkage)
+    SELECT om.member_id
+      INTO v_org_member_id
+    FROM tbl_organization_members om
+    WHERE om.organization_id = v_organization_id
+      AND om.cycle_number   = v_cycle_number
+      AND om.user_id        = v_user_id
+    LIMIT 1;
+
+    -- Decide which member_id to archive (prefer organization_members.member_id)
+    IF v_org_member_id IS NOT NULL THEN
+        SET v_member_id_to_archive = v_org_member_id;
+        SET v_member_id_source = 'organization_member';
+    ELSE
+        -- Fallback: use the committee_member_id to keep an audit trail
+        SET v_member_id_to_archive = p_committee_member_id;
+        SET v_member_id_source = 'committee_member';
+    END IF;
+
+    -- Archive the member into tbl_archived_organization_members
     INSERT INTO tbl_archived_organization_members (
         member_id,
         organization_id,
         cycle_number,
         user_id,
         member_type,
+        executive_role_id,
         committee_id,
         committee_role,
         archived_at,
         archived_by
     ) VALUES (
-        p_committee_member_id,
+        v_member_id_to_archive,
         v_organization_id,
         v_cycle_number,
         v_user_id,
         'Committee',
+        NULL,
         v_committee_id,
-        v_role,
+        v_role_name,
         CURRENT_TIMESTAMP,
         v_action_by_user_id
     );
 
-    
+    -- Return the record being archived (before deletion)
     SELECT 
         c.committee_id,
         c.name AS committee_name,
         cm.committee_member_id AS id,
-        cm.role,
+        cr.role_name AS role,
         cm.created_at AS member_since,
         u.user_id,
         u.f_name,
@@ -8704,36 +8919,40 @@ BEGIN
         u.status AS user_status
     FROM tbl_committee c
     JOIN tbl_committee_members cm ON c.committee_id = cm.committee_id
+    LEFT JOIN tbl_committee_role cr ON cr.committee_role_id = cm.committee_role_id
     JOIN tbl_user u ON cm.user_id = u.user_id
     LEFT JOIN tbl_program p ON u.program_id = p.program_id
     WHERE cm.committee_member_id = p_committee_member_id;
+
+    -- Remove from active committee members
     DELETE FROM tbl_committee_members
     WHERE committee_member_id = p_committee_member_id;
 
-    -- Log the action
+    -- Log the action (aligned to tbl_logs schema)
     INSERT INTO tbl_logs (
         user_id,
         action_type,
         type,
-        meta_data,
-        timestamp
+        meta_data
     ) VALUES (
         v_action_by_user_id,
-        CONCAT('Archived committee member: ', v_user_id, ' from committee ', v_committee_id),
+        'COMMITTEE_MEMBER_ARCHIVE',
         'committee_member_archive',
         JSON_OBJECT(
             'committee_member_id', p_committee_member_id,
             'committee_id', v_committee_id,
             'user_id', v_user_id,
-            'role', v_role,
+            'committee_role', v_role_name,
             'organization_id', v_organization_id,
             'cycle_number', v_cycle_number,
-            'reason', p_reason
-        ),
-        CURRENT_TIMESTAMP
+            'reason', p_reason,
+            'member_id_to_archive', v_member_id_to_archive,
+            'member_id_source', v_member_id_source
+        )
     );
 END$$
 DELIMITER ;
+
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetPendingOrganizationMembers(
@@ -12925,6 +13144,1068 @@ ELSE
 END IF;
 END$$
 DELIMITER ;
+
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationExecutives(
+    IN p_organization_id INT,
+    IN p_org_version_id INT
+)
+BEGIN
+    DECLARE v_cycle_number INT;
+    
+    -- Get the cycle_number for the given org_version_id and organization_id
+    SELECT cycle_number INTO v_cycle_number
+    FROM tbl_renewal_cycle
+    WHERE org_version_id = p_org_version_id 
+    AND organization_id = p_organization_id;
+
+    IF v_cycle_number IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'No renewal cycle found for the given organization and version';
+    END IF;
+
+    SELECT JSON_ARRAYAGG(
+        JSON_OBJECT(
+            'role_type', 'Executive',
+            'id', er.executive_role_id,
+            'role_name', er.role_title,
+            'rank_id', er.rank_id,
+            'rank_title', exec_rank.default_title,
+            'rank_level', exec_rank.rank_level,
+            'permissions', (
+                SELECT JSON_ARRAYAGG(
+                    JSON_OBJECT(
+                        'permission_id', p.permission_id,
+                        'permission_name', p.permission_name,
+                        'permission_scope', p.scope,
+                        'permission_source', 'rank'
+                    )
+                )
+                FROM tbl_rank_permission rp
+                JOIN tbl_permission p ON rp.permission_id = p.permission_id
+                WHERE rp.rank_id = exec_rank.rank_id
+            )
+        )
+    ) AS executive_ranks_permissions
+    FROM tbl_executive_role er
+    JOIN tbl_executive_rank exec_rank ON er.rank_id = exec_rank.rank_id
+    WHERE er.organization_id = p_organization_id
+      AND er.cycle_number = v_cycle_number
+    ORDER BY exec_rank.rank_level ASC;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationCommitteeRoles(
+    IN p_organization_id INT,
+    IN p_org_version_id INT
+)
+BEGIN
+    DECLARE v_cycle_number INT;
+    
+    -- Get the cycle_number for the given org_version_id and organization_id
+    SELECT cycle_number INTO v_cycle_number
+    FROM tbl_renewal_cycle
+    WHERE org_version_id = p_org_version_id 
+    AND organization_id = p_organization_id;
+
+    IF v_cycle_number IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'No renewal cycle found for the given organization and version';
+    END IF;
+
+    SELECT JSON_ARRAYAGG(
+        JSON_OBJECT(
+            'role_type', 'Committee',
+            'id', cr.committee_role_id,
+            'role_name', cr.role_name,
+            'committee_id', c.committee_id,
+            'committee_name', c.name,
+            'permissions', (
+                SELECT JSON_ARRAYAGG(
+                    JSON_OBJECT(
+                        'permission_id', p.permission_id,
+                        'permission_name', p.permission_name,
+                        'permission_scope', p.scope,
+                        'permission_source', 'committee_role'
+                    )
+                )
+                FROM tbl_committee_role_permission crp
+                JOIN tbl_permission p ON crp.permission_id = p.permission_id
+                WHERE crp.committee_role_id = cr.committee_role_id
+            )
+        )
+    ) AS committee_ranks_permissions
+    FROM tbl_committee c
+    JOIN tbl_committee_role cr ON c.committee_id = cr.committee_id
+    WHERE c.organization_id = p_organization_id
+      AND c.cycle_number = v_cycle_number
+    ORDER BY c.name ASC, cr.role_name ASC;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationPermissions()
+BEGIN
+    SELECT * FROM tbl_permission WHERE scope = "Organization";
+END $$
+DELIMITER ;
+
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE UpdateExecutivePermissions(
+    IN p_executive_rank_id INT,
+    IN p_permissions JSON
+)
+BEGIN
+    DECLARE v_permission_id INT;
+    DECLARE v_permission_name VARCHAR(200);
+    DECLARE v_counter INT DEFAULT 0;
+    DECLARE v_array_length INT;
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        RESIGNAL;
+    END;
+
+    START TRANSACTION;
+
+    -- Verify that the executive rank exists
+    IF NOT EXISTS (SELECT 1 FROM tbl_executive_rank WHERE rank_id = p_executive_rank_id) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Executive rank not found';
+    END IF;
+
+    -- Delete existing permissions for this rank
+    DELETE FROM tbl_rank_permission 
+    WHERE rank_id = p_executive_rank_id;
+
+    -- Get the length of the permissions array
+    SET v_array_length = JSON_LENGTH(p_permissions);
+
+    -- Insert new permissions if any exist
+    WHILE v_counter < v_array_length DO
+        -- Extract permission name as string (using JSON_UNQUOTE)
+        SET v_permission_name = JSON_UNQUOTE(JSON_EXTRACT(p_permissions, CONCAT('$[', v_counter, ']')));
+        
+        -- Get permission_id from permission_name
+        SELECT permission_id INTO v_permission_id 
+        FROM tbl_permission 
+        WHERE permission_name = v_permission_name
+        LIMIT 1;
+        
+        -- Only insert if permission exists
+        IF v_permission_id IS NOT NULL THEN
+            INSERT INTO tbl_rank_permission (rank_id, permission_id)
+            VALUES (p_executive_rank_id, v_permission_id);
+        END IF;
+        
+        -- Reset v_permission_id for next iteration
+        SET v_permission_id = NULL;
+        SET v_counter = v_counter + 1;
+    END WHILE;
+
+    COMMIT;
+
+    -- Return the updated executive roles in array format (without wrapper object)
+    SELECT 
+        er.executive_role_id AS id,
+        er.role_title AS role_name,
+        exec_rank.rank_id,
+        exec_rank.default_title AS rank_title,
+        exec_rank.rank_level,
+        'Executive' AS role_type,
+        (
+            SELECT JSON_ARRAYAGG(
+                JSON_OBJECT(
+                    'permission_id', p.permission_id,
+                    'permission_name', p.permission_name,
+                    'permission_scope', p.scope,
+                    'permission_source', 'rank'
+                )
+            )
+            FROM tbl_rank_permission rp
+            JOIN tbl_permission p ON rp.permission_id = p.permission_id
+            WHERE rp.rank_id = exec_rank.rank_id
+        ) AS permissions
+    FROM tbl_executive_role er
+    JOIN tbl_executive_rank exec_rank ON er.rank_id = exec_rank.rank_id
+    WHERE exec_rank.rank_id = p_executive_rank_id
+    LIMIT 1;
+
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE UpdateCommitteePermissions(
+    IN p_committee_id INT,
+    IN p_role_type ENUM('Committee Head', 'Committee Officer'),
+    IN p_permissions JSON
+)
+BEGIN
+    DECLARE v_committee_role_id INT;
+    DECLARE v_permission_id INT;
+    DECLARE v_permission_name VARCHAR(200);
+    DECLARE v_counter INT DEFAULT 0;
+    DECLARE v_array_length INT;
+    DECLARE v_organization_id INT;
+    DECLARE v_cycle_number INT;
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        RESIGNAL;
+    END;
+
+    START TRANSACTION;
+
+    -- Get the committee_role_id for the given committee and role type
+    SELECT committee_role_id INTO v_committee_role_id
+    FROM tbl_committee_role
+    WHERE committee_id = p_committee_id AND role_name = p_role_type
+    LIMIT 1;
+
+    IF v_committee_role_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Committee role not found for the given committee and role type';
+    END IF;
+
+    -- Get organization_id and cycle_number for the return query
+    SELECT c.organization_id, c.cycle_number 
+    INTO v_organization_id, v_cycle_number
+    FROM tbl_committee c
+    WHERE c.committee_id = p_committee_id
+    LIMIT 1;
+
+    -- Delete existing permissions for this committee role
+    DELETE FROM tbl_committee_role_permission 
+    WHERE committee_role_id = v_committee_role_id;
+
+    -- Get the length of the permissions array
+    SET v_array_length = JSON_LENGTH(p_permissions);
+
+    -- Insert new permissions if any exist
+    WHILE v_counter < v_array_length DO
+        SET v_permission_name = JSON_UNQUOTE(JSON_EXTRACT(p_permissions, CONCAT('$[', v_counter, ']')));
+        
+        -- Get permission_id from permission_name
+        SELECT permission_id INTO v_permission_id 
+        FROM tbl_permission 
+        WHERE permission_name = v_permission_name
+        LIMIT 1;
+        
+        -- Only insert if permission exists
+        IF v_permission_id IS NOT NULL THEN
+            INSERT INTO tbl_committee_role_permission (committee_role_id, permission_id)
+            VALUES (v_committee_role_id, v_permission_id);
+        END IF;
+        
+        SET v_counter = v_counter + 1;
+    END WHILE;
+
+    COMMIT;
+
+    -- Return the updated committee roles with permissions for the entire organization
+    SELECT JSON_ARRAYAGG(
+        JSON_OBJECT(
+            'role_type', 'Committee',
+            'id', cr.committee_role_id,
+            'role_name', cr.role_name,
+            'committee_id', c.committee_id,
+            'committee_name', c.name,
+            'permissions', (
+                SELECT JSON_ARRAYAGG(
+                    JSON_OBJECT(
+                        'permission_id', p.permission_id,
+                        'permission_name', p.permission_name,
+                        'permission_scope', p.scope,
+                        'permission_source', 'committee_role'
+                    )
+                )
+                FROM tbl_committee_role_permission crp
+                JOIN tbl_permission p ON crp.permission_id = p.permission_id
+                WHERE crp.committee_role_id = cr.committee_role_id
+            )
+        )
+    ) AS committee_ranks_permissions
+    FROM tbl_committee c
+    JOIN tbl_committee_role cr ON c.committee_id = cr.committee_id
+    WHERE c.organization_id = v_organization_id
+      AND c.cycle_number = v_cycle_number
+    ORDER BY c.name ASC, cr.role_name ASC;
+
+END$$
+DELIMITER ;
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetMemberPermissionOverrides(
+    IN p_organization_id INT,
+    IN p_org_version_id INT
+)
+BEGIN
+    DECLARE v_cycle_number INT;
+    
+    -- Get the cycle_number for the given org_version_id and organization_id
+    SELECT cycle_number INTO v_cycle_number
+    FROM tbl_renewal_cycle
+    WHERE org_version_id = p_org_version_id 
+    AND organization_id = p_organization_id;
+
+    IF v_cycle_number IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'No renewal cycle found for the given organization and version';
+    END IF;
+
+    -- Get all members who have permission overrides, grouped by user with their permissions
+    SELECT 
+        om.member_id as id,
+        om.user_id,
+        CONCAT(u.f_name, ' ', u.l_name) AS member_name,
+        u.f_name,
+        u.l_name,
+        u.email AS member_email,
+        om.member_type,
+        -- Executive role details (if applicable)
+        er.role_title AS executive_role,
+        exec_rank.rank_level AS executive_rank_level,
+        exec_rank.default_title AS executive_rank_title,
+        -- Committee details (if applicable)
+        GROUP_CONCAT(DISTINCT c.name ORDER BY c.name SEPARATOR ', ') AS committee_names,
+        GROUP_CONCAT(DISTINCT cr.role_name ORDER BY cr.role_name SEPARATOR ', ') AS committee_roles,
+        -- Program details
+        prog.name AS program_name,
+        prog.abbreviation AS program_abbreviation,
+        -- Member status and join date
+        om.status AS member_status,
+        om.joined_at,
+        -- All permission overrides for this user as JSON array
+        JSON_ARRAYAGG(
+            JSON_OBJECT(
+                'override_id', mpo.override_id,
+                'permission_id', mpo.permission_id,
+                'permission_name', p.permission_name,
+                'permission_scope', p.scope,
+                'is_allowed', mpo.is_allowed,
+                'override_type', CASE 
+                    WHEN mpo.is_allowed = TRUE THEN 'Force Allow'
+                    ELSE 'Force Deny'
+                END
+            )
+        ) AS permission_overrides,
+        -- Count of total overrides for this user
+        COUNT(mpo.override_id) AS total_overrides
+    FROM tbl_member_permission_override mpo
+    JOIN tbl_organization_members om ON mpo.member_id = om.member_id
+    JOIN tbl_user u ON om.user_id = u.user_id
+    JOIN tbl_permission p ON mpo.permission_id = p.permission_id
+    LEFT JOIN tbl_program prog ON u.program_id = prog.program_id
+    -- Executive role joins (for executives)
+    LEFT JOIN tbl_executive_role er ON om.executive_role_id = er.executive_role_id
+    LEFT JOIN tbl_executive_rank exec_rank ON er.rank_id = exec_rank.rank_id
+    -- Committee joins (for committee members)
+    LEFT JOIN tbl_committee_members cm ON cm.user_id = om.user_id
+    LEFT JOIN tbl_committee c ON cm.committee_id = c.committee_id 
+        AND c.organization_id = p_organization_id 
+        AND c.cycle_number = v_cycle_number
+    LEFT JOIN tbl_committee_role cr ON cm.committee_role_id = cr.committee_role_id
+    WHERE om.organization_id = p_organization_id
+      AND om.cycle_number = v_cycle_number
+      AND om.status = 'Active'
+    GROUP BY 
+        om.member_id,
+        om.user_id,
+        u.f_name,
+        u.l_name,
+        u.email,
+        om.member_type,
+        er.role_title,
+        exec_rank.rank_level,
+        exec_rank.default_title,
+        prog.name,
+        prog.abbreviation,
+        om.status,
+        om.joined_at
+    ORDER BY 
+        u.l_name, 
+        u.f_name;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetEmailSuggestionOverride(
+    IN p_organization_id INT,
+    IN p_organization_version_id INT,
+    IN p_search_pattern VARCHAR(255)
+)
+BEGIN
+    DECLARE v_cycle_number INT;
+    
+    -- Get the cycle_number for the given org_version_id and organization_id
+    SELECT cycle_number INTO v_cycle_number
+    FROM tbl_renewal_cycle
+    WHERE org_version_id = p_organization_version_id 
+    AND organization_id = p_organization_id;
+
+    IF v_cycle_number IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'No renewal cycle found for the given organization and version';
+    END IF;
+
+    -- Normalize search pattern for case-insensitive matching
+    SET p_search_pattern = LOWER(TRIM(COALESCE(p_search_pattern, '')));
+
+    -- Get all active organization members who don't have permission overrides
+    -- and match the search pattern (email or name)
+    SELECT DISTINCT
+        u.user_id,
+        u.f_name,  -- Added to SELECT list
+        u.l_name,  -- Added to SELECT list
+        CONCAT(u.f_name, ' ', u.l_name) AS name,
+        u.email,
+        COALESCE(p.name, 'Unknown Program') AS program_name,
+        COALESCE(p.abbreviation, 'N/A') AS program_abbreviation,
+        om.member_type,
+        om.member_id AS id,
+        -- Executive role details (if applicable)
+        er.role_title AS executive_role,
+        exec_rank.rank_level AS executive_rank_level,
+        exec_rank.default_title AS executive_rank_title,
+        -- Committee details (if applicable)
+        GROUP_CONCAT(DISTINCT c.name ORDER BY c.name SEPARATOR ', ') AS committees,
+        GROUP_CONCAT(DISTINCT cr.role_name ORDER BY cr.role_name SEPARATOR ', ') AS committee_roles,
+        -- Member status and join date
+        om.status AS member_status,
+        om.joined_at,
+        -- Add priority field to SELECT list for ordering
+        CASE 
+            WHEN LOWER(u.email) = p_search_pattern THEN 1
+            WHEN LOWER(CONCAT(u.f_name, ' ', u.l_name)) = p_search_pattern THEN 2
+            WHEN LOWER(u.email) LIKE CONCAT(p_search_pattern, '%') THEN 3
+            WHEN LOWER(CONCAT(u.f_name, ' ', u.l_name)) LIKE CONCAT(p_search_pattern, '%') THEN 4
+            ELSE 5
+        END AS search_priority
+    FROM tbl_organization_members om
+    JOIN tbl_user u ON om.user_id = u.user_id
+    LEFT JOIN tbl_program p ON u.program_id = p.program_id
+    -- Executive role joins (for executives)
+    LEFT JOIN tbl_executive_role er ON om.executive_role_id = er.executive_role_id
+    LEFT JOIN tbl_executive_rank exec_rank ON er.rank_id = exec_rank.rank_id
+    -- Committee joins (for committee members)
+    LEFT JOIN tbl_committee_members cm ON cm.user_id = om.user_id
+    LEFT JOIN tbl_committee c ON cm.committee_id = c.committee_id 
+        AND c.organization_id = p_organization_id 
+        AND c.cycle_number = v_cycle_number
+    LEFT JOIN tbl_committee_role cr ON cm.committee_role_id = cr.committee_role_id
+    WHERE om.organization_id = p_organization_id
+      AND om.cycle_number = v_cycle_number
+      AND om.status = 'Active'
+      -- Exclude users who already have permission overrides
+      AND NOT EXISTS (
+          SELECT 1 
+          FROM tbl_member_permission_override mpo 
+          WHERE mpo.member_id = om.member_id
+      )
+      -- Exclude users with rank 1 (President) executive role
+      AND NOT (om.member_type = 'Executive' AND exec_rank.rank_level = 1)
+      -- Search filter: match email or full name (case-insensitive)
+      AND (
+          p_search_pattern = '' 
+          OR LOWER(u.email) LIKE CONCAT('%', p_search_pattern, '%')
+          OR LOWER(CONCAT(u.f_name, ' ', u.l_name)) LIKE CONCAT('%', p_search_pattern, '%')
+          OR LOWER(u.f_name) LIKE CONCAT('%', p_search_pattern, '%')
+          OR LOWER(u.l_name) LIKE CONCAT('%', p_search_pattern, '%')
+      )
+    GROUP BY 
+        u.user_id, 
+        u.f_name, 
+        u.l_name, 
+        u.email, 
+        p.name, 
+        p.abbreviation, 
+        om.member_type,
+        om.member_id,
+        er.role_title,
+        exec_rank.rank_level,
+        exec_rank.default_title,
+        om.status,
+        om.joined_at
+    ORDER BY 
+        -- Use the search_priority field from SELECT list
+        search_priority,
+        om.member_type DESC, -- Executives first, then Committee, then Member
+        exec_rank.rank_level ASC, -- For executives, order by rank level
+        u.l_name, 
+        u.f_name
+    LIMIT 50; -- Limit results for performance
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE AddMemberPermissionOverride(
+    IN p_email VARCHAR(100),
+    IN p_permissions JSON,
+    IN p_organization_id INT,
+    IN p_organization_version_id INT,
+    IN p_action_by_email VARCHAR(100)
+)
+BEGIN
+    DECLARE v_user_id VARCHAR(200);
+    DECLARE v_member_id INT;
+    DECLARE v_cycle_number INT;
+    DECLARE v_action_by_user_id VARCHAR(200);
+    DECLARE v_permission_id INT;
+    DECLARE v_permission_name VARCHAR(200);
+    DECLARE v_is_allowed BOOLEAN;
+    DECLARE v_counter INT DEFAULT 0;
+    DECLARE v_array_length INT;
+    DECLARE v_permission_obj JSON;
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        RESIGNAL;
+    END;
+
+    START TRANSACTION;
+
+    -- Get the cycle_number for the given org_version_id and organization_id
+    SELECT cycle_number INTO v_cycle_number
+    FROM tbl_renewal_cycle
+    WHERE org_version_id = p_organization_version_id 
+    AND organization_id = p_organization_id;
+
+    IF v_cycle_number IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'No renewal cycle found for the given organization and version';
+    END IF;
+
+    -- Get action performer user_id
+    SELECT user_id INTO v_action_by_user_id
+    FROM tbl_user
+    WHERE email = p_action_by_email
+    LIMIT 1;
+
+    IF v_action_by_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Action performer not found';
+    END IF;
+
+    -- Get user_id from email
+    SELECT user_id INTO v_user_id
+    FROM tbl_user
+    WHERE email = p_email
+    LIMIT 1;
+
+    IF v_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'User not found';
+    END IF;
+
+    -- Get member_id from organization members
+    SELECT member_id INTO v_member_id
+    FROM tbl_organization_members
+    WHERE organization_id = p_organization_id
+      AND cycle_number = v_cycle_number
+      AND user_id = v_user_id
+      AND status = 'Active'
+    LIMIT 1;
+
+    IF v_member_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'User is not an active member of this organization';
+    END IF;
+
+    -- Check if user already has permission overrides
+    IF EXISTS (
+        SELECT 1 FROM tbl_member_permission_override 
+        WHERE member_id = v_member_id
+    ) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'User already has permission overrides';
+    END IF;
+
+    -- Get the length of the permissions array
+    SET v_array_length = JSON_LENGTH(p_permissions);
+
+    -- Insert permission overrides
+    WHILE v_counter < v_array_length DO
+        -- Extract permission object
+        SET v_permission_obj = JSON_EXTRACT(p_permissions, CONCAT('$[', v_counter, ']'));
+        
+        -- Extract permission name and is_allowed from the object
+        SET v_permission_name = JSON_UNQUOTE(JSON_EXTRACT(v_permission_obj, '$.permission_name'));
+        SET v_is_allowed = JSON_EXTRACT(v_permission_obj, '$.is_allowed');
+        
+        -- Get permission_id from permission_name
+        SELECT permission_id INTO v_permission_id 
+        FROM tbl_permission 
+        WHERE permission_name = v_permission_name
+        LIMIT 1;
+        
+        -- Only insert if permission exists
+        IF v_permission_id IS NOT NULL THEN
+            INSERT INTO tbl_member_permission_override (member_id, permission_id, is_allowed)
+            VALUES (v_member_id, v_permission_id, v_is_allowed);
+        END IF;
+        
+        -- Reset variables for next iteration
+        SET v_permission_id = NULL;
+        SET v_counter = v_counter + 1;
+    END WHILE;
+
+    -- Log the action
+    INSERT INTO tbl_logs (
+        user_id,
+        action_type,
+        type,
+        meta_data,
+        timestamp
+    ) VALUES (
+        v_action_by_user_id,
+        CONCAT('Added permission overrides for member: ', p_email),
+        'member_permission_override_add',
+        JSON_OBJECT(
+            'organization_id', p_organization_id,
+            'cycle_number', v_cycle_number,
+            'member_id', v_member_id,
+            'user_id', v_user_id,
+            'permissions_count', v_array_length,
+            'target_email', p_email
+        ),
+        CURRENT_TIMESTAMP
+    );
+
+    COMMIT;
+
+    -- Return the updated entry formatted for pub/sub with member_id as id
+  -- ...existing code...
+
+    -- Return the updated entry formatted for pub/sub with member_id as id
+    SELECT 
+        om.member_id as id,
+        om.user_id,
+        CONCAT(u.f_name, ' ', u.l_name) AS member_name,
+        u.f_name,
+        u.l_name,
+        u.email AS member_email,
+        om.member_type,
+        -- Executive role details (if applicable)
+        er.role_title AS executive_role,
+        exec_rank.rank_level AS executive_rank_level,
+        exec_rank.default_title AS executive_rank_title,
+        -- Committee details (if applicable)
+        GROUP_CONCAT(DISTINCT c.name ORDER BY c.name SEPARATOR ', ') AS committee_names,
+        GROUP_CONCAT(DISTINCT cr.role_name ORDER BY cr.role_name SEPARATOR ', ') AS committee_roles,
+        -- Program details
+        prog.name AS program_name,
+        prog.abbreviation AS program_abbreviation,
+        -- Member status and join date
+        om.status AS member_status,
+        om.joined_at,
+        -- All permission overrides for this user as JSON array
+        JSON_ARRAYAGG(
+            JSON_OBJECT(
+                'override_id', mpo.override_id,
+                'permission_id', mpo.permission_id,
+                'permission_name', p.permission_name,
+                'permission_scope', p.scope,
+                'is_allowed', mpo.is_allowed,
+                'override_type', CASE 
+                    WHEN mpo.is_allowed = TRUE THEN 'Force Allow'
+                    ELSE 'Force Deny'
+                END
+            )
+        ) AS permission_overrides,
+        -- Count of total overrides for this user
+        COUNT(mpo.override_id) AS total_overrides
+    FROM tbl_member_permission_override mpo
+    JOIN tbl_organization_members om ON mpo.member_id = om.member_id
+    JOIN tbl_user u ON om.user_id = u.user_id
+    JOIN tbl_permission p ON mpo.permission_id = p.permission_id
+    LEFT JOIN tbl_program prog ON u.program_id = prog.program_id
+    -- Executive role joins (for executives)
+    LEFT JOIN tbl_executive_role er ON om.executive_role_id = er.executive_role_id
+    LEFT JOIN tbl_executive_rank exec_rank ON er.rank_id = exec_rank.rank_id
+    -- Committee joins (for committee members)
+    LEFT JOIN tbl_committee_members cm ON cm.user_id = om.user_id
+    LEFT JOIN tbl_committee c ON cm.committee_id = c.committee_id 
+        AND c.organization_id = p_organization_id 
+        AND c.cycle_number = v_cycle_number
+    LEFT JOIN tbl_committee_role cr ON cm.committee_role_id = cr.committee_role_id
+    WHERE om.organization_id = p_organization_id
+      AND om.cycle_number = v_cycle_number
+      AND om.status = 'Active'
+      AND om.member_id = v_member_id
+    GROUP BY 
+        om.member_id,
+        om.user_id,
+        u.f_name,
+        u.l_name,
+        u.email,
+        om.member_type,
+        er.role_title,
+        exec_rank.rank_level,
+        exec_rank.default_title,
+        prog.name,
+        prog.abbreviation,
+        om.status,
+        om.joined_at
+    ORDER BY 
+        u.l_name, 
+        u.f_name;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE UpdateMemberPermissionOverride(
+    IN p_member_id INT,
+    IN p_organization_id INT,
+    IN p_organization_version_id INT,
+    IN p_permission_lists JSON,
+    IN p_action_by_email VARCHAR(100)
+)
+BEGIN
+    DECLARE v_cycle_number INT;
+    DECLARE v_action_by_user_id VARCHAR(200);
+    DECLARE v_permission_id INT;
+    DECLARE v_permission_name VARCHAR(200);
+    DECLARE v_is_allowed BOOLEAN;
+    DECLARE v_counter INT DEFAULT 0;
+    DECLARE v_array_length INT;
+    DECLARE v_permission_obj JSON;
+    DECLARE v_user_id VARCHAR(200);
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        RESIGNAL;
+    END;
+
+    START TRANSACTION;
+
+    -- Get the cycle_number for the given org_version_id and organization_id
+    SELECT cycle_number INTO v_cycle_number
+    FROM tbl_renewal_cycle
+    WHERE org_version_id = p_organization_version_id 
+    AND organization_id = p_organization_id;
+
+    IF v_cycle_number IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'No renewal cycle found for the given organization and version';
+    END IF;
+
+    -- Get action performer user_id
+    SELECT user_id INTO v_action_by_user_id
+    FROM tbl_user
+    WHERE email = p_action_by_email
+    LIMIT 1;
+
+    IF v_action_by_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Action performer not found';
+    END IF;
+
+    -- Verify member exists and is active in the organization
+    SELECT om.user_id INTO v_user_id
+    FROM tbl_organization_members om
+    WHERE om.member_id = p_member_id
+      AND om.organization_id = p_organization_id
+      AND om.cycle_number = v_cycle_number
+      AND om.status = 'Active'
+    LIMIT 1;
+
+    IF v_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Member not found or not active in this organization';
+    END IF;
+
+    -- Delete existing permission overrides for this member
+    DELETE FROM tbl_member_permission_override 
+    WHERE member_id = p_member_id;
+
+    -- Get the length of the permissions array
+    SET v_array_length = JSON_LENGTH(p_permission_lists);
+
+    -- Insert new permission overrides
+    WHILE v_counter < v_array_length DO
+        -- Extract permission object
+        SET v_permission_obj = JSON_EXTRACT(p_permission_lists, CONCAT('$[', v_counter, ']'));
+        
+        -- Extract permission name and is_allowed from the object
+        SET v_permission_name = JSON_UNQUOTE(JSON_EXTRACT(v_permission_obj, '$.permission_name'));
+        SET v_is_allowed = JSON_EXTRACT(v_permission_obj, '$.is_allowed');
+        
+        -- Get permission_id from permission_name
+        SELECT permission_id INTO v_permission_id 
+        FROM tbl_permission 
+        WHERE permission_name = v_permission_name
+        LIMIT 1;
+        
+        -- Only insert if permission exists
+        IF v_permission_id IS NOT NULL THEN
+            INSERT INTO tbl_member_permission_override (member_id, permission_id, is_allowed)
+            VALUES (p_member_id, v_permission_id, v_is_allowed);
+        END IF;
+        
+        -- Reset variables for next iteration
+        SET v_permission_id = NULL;
+        SET v_counter = v_counter + 1;
+    END WHILE;
+
+    -- Log the action
+    INSERT INTO tbl_logs (
+        user_id,
+        action_type,
+        type,
+        meta_data,
+        timestamp
+    ) VALUES (
+        v_action_by_user_id,
+        CONCAT('Updated permission overrides for member_id: ', p_member_id),
+        'member_permission_override_update',
+        JSON_OBJECT(
+            'organization_id', p_organization_id,
+            'cycle_number', v_cycle_number,
+            'member_id', p_member_id,
+            'user_id', v_user_id,
+            'permissions_count', v_array_length
+        ),
+        CURRENT_TIMESTAMP
+    );
+
+    COMMIT;
+
+    -- Return the updated member entry formatted for pub/sub with member_id as id
+  -- ...existing code...
+
+ SELECT 
+        om.member_id as id,
+        om.user_id,
+        CONCAT(u.f_name, ' ', u.l_name) AS member_name,
+        u.f_name,
+        u.l_name,
+        u.email AS member_email,
+        om.member_type,
+        -- Executive role details (if applicable)
+        er.role_title AS executive_role,
+        exec_rank.rank_level AS executive_rank_level,
+        exec_rank.default_title AS executive_rank_title,
+        -- Committee details (if applicable)
+        GROUP_CONCAT(DISTINCT c.name ORDER BY c.name SEPARATOR ', ') AS committee_names,
+        GROUP_CONCAT(DISTINCT cr.role_name ORDER BY cr.role_name SEPARATOR ', ') AS committee_roles,
+        -- Program details
+        prog.name AS program_name,
+        prog.abbreviation AS program_abbreviation,
+        -- Member status and join date
+        om.status AS member_status,
+        om.joined_at,
+        -- All permission overrides for this user as JSON array
+        JSON_ARRAYAGG(
+            JSON_OBJECT(
+                'override_id', mpo.override_id,
+                'permission_id', mpo.permission_id,
+                'permission_name', p.permission_name,
+                'permission_scope', p.scope,
+                'is_allowed', mpo.is_allowed,
+                'override_type', CASE 
+                    WHEN mpo.is_allowed = TRUE THEN 'Force Allow'
+                    ELSE 'Force Deny'
+                END
+            )
+        ) AS permission_overrides,
+        -- Count of total overrides for this user
+        COUNT(mpo.override_id) AS total_overrides
+    FROM tbl_member_permission_override mpo
+    JOIN tbl_organization_members om ON mpo.member_id = om.member_id
+    JOIN tbl_user u ON om.user_id = u.user_id
+    JOIN tbl_permission p ON mpo.permission_id = p.permission_id
+    LEFT JOIN tbl_program prog ON u.program_id = prog.program_id
+    -- Executive role joins (for executives)
+    LEFT JOIN tbl_executive_role er ON om.executive_role_id = er.executive_role_id
+    LEFT JOIN tbl_executive_rank exec_rank ON er.rank_id = exec_rank.rank_id
+    -- Committee joins (for committee members)
+    LEFT JOIN tbl_committee_members cm ON cm.user_id = om.user_id
+    LEFT JOIN tbl_committee c ON cm.committee_id = c.committee_id 
+        AND c.organization_id = p_organization_id 
+        AND c.cycle_number = v_cycle_number
+    LEFT JOIN tbl_committee_role cr ON cm.committee_role_id = cr.committee_role_id
+    WHERE om.organization_id = p_organization_id
+      AND om.cycle_number = v_cycle_number
+      AND om.status = 'Active'
+      AND om.member_id = p_member_id -- <-- FIXED: was v_member_id, should be p_member_id
+    GROUP BY 
+        om.member_id,
+        om.user_id,
+        u.f_name,
+        u.l_name,
+        u.email,
+        om.member_type,
+        er.role_title,
+        exec_rank.rank_level,
+        exec_rank.default_title,
+        prog.name,
+        prog.abbreviation,
+        om.status,
+        om.joined_at
+    ORDER BY 
+        u.l_name, 
+        u.f_name;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE RemoveMemberPermissionOverride(
+    IN p_member_id INT,
+    IN p_organization_id INT,
+    IN p_organization_version_id INT,
+    IN p_action_by_email VARCHAR(100)
+)
+BEGIN
+    DECLARE v_cycle_number INT;
+    DECLARE v_action_by_user_id VARCHAR(200);
+    DECLARE v_user_id VARCHAR(200);
+    DECLARE v_member_email VARCHAR(100);
+    DECLARE v_member_name VARCHAR(255);
+    DECLARE v_override_count INT DEFAULT 0;
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        RESIGNAL;
+    END;
+
+    START TRANSACTION;
+
+    -- Get the cycle_number for the given org_version_id and organization_id
+    SELECT cycle_number INTO v_cycle_number
+    FROM tbl_renewal_cycle
+    WHERE org_version_id = p_organization_version_id 
+    AND organization_id = p_organization_id;
+
+    IF v_cycle_number IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'No renewal cycle found for the given organization and version';
+    END IF;
+
+    -- Get action performer user_id
+    SELECT user_id INTO v_action_by_user_id
+    FROM tbl_user
+    WHERE email = p_action_by_email
+    LIMIT 1;
+
+    IF v_action_by_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Action performer not found';
+    END IF;
+
+    -- Verify member exists and get member details
+    SELECT om.user_id, u.email, CONCAT(u.f_name, ' ', u.l_name)
+    INTO v_user_id, v_member_email, v_member_name
+    FROM tbl_organization_members om
+    JOIN tbl_user u ON om.user_id = u.user_id
+    WHERE om.member_id = p_member_id
+      AND om.organization_id = p_organization_id
+      AND om.cycle_number = v_cycle_number
+      AND om.status = 'Active'
+    LIMIT 1;
+
+    IF v_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Member not found or not active in this organization';
+    END IF;
+
+    -- Check if member has any permission overrides
+    SELECT COUNT(*) INTO v_override_count
+    FROM tbl_member_permission_override
+    WHERE member_id = p_member_id;
+
+    IF v_override_count = 0 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Member does not have any permission overrides to remove';
+    END IF;
+
+    SELECT 
+        om.member_id as id,
+        om.user_id,
+        CONCAT(u.f_name, ' ', u.l_name) AS member_name,
+        u.f_name,
+        u.l_name,
+        u.email AS member_email,
+        om.member_type,
+        -- Executive role details (if applicable)
+        er.role_title AS executive_role,
+        exec_rank.rank_level AS executive_rank_level,
+        exec_rank.default_title AS executive_rank_title,
+        -- Committee details (if applicable)
+        GROUP_CONCAT(DISTINCT c.name ORDER BY c.name SEPARATOR ', ') AS committee_names,
+        GROUP_CONCAT(DISTINCT cr.role_name ORDER BY cr.role_name SEPARATOR ', ') AS committee_roles,
+        -- Program details
+        prog.name AS program_name,
+        prog.abbreviation AS program_abbreviation,
+        -- Member status and join date
+        om.status AS member_status,
+        om.joined_at,
+        -- All permission overrides for this user as JSON array
+        JSON_ARRAYAGG(
+            JSON_OBJECT(
+                'override_id', mpo.override_id,
+                'permission_id', mpo.permission_id,
+                'permission_name', p.permission_name,
+                'permission_scope', p.scope,
+                'is_allowed', mpo.is_allowed,
+                'override_type', CASE 
+                    WHEN mpo.is_allowed = TRUE THEN 'Force Allow'
+                    ELSE 'Force Deny'
+                END
+            )
+        ) AS permission_overrides,
+        -- Count of total overrides for this user
+        COUNT(mpo.override_id) AS total_overrides
+    FROM tbl_member_permission_override mpo
+    JOIN tbl_organization_members om ON mpo.member_id = om.member_id
+    JOIN tbl_user u ON om.user_id = u.user_id
+    JOIN tbl_permission p ON mpo.permission_id = p.permission_id
+    LEFT JOIN tbl_program prog ON u.program_id = prog.program_id
+    -- Executive role joins (for executives)
+    LEFT JOIN tbl_executive_role er ON om.executive_role_id = er.executive_role_id
+    LEFT JOIN tbl_executive_rank exec_rank ON er.rank_id = exec_rank.rank_id
+    -- Committee joins (for committee members)
+    LEFT JOIN tbl_committee_members cm ON cm.user_id = om.user_id
+    LEFT JOIN tbl_committee c ON cm.committee_id = c.committee_id 
+        AND c.organization_id = p_organization_id 
+        AND c.cycle_number = v_cycle_number
+    LEFT JOIN tbl_committee_role cr ON cm.committee_role_id = cr.committee_role_id
+    WHERE om.organization_id = p_organization_id
+      AND om.cycle_number = v_cycle_number
+      AND om.status = 'Active'
+      AND om.member_id = p_member_id
+    GROUP BY 
+        om.member_id,
+        om.user_id,
+        u.f_name,
+        u.l_name,
+        u.email,
+        om.member_type,
+        er.role_title,
+        exec_rank.rank_level,
+        exec_rank.default_title,
+        prog.name,
+        prog.abbreviation,
+        om.status,
+        om.joined_at
+    ORDER BY 
+        u.l_name, 
+        u.f_name;
+
+    -- Delete all permission overrides for this member
+    DELETE FROM tbl_member_permission_override 
+    WHERE member_id = p_member_id;
+
+    -- Log the action
+    INSERT INTO tbl_logs (
+        user_id,
+        action_type,
+        type,
+        meta_data,
+        timestamp
+    ) VALUES (
+        v_action_by_user_id,
+        CONCAT('Removed all permission overrides for member: ', v_member_name, ' (', v_member_email, ')'),
+        'member_permission_override_remove',
+        JSON_OBJECT(
+            'organization_id', p_organization_id,
+            'cycle_number', v_cycle_number,
+            'member_id', p_member_id,
+            'user_id', v_user_id,
+            'removed_overrides_count', v_override_count,
+            'target_email', v_member_email,
+            'target_name', v_member_name
+        ),
+        CURRENT_TIMESTAMP
+    );
+
+    COMMIT;
+END$$
+DELIMITER ;
+
 
 -- INDEXES
 
