@@ -5,6 +5,13 @@ const middleware = require('../../middlewares/middleWare');
 
 router.get('/logs', middleware.validateAzureJWT, middleware.hasPermission("VIEW_LOGS"), logController.getLogs);
 
+router.get(
+    '/org-relevant-logs',
+    middleware.validateAzureJWT,
+    middleware.hasPermission("VIEW_LOGS"),
+    logController.getOrgRelevantLogs
+);
+
 // system counts endpoint
 router.get('/system-counts', middleware.validateAzureJWT, middleware.hasPermission("VIEW_LOGS"), logController.getSystemCounts);
 

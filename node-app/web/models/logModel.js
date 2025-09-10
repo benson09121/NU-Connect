@@ -14,10 +14,25 @@ async function getLogs({ user_id = null, type = null, start_date = null, end_dat
     }
 }
 
-async function getSystemCounts() {
+async function getOrgRelevantLogs({ user_id = null, type = null, start_date = null, end_date = null } = {}) {
     const connection = await pool.getConnection();
     try {
-        const [rows] = await connection.query('CALL GetSystemCounts();');
+        const [rows] = await connection.query(
+            'CALL GetOrgRelevantLogs(?, ?, ?, ?);',
+            [user_id, type, start_date, end_date]
+        );
+        return (Array.isArray(rows) && Array.isArray(rows[0])) ? rows[0] : rows[0] || [];
+    } finally {
+        connection.release();
+    }
+}
+
+async function getSystemCounts(user_id = null) {
+    const connection = await pool.getConnection();
+    try {
+        // Always pass a parameter, even if null
+        const [rows] = await connection.query('CALL GetSystemCounts(?);', [user_id]);
+        // The result is a single row
         return (Array.isArray(rows) && Array.isArray(rows[0])) ? rows[0][0] : rows[0] || {};
     } finally {
         connection.release();
@@ -47,6 +62,7 @@ async function createLog(p_user_email, p_action, p_type, p_meta_data = null, p_r
 
 module.exports = {
     getLogs,
+    getOrgRelevantLogs,
     getSystemCounts,
     createLog
 };

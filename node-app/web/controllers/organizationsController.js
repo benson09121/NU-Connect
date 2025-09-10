@@ -647,7 +647,10 @@ async function checkOrganizationEmails(req, res) {
 
 async function archiveOrganization(req, res) {
     try {
-        const { organization_id, reason } = req.body;
+        // Log the incoming request body for debugging
+        console.log('[archiveOrganization] Received:', JSON.stringify(req.body, null, 2));
+
+        const { organization_id, reason, user_email } = req.body;
         if (!organization_id) {
             return res.status(400).json({ message: 'Organization ID is required.' });
         }
@@ -655,8 +658,9 @@ async function archiveOrganization(req, res) {
             return res.status(400).json({ message: 'Archive reason is required.' });
         }
 
-        // Lookup user_id by email
-        const user = await organizationsModel.getUserByEmail(req.user.email);
+        // Use user_email from body if provided, else fallback to req.user.email
+        const emailToUse = user_email || req.user?.email;
+        const user = await organizationsModel.getUserByEmail(emailToUse);
         if (!user || !user.user_id) {
             return res.status(404).json({ message: 'User not found.' });
         }
@@ -664,8 +668,6 @@ async function archiveOrganization(req, res) {
         const result = await organizationsModel.archiveOrganization(organization_id, user.user_id, reason.trim());
 
         // Real-time notification: treat archive as a DELETE operation for consumers
-        // Use the same channel as getOrganizations (organizations_SDAO, organizations_Program Chair_X, etc.)
-        // Broadcast to all relevant roles (example: SDAO, Program Chair, Adviser, Student)
         const channels = [
             'organizations_all',
             `organizations_Program Chair_${result?.base_program_id || ''}`,
@@ -686,21 +688,29 @@ async function archiveOrganization(req, res) {
 
         res.status(200).json({ message: 'Organization archived successfully.', result });
     } catch (error) {
+        console.error('[archiveOrganization] Error:', error);
+        if (error.sqlMessage) {
+            console.error('[archiveOrganization] SQL Error:', error.sqlMessage);
+        }
         res.status(500).json({
-            error: error.message || "An error occurred while archiving the organization.",
+            error: error.message || error.sqlMessage || "An error occurred while archiving the organization.",
         });
     }
 }
 
 async function unarchiveOrganization(req, res) {
     try {
-        const { organization_id, reason } = req.body;
+        // Log the incoming request body for debugging
+        console.log('[unarchiveOrganization] Received:', JSON.stringify(req.body, null, 2));
+
+        const { organization_id, reason, user_email } = req.body;
         if (!organization_id) {
             return res.status(400).json({ message: 'Organization ID is required.' });
         }
 
-        // Lookup user_id by email
-        const user = await organizationsModel.getUserByEmail(req.user.email);
+        // Use user_email from body if provided, else fallback to req.user.email
+        const emailToUse = user_email || req.user?.email;
+        const user = await organizationsModel.getUserByEmail(emailToUse);
         if (!user || !user.user_id) {
             return res.status(404).json({ message: 'User not found.' });
         }
@@ -708,7 +718,6 @@ async function unarchiveOrganization(req, res) {
         const result = await organizationsModel.unarchiveOrganization(organization_id, user.user_id, reason ? reason.trim() : null);
 
         // Real-time notification: notify clients that organization was restored
-        // Use the same channel as getOrganizations
         const channels = [
             'organizations_all',
             `organizations_Program Chair_${result?.base_program_id || ''}`,
