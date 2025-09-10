@@ -1633,53 +1633,264 @@ async function unarchiveEvent(req, res) {
 }
 
 async function updateEventSDAO(req, res) {
-    try {
-        const event_id = req.params.id;
-        const event = req.body;
-        let user_id = req.user?.user_id;
-        const user_email = req.body.user_email;
+  try {
+    const event_id = req.params.id;
+    const body = req.body || {};
+    let imageFile = req.files?.image || null;
+    let imageFilename = null;
 
-        if ((!user_id || user_id === 'undefined' || user_id === 'null') && user_email) {
-            const user = await eventModel.getUserByEmail(user_email);
-            if (!user) {
-                return res.status(404).json({ message: "User not found for the provided email." });
-            }
-            user_id = user.user_id;
-        }
-
-        if (!event_id || !user_id) {
-            return res.status(400).json({ message: "event_id and user_id (or user_email) are required." });
-        }
-        const result = await eventModel.updateEventSDAO(event_id, event, user_id);
-        res.status(200).json(result);
-    } catch (error) {
-        console.error('[updateEventSDAO] Error:', error);
-        res.status(500).json({ message: error.message });
+    // Resolve user_id (email → id)
+    let user_id = req.user?.user_id || body.user_id;
+    const user_email = body.user_email;
+    if (user_id && typeof user_id === 'string' && user_id.includes('@')) {
+      const u = await eventModel.getUserByEmail(user_id);
+      if (!u) return res.status(404).json({ message: "User not found for the provided email." });
+      user_id = u.user_id;
+    } else if ((!user_id || user_id === 'undefined' || user_id === 'null') && user_email) {
+      const u = await eventModel.getUserByEmail(user_email);
+      if (!u) return res.status(404).json({ message: "User not found for the provided email." });
+      user_id = u.user_id;
     }
+    if (!event_id || !user_id) {
+      return res.status(400).json({ message: "event_id and user_id (or user_email) are required." });
+    }
+
+    // Load existing event
+    let existingEvent = null;
+    try {
+      existingEvent = eventModel.getEventById
+        ? await eventModel.getEventById(event_id)
+        : (await eventModel.getEvents()).find(e => String(e.event_id || e.id) === String(event_id));
+    } catch (e) {
+      console.warn('[updateEventSDAO] Could not fetch existing event by ID:', e);
+    }
+
+    // Build event payload with fallbacks (avoid nulling fields)
+    const pick = (v, fb) => (v === undefined ? fb : v);
+    const event = { ...body };
+    event.user_id     = user_id;
+    event.title       = pick(event.title,       existingEvent?.title);
+    event.description = pick(event.description, existingEvent?.description);
+    event.venue_type  = pick(event.venue_type,  existingEvent?.venue_type);
+    event.venue       = pick(event.venue,       existingEvent?.venue ?? null);
+    event.start_date  = pick(event.start_date,  existingEvent?.start_date);
+    event.end_date    = pick(event.end_date,    existingEvent?.end_date);
+    event.start_time  = pick(event.start_time,  existingEvent?.start_time);
+    event.end_time    = pick(event.end_time,    existingEvent?.end_time);
+    event.status      = pick(event.status,      existingEvent?.status);
+    event.type        = pick(event.type,        existingEvent?.type);
+    event.is_open_to  = pick(event.is_open_to,  existingEvent?.is_open_to);
+
+    // Normalize numeric optionals
+    const normNum = (v) => (v === "" ? null : v);
+    event.capacity = pick(normNum(event.capacity), existingEvent?.capacity ?? null);
+    event.fee      = pick(normNum(event.fee),      existingEvent?.fee ?? null);
+
+    // collaborators: build a param for the SP (NULL = unchanged, '[]' = clear, JSON array = replace)
+    let collaboratorsParam = null; // default: unchanged
+    if (Object.prototype.hasOwnProperty.call(body, 'collaborators')) {
+      if (typeof body.collaborators === 'string') {
+        try {
+          const arr = JSON.parse(body.collaborators);
+          collaboratorsParam = Array.isArray(arr) ? JSON.stringify(arr) : '[]';
+        } catch {
+          collaboratorsParam = '[]';
+        }
+      } else if (Array.isArray(body.collaborators)) {
+        collaboratorsParam = JSON.stringify(body.collaborators); // keep [] if empty
+      } else if (body.collaborators === null) {
+        collaboratorsParam = null; // unchanged
+      } else {
+        collaboratorsParam = '[]'; // invalid type → clear
+      }
+    }
+
+    // Storage targeting
+    const orgIdForStorage = event.organization_id ?? existingEvent?.organization_id ?? null;
+    const isSDAO = !orgIdForStorage;
+
+    const ensureDir = (d) => { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); };
+    const sanitizeBase = (n) => path.basename(n, path.extname(n)).replace(/[^a-zA-Z0-9_\-]/g, '_').substring(0, 50);
+    const parseTruthy = (v) => v === true || v === 1 || v === '1' || (typeof v === 'string' && v.toLowerCase() === 'true');
+
+    const removeImage = parseTruthy(event.remove_image);
+    const removeOldImageIfExists = () => {
+      try {
+        const oldName = existingEvent?.image;
+        if (!oldName) return;
+        if (existingEvent?.organization_id) {
+          const oldOrgDir = path.join('/app/events', String(existingEvent.organization_id));
+          const oldPath = path.join(oldOrgDir, oldName);
+          if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+        } else {
+          const oldSdaoDir = path.join('/app/events/SDAO', String(event_id), 'publication_images');
+          const oldPath = path.join(oldSdaoDir, oldName);
+          if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+        }
+      } catch (e) {
+        console.warn('[updateEventSDAO] Failed to remove old image:', e);
+      }
+    };
+
+    // Image ops
+    if (removeImage) {
+      removeOldImageIfExists();
+      event.image = null; // SP will set column to NULL
+    } else if (imageFile) {
+      const ext = path.extname(imageFile.name);
+      const base = sanitizeBase(imageFile.name);
+      imageFilename = `event-${Date.now()}-${base}${ext}`;
+      event.image = imageFilename;
+
+      if (isSDAO) {
+        const destDir = path.join('/app/events/SDAO', String(event_id), 'publication_images');
+        ensureDir(destDir);
+        fs.writeFileSync(path.join(destDir, imageFilename), imageFile.data);
+      } else {
+        const orgDir = path.join('/app/events', String(orgIdForStorage));
+        ensureDir(orgDir);
+        fs.writeFileSync(path.join(orgDir, imageFilename), imageFile.data);
+      }
+
+      if (existingEvent?.image && existingEvent.image !== imageFilename) {
+        removeOldImageIfExists();
+      }
+    } else {
+      event.image = existingEvent?.image ?? null; // keep existing
+    }
+
+    // DB update (now includes collaborators as 17th param)
+    const result = await eventModel.updateEventSDAO(event_id, event, user_id, collaboratorsParam);
+
+    // SSE snapshot
+    try {
+      const allEvents = await eventModel.getEvents();
+      publishToChannel('events', { channel: 'events', operation: 'SNAPSHOT', data: Array.isArray(allEvents) ? allEvents : [] });
+    } catch (sseError) {
+      console.error('[updateEventSDAO] Failed to publish SSE update:', sseError);
+    }
+
+    res.status(200).json({ success: true, message: 'Event updated successfully', event: result, data: result, event_id });
+  } catch (error) {
+    console.error('[updateEventSDAO] Error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
 }
 
 async function deleteEventSDAO(req, res) {
-    try {
-        const { event_id, reason, user_email } = req.body;
-        let user_id = req.user?.user_id;
+  const start = Date.now();
+  try {
+    // Accept event_id from params or body (DELETE bodies can be stripped)
+    const event_id = req.params?.id || req.body?.event_id;
+    let reason = req.body?.reason;
+    const user_email = req.body?.user_email;
 
-        if ((!user_id || user_id === 'undefined' || user_id === 'null') && user_email) {
-            const user = await eventModel.getUserByEmail(user_email);
-            if (!user) {
-                return res.status(404).json({ message: "User not found for the provided email." });
-            }
-            user_id = user.user_id;
-        }
+    let user_id = req.user?.user_id;
 
-        if (!event_id || !user_id || !reason) {
-            return res.status(400).json({ message: "event_id, user_id (or user_email), and reason are required." });
-        }
-        await eventModel.deleteEventSDAO(event_id, user_id, reason);
-        res.status(200).json({ message: "Event deleted successfully." });
-    } catch (error) {
-        console.error('[deleteEventSDAO] Error:', error);
-        res.status(500).json({ message: error.message });
+    // Resolve user_id from email if missing
+    if ((!user_id || user_id === 'undefined' || user_id === 'null') && user_email) {
+      const user = await eventModel.getUserByEmail(user_email);
+      if (!user) {
+        console.warn('[deleteEventSDAO] User not found for email', { user_email });
+        return res.status(404).json({
+          success: false,
+          message: "User not found for the provided email.",
+          debug: { user_email }
+        });
+      }
+      user_id = user.user_id;
     }
+
+    if (!event_id || !user_id) {
+      console.warn('[deleteEventSDAO] Missing required params', { event_id, user_id_present: !!user_id });
+      return res.status(400).json({
+        success: false,
+        message: "event_id and user_id (or user_email) are required.",
+        debug: { event_id, user_id_present: !!user_id }
+      });
+    }
+
+    // Normalize optional reason
+    if (!reason || String(reason).trim() === '') reason = null;
+
+    console.log('[deleteEventSDAO] Deleting SDAO event...', { event_id, hasReason: !!reason, user_id });
+
+    // Call SP
+    const spResult = await eventModel.deleteEventSDAO(event_id, user_id, reason);
+
+    // Try filesystem cleanup for SDAO images (best-effort)
+    let fsCleanup = { attempted: true, removed: false, path: null, error: null };
+    try {
+      const sdaoDir = path.join('/app/events/SDAO', String(event_id));
+      fsCleanup.path = sdaoDir;
+      if (fs.existsSync(sdaoDir)) {
+        // Node 16+: fs.rm supports recursive
+        fs.rmSync(sdaoDir, { recursive: true, force: true });
+        fsCleanup.removed = true;
+        console.log('[deleteEventSDAO] Removed SDAO directory', sdaoDir);
+      } else {
+        console.log('[deleteEventSDAO] SDAO directory not found (skip)', sdaoDir);
+      }
+    } catch (e) {
+      fsCleanup.error = e?.message || String(e);
+      console.warn('[deleteEventSDAO] FS cleanup failed', fsCleanup);
+    }
+
+    // Publish SSE snapshot to refresh UI
+    let ssePublished = false;
+    try {
+      const allEvents = await eventModel.getEvents();
+      publishToChannel('events', {
+        channel: 'events',
+        operation: 'SNAPSHOT',
+        data: Array.isArray(allEvents) ? allEvents : []
+      });
+      ssePublished = true;
+    } catch (e) {
+      console.error('[deleteEventSDAO] SSE publish failed', { error: e?.message });
+    }
+
+    const durationMs = Date.now() - start;
+
+    return res.status(200).json({
+      success: true,
+      message: "Event deleted successfully.",
+      event_id,
+      reason: reason ?? null,
+      sp: spResult || null,
+      debug: {
+        durationMs,
+        ssePublished,
+        fsCleanup
+      }
+    });
+  } catch (error) {
+    const durationMs = Date.now() - start;
+    // Frontend-friendly error payload with structured debug info
+    console.error('[deleteEventSDAO] Error', {
+      code: error.code,
+      errno: error.errno,
+      sqlState: error.sqlState,
+      message: error.message
+    });
+
+    const httpStatus =
+      error.code === 'ER_ROW_IS_REFERENCED_2' ? 409 : // FK constraint
+      error.code === 'ER_SIGNAL_EXCEPTION'   ? 400 : // SIGNAL in SP
+      500;
+
+    return res.status(httpStatus).json({
+      success: false,
+      message: error.message || "Failed to delete event.",
+      error_code: 'DELETE_EVENT_FAILED',
+      debug: {
+        sqlState: error.sqlState || null,
+        errno: error.errno || null,
+        code: error.code || null,
+        durationMs
+      }
+    });
+  }
 }
 
 module.exports = {
