@@ -80,4 +80,11 @@ router.get(
   controller.getTransactionFile
 );
 
+router.get(
+  '/organizations/:organization_id/transactions',
+  middleware.validateAzureJWT,
+  middleware.hasPermission([VIEW, MANAGE]),
+  controller.getTransactionsByOrganization
+);
+
 module.exports = router;

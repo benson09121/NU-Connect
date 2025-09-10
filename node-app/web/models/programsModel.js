@@ -1,5 +1,4 @@
 const pool = require('../../config/db');
-const { publishToChannel } = require('../controllers/sseController');
 
 async function getAllPrograms() {
     const connection = await pool.getConnection();
@@ -34,34 +33,40 @@ async function createProgram(college_id, name, abbreviation, email) {
             'CALL CreateProgram(?, ?, ?, ?);',
             [college_id, name, abbreviation, email]
         );
+        return rows[0][0];
+    } catch (error) {
+        console.error('[programsModel.createProgram] Database error:', error);
         
-        const program = rows[0][0];
-        
-        // Log the action for audit trail (matches LogAction signature)
-        try {
-            await connection.query(
-                'CALL LogAction(?, ?, ?, ?, ?, ?);',
-                [
-                    email,                                           // p_user_email
-                    'CREATE',                                        // p_action
-                    'program',                                       // p_type
-                    JSON.stringify({                                 // p_meta_data (JSON)
-                        program_id: program?.program_id || null,
-                        name,
-                        abbreviation,
-                        college_id
-                    }),
-                    null,                                            // p_redirect_url -> set to null
-                    null                                             // p_file_path
-                ]
-            );
-        } catch (logError) {
-            console.warn('Failed to log program creation:', logError.message);
+        // Handle specific stored procedure error messages
+        if (error.message) {
+            const errorMsg = error.message.toLowerCase();
+            if (errorMsg.includes('program name or abbreviation already exists')) {
+                throw new Error('Program name or abbreviation already exists');
+            } else if (errorMsg.includes('user not found for provided email')) {
+                throw new Error('User not found for provided email');
+            } else if (errorMsg.includes('college not found')) {
+                throw new Error('College not found');
+            } else if (errorMsg.includes('cannot create program under an archived college')) {
+                throw new Error('Cannot create program under an archived college');
+            }
         }
         
-        return program;
-    } catch (error) {
-        console.error('Error in createProgram:', error);
+        // Re-throw with more specific error information for MySQL errors
+        if (error.code === 'ER_DUP_ENTRY') {
+            if (error.message.includes('program_name')) {
+                throw new Error('A program with this name already exists in the selected college');
+            } else if (error.message.includes('program_abbreviation')) {
+                throw new Error('A program with this abbreviation already exists');
+            } else {
+                throw new Error('A program with this name or abbreviation already exists');
+            }
+        } else if (error.code === 'ER_NO_REFERENCED_ROW_2') {
+            throw new Error('The selected college does not exist');
+        } else if (error.code === 'ER_BAD_NULL_VALUE') {
+            throw new Error('Required information is missing');
+        }
+        
+        // Re-throw the original error if it's not a recognized database error
         throw error;
     } finally {
         connection.release();
@@ -75,35 +80,69 @@ async function updateProgram(program_id, college_id, name, abbreviation, email) 
             'CALL UpdateProgram(?, ?, ?, ?, ?);',
             [program_id, college_id, name, abbreviation, email]
         );
+        return rows[0][0];
+    } catch (error) {
+        console.error('[programsModel.updateProgram] Database error:', error);
         
-        const program = rows[0][0];
-        
-        // Log the action for audit trail (matches LogAction signature)
-        try {
-            await connection.query(
-                'CALL LogAction(?, ?, ?, ?, ?, ?);',
-                [
-                    email,                                           // p_user_email
-                    'UPDATE',                                        // p_action
-                    'program',                                       // p_type
-                    JSON.stringify({                                 // p_meta_data
-                        program_id,
-                        name,
-                        abbreviation,
-                        college_id
-                    }),
-                    null,                                            // p_redirect_url -> set to null
-                    null                                             // p_file_path
-                ]
-            );
-        } catch (logError) {
-            console.warn('Failed to log program update:', logError.message);
+        // Handle specific stored procedure error messages
+        if (error.message) {
+            const errorMsg = error.message.toLowerCase();
+            if (errorMsg.includes('program name or abbreviation already exists')) {
+                throw new Error('Program name or abbreviation already exists');
+            } else if (errorMsg.includes('user not found for provided email')) {
+                throw new Error('User not found for provided email');
+            } else if (errorMsg.includes('program not found')) {
+                throw new Error('Program not found');
+            } else if (errorMsg.includes('college not found')) {
+                throw new Error('College not found');
+            } else if (errorMsg.includes('cannot move program into an archived college')) {
+                throw new Error('Cannot move program into an archived college');
+            }
         }
         
-        return program;
-    } catch (error) {
-        console.error('Error in updateProgram:', error);
+        // Re-throw with more specific error information for MySQL errors
+        if (error.code === 'ER_DUP_ENTRY') {
+            if (error.message.includes('program_name')) {
+                throw new Error('A program with this name already exists in the selected college');
+            } else if (error.message.includes('program_abbreviation')) {
+                throw new Error('A program with this abbreviation already exists');
+            } else {
+                throw new Error('A program with this name or abbreviation already exists');
+            }
+        } else if (error.code === 'ER_NO_REFERENCED_ROW_2') {
+            throw new Error('The selected college does not exist');
+        } else if (error.code === 'ER_BAD_NULL_VALUE') {
+            throw new Error('Required information is missing');
+        }
+        
+        // Re-throw the original error if it's not a recognized database error
         throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function archiveProgram(program_id, user_email, reason) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query(
+            'CALL ArchiveProgram(?, ?, ?);',
+            [program_id, user_email, reason]
+        );
+        return rows[0][0];
+    } finally {
+        connection.release();
+    }
+}
+
+async function unarchiveProgram(program_id, user_email) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query(
+            'CALL UnarchiveProgram(?, ?);',
+            [program_id, user_email]
+        );
+        return rows[0][0];
     } finally {
         connection.release();
     }
@@ -112,73 +151,11 @@ async function updateProgram(program_id, college_id, name, abbreviation, email) 
 async function deleteProgram(program_id, email) {
     const connection = await pool.getConnection();
     try {
-        // Get program name before deletion for logging
-        const [programRows] = await connection.query(
-            'SELECT name, abbreviation FROM tbl_program WHERE program_id = ?', 
-            [program_id]
-        );
-        const programName = programRows[0]?.name || 'Unknown Program';
-        const programAbbr = programRows[0]?.abbreviation || '';
-        
-        await connection.query('CALL DeleteProgram(?, ?);', [program_id, email]);
-        
-        // Log the action for audit trail (matches LogAction signature)
-        try {
-            await connection.query(
-                'CALL LogAction(?, ?, ?, ?, ?, ?);',
-                [
-                    email,                                           // p_user_email
-                    'DELETE',                                        // p_action
-                    'program',                                       // p_type
-                    JSON.stringify({                                 // p_meta_data
-                        program_id,
-                        name: programName,
-                        abbreviation: programAbbr
-                    }),
-                    null,                                            // p_redirect_url -> set to null
-                    null                                             // p_file_path
-                ]
-            );
-        } catch (logError) {
-            console.warn('Failed to log program deletion:', logError.message);
-        }
-        
-        return { success: true, message: "Program deleted." };
-    } catch (error) {
-        console.error('Error in deleteProgram:', error);
-        throw error;
-    } finally {
-        connection.release();
-    }
-}
-
-async function archiveProgram(program_id, user_id, reason) {
-    const connection = await pool.getConnection();
-    try {
         const [rows] = await connection.query(
-            'CALL ArchiveProgram(?, ?, ?);',
-            [program_id, user_id, reason]
+            'CALL DeleteProgram(?, ?);',
+            [program_id, email]
         );
         return rows[0][0];
-    } catch (error) {
-        console.error('Error in archiveProgram:', error);
-        throw error;
-    } finally {
-        connection.release();
-    }
-}
-
-async function unarchiveProgram(program_id, user_id, reason) {
-    const connection = await pool.getConnection();
-    try {
-        const [rows] = await connection.query(
-            'CALL UnarchiveProgram(?, ?, ?);',
-            [program_id, user_id, reason]
-        );
-        return rows[0][0];
-    } catch (error) {
-        console.error('Error in unarchiveProgram:', error);
-        throw error;
     } finally {
         connection.release();
     }

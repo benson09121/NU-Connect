@@ -336,57 +336,26 @@ async function resendInvitationEmail(req, res) {
   const { email } = req.body;
   try {
     if (!email) {
-      return res
-        .status(400)
-        .json({ success: false, error: 'Email is required.' });
+      return res.status(400).json({ success: false, error: 'Email is required.' });
     }
-
-    const msalConfig = {
-      auth: {
-        clientId: process.env.AZURE_CLIENT_ID,
-        authority: `https://login.microsoftonline.com/${process.env.AZURE_TENANT_ID}`,
-        clientSecret: process.env.AZURE_CLIENT_SECRET,
-      },
-    };
-    const cca = new msal.ConfidentialClientApplication(msalConfig);
-    const token = await getAccessToken(cca);
-
-    const response = await axios.post(
-      'https://graph.microsoft.com/v1.0/invitations',
-      {
-        invitedUserEmailAddress: email,
-        inviteRedirectUrl: process.env.AZURE_REDIRECT_URL,
-        sendInvitationMessage: false,
-      },
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
-
-    const redemptionUrl = response.data.inviteRedeemUrl;
-    const emailResult = await emailService.sendInvitationEmail(
-      email,
-      redemptionUrl,
-      true
-    ); // true -> isResend
-
-    if (emailResult.success) {
+    const result = await emailService.resendInvitationEmail(email);
+    if (result.success) {
       res.status(200).json({
         success: true,
-        message: 'Invitation email resent successfully.',
-        data: { email, messageId: emailResult.messageId },
+        message: result.message || 'Invitation resent successfully.',
+        messageId: result.messageId,
       });
     } else {
       res.status(500).json({
         success: false,
-        error: 'Failed to resend invitation email: ' + emailResult.error,
+        error: result.error || 'Failed to resend invitation email.',
       });
     }
   } catch (error) {
     console.error('Failed to resend invitation email:', error);
     res.status(500).json({
       success: false,
-      error:
-        error.message ||
-        'An error occurred while resending the invitation email.',
+      error: error.message || 'An error occurred while resending the invitation email.',
     });
   }
 }
