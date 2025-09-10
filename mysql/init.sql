@@ -1569,11 +1569,16 @@ CREATE DEFINER='admin'@'%' PROCEDURE UpdateEvent(
     IN p_is_open_to ENUM('Members only', 'Open to all', 'NU Students only'),
     IN p_fee INT,
     IN p_capacity INT,
-    IN p_image TEXT,
-    IN p_user_id VARCHAR(200)
+    IN p_image TEXT,           -- NULL = remove, <filename> = set/replace, unchanged value = keep
+    IN p_user_id VARCHAR(200),
+    IN p_collaborators JSON    -- NULL = leave unchanged; [] = remove all; [<orgId>, ...] = replace
 )
 BEGIN
     DECLARE v_user_email VARCHAR(100);
+    DECLARE v_prev_image TEXT;
+    DECLARE v_collab_count INT DEFAULT 0;
+    DECLARE v_collab_org_id INT;
+    DECLARE i INT DEFAULT 0;
 
     IF p_event_id IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'event_id required';
@@ -1582,40 +1587,83 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'user_id required';
     END IF;
 
+    -- Only allow updates for SDAO events with this proc
     IF NOT EXISTS (SELECT 1 FROM tbl_event WHERE event_id = p_event_id AND event_type = 'SDAO') THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Only SDAO events can be updated with this procedure';
     END IF;
 
+    -- Capture current image for audit logging and optimistic "keep" semantics
+    SELECT image INTO v_prev_image
+    FROM tbl_event
+    WHERE event_id = p_event_id
+    FOR UPDATE;
+
+    -- Update the event core fields
     UPDATE tbl_event
-    SET title = p_title,
+    SET title       = p_title,
         description = p_description,
-        venue_type = p_venue_type,
-        venue = p_venue,
-        start_date = p_start_date,
-        end_date = p_end_date,
-        start_time = p_start_time,
-        end_time = p_end_time,
-        status = p_status,
-        type = p_type,
-        is_open_to = p_is_open_to,
-        fee = p_fee,
-        capacity = p_capacity,
-        image = p_image
+        venue_type  = p_venue_type,
+        venue       = p_venue,
+        start_date  = p_start_date,
+        end_date    = p_end_date,
+        start_time  = p_start_time,
+        end_time    = p_end_time,
+        status      = p_status,
+        type        = p_type,
+        is_open_to  = p_is_open_to,
+        fee         = p_fee,
+        capacity    = p_capacity,
+        image       = p_image
     WHERE event_id = p_event_id;
 
+    /*
+      Collaborators handling:
+      - NULL  -> do nothing (keep existing)
+      - '[]'  -> delete all
+      - array -> replace with provided set
+    */
+    IF p_collaborators IS NOT NULL THEN
+        -- Replace semantics: clear then insert new (if any)
+        DELETE FROM tbl_event_collaborator WHERE event_id = p_event_id;
+
+        SET v_collab_count = JSON_LENGTH(p_collaborators);
+        SET i = 0;
+
+        WHILE i < v_collab_count DO
+            SET v_collab_org_id = CAST(JSON_UNQUOTE(JSON_EXTRACT(p_collaborators, CONCAT('$[', i, ']'))) AS UNSIGNED);
+            IF v_collab_org_id IS NOT NULL THEN
+                INSERT IGNORE INTO tbl_event_collaborator (event_id, organization_id)
+                VALUES (p_event_id, v_collab_org_id);
+            END IF;
+            SET i = i + 1;
+        END WHILE;
+    END IF;
+
+    -- Actor email (for logging)
     SELECT email INTO v_user_email FROM tbl_user WHERE user_id = p_user_id LIMIT 1;
     IF v_user_email IS NULL THEN SET v_user_email = ''; END IF;
 
+    -- Audit log (include image change details)
     CALL LogAction(
         v_user_email,
         CONCAT('Updated SDAO event ID ', p_event_id),
         'event',
-        JSON_OBJECT('event_id', p_event_id, 'updated_at', NOW()),
+        JSON_OBJECT(
+            'event_id',    p_event_id,
+            'title',       p_title,
+            'status',      p_status,
+            'image_prev',  v_prev_image,
+            'image_new',   p_image,
+            'updated_at',  NOW()
+        ),
         CONCAT('/events/', p_event_id),
         NULL
     );
 
+    -- Return the updated row
     SELECT * FROM tbl_event WHERE event_id = p_event_id LIMIT 1;
+
+    COMMIT;
 END$$
 DELIMITER ;
 
@@ -1635,23 +1683,39 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'user_id required';
     END IF;
 
+    -- Ensure SDAO event
     IF NOT EXISTS (SELECT 1 FROM tbl_event WHERE event_id = p_event_id AND event_type = 'SDAO') THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Only SDAO events can be deleted with this procedure';
     END IF;
 
-    DELETE FROM tbl_event WHERE event_id = p_event_id;
+    START TRANSACTION;
 
-    SELECT email INTO v_user_email FROM tbl_user WHERE user_id = p_user_id LIMIT 1;
-    IF v_user_email IS NULL THEN SET v_user_email = ''; END IF;
+      -- If you have related tables, clear them first (idempotent & safe)
+      DELETE FROM tbl_event_collaborator WHERE event_id = p_event_id;
+      DELETE FROM tbl_event_course       WHERE event_id = p_event_id;
 
-    CALL LogAction(
-        v_user_email,
-        CONCAT('Deleted SDAO event ID ', p_event_id, IF(p_reason IS NOT NULL, CONCAT(' (Reason: ', p_reason, ')'), '')),
-        'event',
-        JSON_OBJECT('event_id', p_event_id, 'deleted_at', NOW(), 'reason', p_reason),
-        '/events',
-        NULL
-    );
+      -- Finally remove the event
+      DELETE FROM tbl_event WHERE event_id = p_event_id;
+
+      SELECT email INTO v_user_email FROM tbl_user WHERE user_id = p_user_id LIMIT 1;
+      IF v_user_email IS NULL THEN SET v_user_email = ''; END IF;
+
+      CALL LogAction(
+          v_user_email,
+          CONCAT(
+              'Deleted SDAO event ID ', p_event_id,
+              IF(p_reason IS NOT NULL AND p_reason <> '', CONCAT(' (Reason: ', p_reason, ')'), '')
+          ),
+          'event',
+          JSON_OBJECT('event_id', p_event_id, 'deleted_at', NOW(), 'reason', p_reason),
+          '/events',
+          NULL
+      );
+
+      -- Optional: return a simple confirmation payload
+      SELECT JSON_OBJECT('deleted', TRUE, 'event_id', p_event_id) AS result;
+
+    COMMIT;
 END$$
 DELIMITER ;
 

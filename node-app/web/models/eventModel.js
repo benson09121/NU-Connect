@@ -567,44 +567,58 @@ async function unarchiveEvent(event_id, user_id, reason) {
     }
 }
 
-async function updateEventSDAO(event_id, event, user_id) {
-    const connection = await pool.getConnection();
-    try {
-        const [rows] = await connection.query(
-            'CALL UpdateEvent(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);',
-            [
-                event_id,
-                event.title,
-                event.description,
-                event.venue_type,
-                event.venue,
-                event.start_date,
-                event.end_date,
-                event.start_time,
-                event.end_time,
-                event.status,
-                event.type,
-                event.is_open_to,
-                event.fee,
-                event.capacity,
-                event.image,
-                user_id
-            ]
-        );
-        return rows[0]?.[0] || null;
-    } finally {
-        connection.release();
-    }
+async function updateEventSDAO(event_id, event, user_id, collaboratorsParam) {
+  const connection = await pool.getConnection();
+  try {
+    const [rows] = await connection.query(
+      'CALL UpdateEvent(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);',
+      [
+        event_id,
+        event.title,
+        event.description,
+        event.venue_type,
+        event.venue,
+        event.start_date,
+        event.end_date,
+        event.start_time,
+        event.end_time,
+        event.status,
+        event.type,
+        event.is_open_to,
+        event.fee,
+        event.capacity,
+        event.image,
+        user_id,
+        collaboratorsParam // <== NEW 17th arg (NULL | '[]' | '[1,2,...]')
+      ]
+    );
+    return rows[0]?.[0] || null;
+  } finally {
+    connection.release();
+  }
 }
 
 async function deleteEventSDAO(event_id, user_id, reason) {
-    const connection = await pool.getConnection();
-    try {
-        await connection.query('CALL DeleteEvent(?, ?, ?);', [event_id, user_id, reason]);
-        return true;
-    } finally {
-        connection.release();
-    }
+  const connection = await pool.getConnection();
+  try {
+    const [rows] = await connection.query('CALL DeleteEvent(?, ?, ?);', [
+      event_id,
+      user_id,
+      (reason && String(reason).trim() !== '') ? reason.trim() : null
+    ]);
+    // rows[0]?.[0]?.result may hold the JSON from the SP (if you kept the SELECT)
+    const spPayload = rows?.[0]?.[0] || null;
+    return spPayload;
+  } catch (err) {
+    // Detailed logs for backend
+    console.error('[Model.deleteEventSDAO] SP DeleteEvent failed', {
+      event_id, user_id, hasReason: !!reason,
+      code: err.code, errno: err.errno, sqlState: err.sqlState, message: err.message
+    });
+    throw err;
+  } finally {
+    connection.release();
+  }
 }
 
 module.exports = {

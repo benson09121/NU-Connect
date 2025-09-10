@@ -168,7 +168,7 @@ router.post(
 );
 
 router.delete(
-  '/events/sdao-delete',
+  '/events/:id/sdao-delete',
   middleware.validateAzureJWT,
   middleware.hasPermission("MANAGE_SDAO_EVENT"),
   eventController.deleteEventSDAO
