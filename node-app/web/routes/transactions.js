@@ -21,9 +21,6 @@ router.put(
   controller.update
 );
 
-
-
-
 router.post(
   '/transactions/archive',
   middleware.validateAzureJWT,

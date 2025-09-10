@@ -11088,68 +11088,105 @@ CREATE DEFINER='admin'@'%' PROCEDURE UpdateTransaction(
     IN p_payment_description VARCHAR(255),
     IN p_amount DECIMAL(10,2),
     IN p_status ENUM('Pending','Completed','Failed'),
-    IN p_proof_image VARCHAR(500),
+    IN p_proof_image VARCHAR(500),       -- new path if replacing; NULL/'' to not set
     IN p_receipt_no VARCHAR(100),
     IN p_category_code VARCHAR(50),
     IN p_payer_name VARCHAR(255),
     IN p_payee_name VARCHAR(255),
     IN p_payer_name_override VARCHAR(255),
-    IN p_event_remarks VARCHAR(255)
+    IN p_event_remarks VARCHAR(255),
+    IN p_remove_proof_image TINYINT      -- 1 = remove image, 0/NULL = don't remove
 )
 BEGIN
     DECLARE v_actor_id VARCHAR(200);
     DECLARE v_type_code VARCHAR(50);
+    DECLARE v_transaction_type_id INT;
     DECLARE v_category_id INT;
     DECLARE v_exists INT;
 
-    SELECT user_id INTO v_actor_id FROM tbl_user WHERE email = p_user_email LIMIT 1;
-    IF v_actor_id IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Actor user not found'; END IF;
+    -- Actor must exist
+    SELECT user_id INTO v_actor_id
+      FROM tbl_user WHERE email = p_user_email LIMIT 1;
+    IF v_actor_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Actor user not found';
+    END IF;
 
-    SELECT tt.code INTO v_type_code
-    FROM tbl_transaction t
-    JOIN tbl_transaction_type tt ON t.transaction_type_id = tt.transaction_type_id
-    WHERE t.transaction_id = p_transaction_id;
-
+    -- Get existing transaction's type (code + id)
+    SELECT t.transaction_type_id, tt.code
+      INTO v_transaction_type_id, v_type_code
+      FROM tbl_transaction t
+      JOIN tbl_transaction_type tt ON t.transaction_type_id = tt.transaction_type_id
+     WHERE t.transaction_id = p_transaction_id
+     LIMIT 1;
     IF v_type_code IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Transaction not found';
     END IF;
 
-    -- Get category ID if provided
+    -- Resolve category if provided and validate pair against type
     IF p_category_code IS NOT NULL AND p_category_code <> '' THEN
-        SELECT category_id INTO v_category_id 
-        FROM tbl_financial_category 
-        WHERE code = p_category_code AND active = TRUE LIMIT 1;
-        IF v_category_id IS NULL THEN 
-            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Financial category not found or inactive'; 
+        SELECT category_id INTO v_category_id
+          FROM tbl_financial_category
+         WHERE code = p_category_code AND active = TRUE
+         LIMIT 1;
+        IF v_category_id IS NULL THEN
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Financial category not found or inactive';
+        END IF;
+
+        IF NOT EXISTS (
+            SELECT 1
+              FROM tbl_transaction_type_category
+             WHERE transaction_type_id = v_transaction_type_id
+               AND category_id = v_category_id
+        ) THEN
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Category not allowed for this transaction type';
         END IF;
     END IF;
 
+    -- Enforce unique receipt when changing
+    IF p_receipt_no IS NOT NULL AND p_receipt_no <> '' THEN
+        IF EXISTS (
+            SELECT 1 FROM tbl_transaction
+             WHERE receipt_no = p_receipt_no
+               AND transaction_id <> p_transaction_id
+        ) THEN
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Receipt number already exists';
+        END IF;
+    END IF;
+
+    -- Update main row (tri-state image logic)
     UPDATE tbl_transaction
        SET payment_description = COALESCE(p_payment_description, payment_description),
-           amount = COALESCE(p_amount, amount),
-           status = COALESCE(p_status, status),
-           proof_image = COALESCE(NULLIF(p_proof_image,''), proof_image),
-           receipt_no = COALESCE(NULLIF(p_receipt_no,''), receipt_no),
-           category_id = COALESCE(v_category_id, category_id),
-           payer_name = COALESCE(NULLIF(p_payer_name,''), payer_name),
-           payee_name = COALESCE(NULLIF(p_payee_name,''), payee_name),
-           updated_at = CURRENT_TIMESTAMP
+           amount              = COALESCE(p_amount, amount),
+           status              = COALESCE(p_status, status),
+           receipt_no          = COALESCE(NULLIF(p_receipt_no,''), receipt_no),
+           category_id         = COALESCE(v_category_id, category_id),
+           payer_name          = COALESCE(NULLIF(p_payer_name,''), payer_name),
+           payee_name          = COALESCE(NULLIF(p_payee_name,''), payee_name),
+           proof_image         =
+               CASE
+                 WHEN p_remove_proof_image = 1 THEN NULL             -- remove
+                 WHEN p_proof_image IS NOT NULL AND p_proof_image <> '' THEN p_proof_image -- replace
+                 ELSE proof_image                                    -- keep
+               END,
+           updated_at          = CURRENT_TIMESTAMP
      WHERE transaction_id = p_transaction_id;
 
-    IF ROW_COUNT() = 0 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Update failed'; END IF;
+    IF ROW_COUNT() = 0 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Update failed';
+    END IF;
 
-    -- Update event-related fields if this is an income transaction
+    -- If income transaction: update event link fields when row exists
     IF v_type_code = 'INCOME' THEN
         SELECT COUNT(*) INTO v_exists FROM tbl_transaction_event WHERE transaction_id = p_transaction_id;
         IF v_exists = 1 THEN
             UPDATE tbl_transaction_event
                SET payer_name_override = COALESCE(NULLIF(p_payer_name_override,''), payer_name_override),
-                   remarks = COALESCE(NULLIF(p_event_remarks,''), remarks)
+                   remarks            = COALESCE(NULLIF(p_event_remarks,''), remarks)
              WHERE transaction_id = p_transaction_id;
         END IF;
     END IF;
 
-    -- Log the action
+    -- Audit log
     CALL LogAction(
         p_user_email,
         CONCAT('Updated transaction #', p_transaction_id, ' (', v_type_code, ')'),
@@ -11158,12 +11195,14 @@ BEGIN
             'transaction_id', p_transaction_id,
             'amount', p_amount,
             'status', p_status,
-            'category', p_category_code
+            'category', p_category_code,
+            'remove_image', IFNULL(p_remove_proof_image,0)
         ),
         NULL,
         p_proof_image
     );
 
+    -- Return updated row
     CALL GetTransaction(p_transaction_id);
 END $$
 DELIMITER ;
