@@ -23,6 +23,14 @@ function buildContextAwareSystemPrompt(context) {
   
   prompt += '\n\n--- CURRENT CONTEXT ---\n';
   
+  // SDAO-specific context
+  if (context.userRole === 'SDAO') {
+    prompt += 'User is an SDAO (Student Development and Activities Office) administrator with access to ALL organization data.\n';
+    prompt += 'Provide comprehensive analytics across all approved organizations in the system.\n';
+    prompt += 'Focus on system-wide trends, comparisons, and overall performance metrics.\n';
+    prompt += 'When asked about organizations, include data from ALL organizations in the system.\n';
+  }
+  
   // Organization context
   if (context.currentOrganization === 'all') {
     prompt += 'User is viewing analytics for ALL organizations in the system.\n';
@@ -36,7 +44,7 @@ function buildContextAwareSystemPrompt(context) {
   
   // Multi-organization context
   if (context.userOrganizations && context.userOrganizations.length > 1) {
-    prompt += `User has access to ${context.userOrganizations.length} organizations: ${context.userOrganizations.map(org => org.name || org.organization_id).join(', ')}\n`;
+    prompt += `User has access to ${context.userOrganizations.length} organizations: ${context.userOrganizations.map(org => org.name || org.organization_name || org.organization_id).join(', ')}\n`;
   }
   
   // Tab/View context
@@ -106,7 +114,7 @@ function buildContextAwareSystemPrompt(context) {
       prompt += '## Organization Breakdown\n';
       if (context.userOrganizations) {
         context.userOrganizations.forEach(org => {
-          prompt += `### ${org.name || 'Organization ' + org.organization_id}\n`;
+          prompt += `### ${org.name || org.organization_name || 'Organization ' + org.organization_id}\n`;
           prompt += '- [Specific metrics and insights]\n- [Key performance indicators]\n\n';
         });
       }
@@ -132,8 +140,27 @@ function buildContextAwareSystemPrompt(context) {
   return prompt;
 }
 
-// Intent detection function
+// Intent detection function - Enhanced for SDAO
 function detectMultiOrgIntent(message, context) {
+  // SDAO users should always see multi-org data by default unless asking about specific view
+  if (context.userRole === 'SDAO') {
+    const specificViewKeywords = [
+      'this event', 'this transaction', 'current page', 'what I\'m looking at',
+      'this organization', 'current view', 'this data', 'this tab',
+      'current org', 'what\'s shown here', 'selected organization'
+    ];
+    
+    const messageLower = message.toLowerCase();
+    
+    // If asking about specific current view, don't use multi-org
+    if (specificViewKeywords.some(keyword => messageLower.includes(keyword))) {
+      return false;
+    }
+    
+    // Otherwise, SDAO users get multi-org by default
+    return true;
+  }
+  
   const multiOrgKeywords = [
     'overall', 'total', 'across', 'all organizations', 'combined', 
     'our status', 'our performance', 'financial situation', 'how are we',
@@ -178,6 +205,38 @@ function detectMultiOrgIntent(message, context) {
   // Default: if user has multiple organizations, assume multi-org for general questions
   const userOrgCount = context.userOrganizations?.length || context.dataScope?.organizationCount || 0;
   return userOrgCount > 1;
+}
+
+// SDAO-specific data fetching function
+async function getAllOrganizationsData(activeTab, userRole) {
+  if (userRole !== 'SDAO') return {};
+  
+  try {
+    const [allOrgs] = await db.query(`
+      SELECT organization_id, name 
+      FROM tbl_organization 
+      WHERE status = 'Approved' 
+      ORDER BY name
+    `);
+    
+    const orgIds = allOrgs.map(org => org.organization_id);
+    
+    switch(activeTab) {
+      case 'event':
+        return await getActivitiesForOrganizations(orgIds, userRole);
+      case 'transaction':
+        return await getFinanceForOrganizations(orgIds, userRole);
+      case 'user':
+        return await getMemberEngagementForOrganizations(orgIds, userRole);
+      case 'leaderboard':
+        return await getLeaderboardForOrganizations(orgIds, userRole);
+      default:
+        return await getAllDataForOrganizations(orgIds, userRole);
+    }
+  } catch (error) {
+    console.error('Error fetching all organizations data for SDAO:', error);
+    return {};
+  }
 }
 
 // Multi-organization data fetching functions
@@ -633,25 +692,43 @@ async function sendMessage(req, res) {
       return res.status(403).json({ error: 'Access denied' });
     }
 
-    // Get user's organizations from context - check both userOrganizations and dataScope.availableOrganizations
-    const userOrgs = context?.userOrganizations?.length > 0 
-      ? context.userOrganizations 
-      : context?.dataScope?.availableOrganizations?.map(org => ({
-          organization_id: org.value,
-          name: org.label
-        })) || [];
+    // Enhanced user organizations logic for SDAO
+    let userOrgs;
+    if (context?.userRole === 'SDAO') {
+      // SDAO users get ALL organizations
+      try {
+        const [allOrgs] = await db.query(`
+          SELECT organization_id, name, status, category 
+          FROM tbl_organization 
+          WHERE status = 'Approved' 
+          ORDER BY name
+        `);
+        userOrgs = allOrgs;
+      } catch (error) {
+        console.error('Error fetching all organizations for SDAO:', error);
+        userOrgs = [];
+      }
+    } else {
+      // Regular users get their specific organizations
+      userOrgs = context?.userOrganizations?.length > 0 
+        ? context.userOrganizations 
+        : context?.dataScope?.availableOrganizations?.map(org => ({
+            organization_id: org.value,
+            name: org.label
+          })) || [];
+    }
     
     // Detect if this is a multi-organization query
     const isMultiOrgQuery = context ? detectMultiOrgIntent(content, { ...context, userOrganizations: userOrgs }) : false;
     
-    // Get relevant data based on query type
+    // Get relevant data based on query type and user role
     let responseData = {};
-    if (isMultiOrgQuery && userOrgs.length > 0) {
-      responseData = await getMultiOrgData(
-        userOrgs, 
-        context.activeTab, 
-        context.userRole
-      );
+    if (context?.userRole === 'SDAO') {
+      // SDAO gets all organization data
+      responseData = await getAllOrganizationsData(context.activeTab, context.userRole);
+    } else if (isMultiOrgQuery && userOrgs.length > 0) {
+      // Regular users get their organization data
+      responseData = await getMultiOrgData(userOrgs, context.activeTab, context.userRole);
     } else if (context?.pageData) {
       responseData = context.pageData;
     }
@@ -758,7 +835,7 @@ async function sendMessage(req, res) {
       }
       
       if (Object.keys(responseData).length > 0) {
-        if (isMultiOrgQuery) {
+        if (isMultiOrgQuery || context?.userRole === 'SDAO') {
           contextMessage += '--- MULTI-ORGANIZATION DATA ---\n';
           Object.entries(responseData).forEach(([category, orgData]) => {
             if (typeof orgData === 'object' && !Array.isArray(orgData)) {
@@ -891,6 +968,7 @@ async function sendMessage(req, res) {
 
     // Log for debugging
     console.log('Sending to DeepSeek with enhanced context:', JSON.stringify({
+      userRole: context?.userRole,
       queryType: isMultiOrgQuery ? 'multi_org' : 'current_view',
       organizationCount: userOrgs?.length || 0,
       hasResponseData: Object.keys(responseData).length > 0

@@ -271,20 +271,18 @@ async function updateExecutiveMember({
     role_title,
     rank_level,
     action_by_email,
-    orgVersionId
 }) {
     const connection = await pool.getConnection();
     try {
         [row] = await connection.query(
-            `CALL UpdateExecutiveMember(?, ?, ?, ?, ?, ?, ?)`,
+            `CALL UpdateExecutiveMember(?, ?, ?, ?, ?, ?)`,
             [
                 orgId,
                 email,
                 program_name,
                 role_title,
                 rank_level,
-                action_by_email,
-                orgVersionId
+                action_by_email
             ]
         );
         return row[0];
@@ -963,6 +961,160 @@ async function getUserOrganization(user_id) {
     }
 }
 
+async function getOrganizationCommitteeRoles(orgId, orgVersionId){
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetOrganizationCommitteeRoles(?, ?);', [orgId, orgVersionId]);
+        return rows[0];
+    } catch (error) {
+        console.error('Error fetching organization committee roles:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function getOrganizationExecutives(org_id, org_version_id) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetOrganizationExecutives(?, ?);', [org_id, org_version_id]);
+        return rows[0];
+    } catch (error) {
+        console.error('Error fetching organization executives:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function getOrganizationPermissions(){
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetOrganizationPermissions();');
+        return rows[0];
+    } catch (error) {
+        console.error('Error fetching organization permissions:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+async function updateCommitteePermissions(committee_id, role_type, permissions) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query(
+            'CALL UpdateCommitteePermissions(?, ?, ?)',
+            [committee_id, role_type, JSON.stringify(permissions)]
+        );
+        return rows[0]; // Return the first row of the result set
+    } catch (error) {
+        console.error('Error updating committee permissions:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function updateExecutivePermissions(executive_id, permissions) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query(
+            'CALL UpdateExecutivePermissions(?, ?)',
+            [executive_id, JSON.stringify(permissions)]
+        );
+        return rows[0]; // Return the first row of the result set
+    } catch (error) {
+        console.error('Error updating executive permissions:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function getMemberPermissionOverrides(organization_id, organization_version_id){
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetMemberPermissionOverrides(?, ?);', [organization_id, organization_version_id]);
+        return rows[0];
+    } catch (error) {
+        console.error('Error fetching member permission overrides:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function getEmailSuggestionOverride(organization_id, organization_version_id, pattern) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetEmailSuggestionOverride(?, ?, ?);', [organization_id, organization_version_id, pattern]);
+        return rows[0];
+    } catch (error) {
+        console.error('Error fetching email suggestion override:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function addMemberPermissionOverride(email, permissions, organization_id, organization_version_id, action_by_email) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL AddMemberPermissionOverride(?, ?, ?, ?, ?);', [
+            email, 
+            JSON.stringify(permissions), 
+            organization_id, 
+            organization_version_id, 
+            action_by_email
+        ]);
+        return rows[0];
+    } catch (error) {
+        console.error('Error adding member permission override:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function updateMemberPermissionOverride(member_id, organization_id, organization_version_id, permission_lists, action_by_email) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL UpdateMemberPermissionOverride(?, ?, ?, ?, ?);', [
+            member_id, 
+            organization_id, 
+            organization_version_id, 
+            JSON.stringify(permission_lists), 
+            action_by_email
+        ]);
+        return rows[0];
+    } catch (error) {
+        console.error('Error updating member permission override:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function removeMemberPermissionOverride(member_id, organization_id, organization_version_id, action_by_email) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL RemoveMemberPermissionOverride(?, ?, ?, ?);', [
+            member_id, 
+            organization_id, 
+            organization_version_id, 
+            action_by_email
+        ]);
+        return rows[0];
+    } catch (error) {
+        console.error('Error removing member permission override:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+
+
 module.exports = {
     createOrganizationApplication,
     getSpecificApplication,
@@ -1023,4 +1175,14 @@ module.exports = {
     getAllOrganizations,
     getAllApplicationsByOrganization,
     getUserOrganization,
+    getOrganizationCommitteeRoles,
+    getOrganizationExecutives,
+    getOrganizationPermissions,
+    updateCommitteePermissions,
+    updateExecutivePermissions,
+    getMemberPermissionOverrides,
+    getEmailSuggestionOverride,
+    addMemberPermissionOverride,
+    updateMemberPermissionOverride,
+    removeMemberPermissionOverride
 };

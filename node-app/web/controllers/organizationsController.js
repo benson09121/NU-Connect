@@ -854,8 +854,7 @@ async function updateExecutiveMember(req, res) {
             program_name,
             role_title,
             rank_level,
-            action_by_email,
-            orgVersionId
+            action_by_email
         });
 
         publishToChannel(`organization_officers_${orgId}_${orgVersionId}`, {
@@ -1456,6 +1455,372 @@ async function getAllOrganizations(req, res) {
     }
 }
 
+async function getOrganizationCommitteeRoles(req, res) {
+    try{
+        const {sessionId, organization_id, organization_version_id} = req.query;
+
+        const roles = await organizationsModel.getOrganizationCommitteeRoles(organization_id, organization_version_id);
+
+        if(sessionId){
+            subscribeToChannel(sessionId, `committee_roles_${organization_id}_${organization_version_id}`);
+        }
+        res.json(roles);
+    } catch (error) {
+        console.error('Error fetching organization committee roles:', error);
+        res.status(500).json({
+            error: error.message || "An error occurred while fetching organization committee roles.",
+        });
+    }
+}
+
+async function getOrganizationExecutives(req, res) {
+    try {
+        const { organization_id, organization_version_id, sessionId } = req.query;
+        const executives = await organizationsModel.getOrganizationExecutives(organization_id, organization_version_id);
+        if (sessionId) {
+            subscribeToChannel(sessionId, `executives_${organization_id}_${organization_version_id}`);
+        }
+        res.json(executives);
+    } catch (error) {
+        console.error('Error fetching organization executives:', error);
+        res.status(500).json({
+            error: error.message || "An error occurred while fetching organization executives.",
+        });
+    }
+}
+
+async function getOrganizationPermissions(req, res) {
+    try{
+        const organization_permissions = await organizationsModel.getOrganizationPermissions();
+        res.json(organization_permissions);
+    } catch (error) {
+        console.error('Error fetching organization permissions:', error);
+        res.status(500).json({
+            error: error.message || "An error occurred while fetching organization permissions.",
+        });
+    }
+};
+
+async function updateCommitteePermissions(req, res) {
+    try {
+        const { committee_role_id, committee_id, role_type, permissions, organization_id, organization_version_id } = req.body;
+        
+        // Use committee_role_id if provided, otherwise fall back to committee_id
+        const targetCommitteeId = committee_role_id || committee_id;
+        
+        // Validate required fields
+        if (!targetCommitteeId || !role_type || !Array.isArray(permissions)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Missing required fields: committee_role_id (or committee_id), role_type, and permissions array'
+            });
+        }
+
+        // Map frontend role_type to database values
+        let dbRoleType;
+        if (role_type.toLowerCase() === 'head') {
+            dbRoleType = 'Committee Head';
+        } else if (role_type.toLowerCase() === 'officer') {
+            dbRoleType = 'Committee Officer';
+        } else {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid role_type. Must be "head" or "officer"'
+            });
+        }
+
+        // Update committee permissions
+        const result = await organizationsModel.updateCommitteePermissions(targetCommitteeId, dbRoleType, permissions);
+        console.log(result);
+
+        publishToChannel(`committee_roles_${organization_id}_${organization_version_id}`, {
+            operation: 'UPDATE',
+            data: result
+        });
+
+        res.json({
+            success: true,
+            message: `Committee ${role_type} permissions updated successfully`,
+            data: result
+        });
+
+    } catch (error) {
+        console.error('Error updating committee permissions:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message || "An error occurred while updating committee permissions."
+        });
+    }
+}
+async function updateExecutivePermissions(req, res) {
+    try {
+        const { executive_id, permissions, organization_id, organization_version_id } = req.body;
+        
+        // Validate required fields
+        if (!executive_id || !Array.isArray(permissions)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Missing required fields: executive_id and permissions array'
+            });
+        }
+
+        // Update executive permissions
+        const result = await organizationsModel.updateExecutivePermissions(executive_id, permissions);
+        console.log('Raw result from stored procedure:', result);
+        
+        // Extract the actual data from the wrapper object
+        let formattedResult;
+        if (result && result.executive_roles) {
+            // If stored procedure returns with 'executive_roles' key
+            formattedResult = result.executive_roles;
+        } else if (result && result.updated_executive_role) {
+            // If stored procedure returns with 'updated_executive_role' key, wrap in array
+            formattedResult = [result.updated_executive_role];
+        } else if (Array.isArray(result)) {
+            // If result is already an array
+            formattedResult = result;
+        } else {
+            // Fallback - wrap single object in array
+            formattedResult = [result];
+        }
+
+        console.log('Formatted result for pub/sub:', formattedResult);
+        
+        publishToChannel(`executives_${organization_id}_${organization_version_id}`, {
+            operation: 'UPDATE',
+            data: formattedResult
+        });
+
+        res.json({
+            success: true,
+            message: 'Executive permissions updated successfully',
+            data: formattedResult
+        });
+
+    } catch (error) {
+        console.error('Error updating executive permissions:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message || "An error occurred while updating executive permissions."
+        });
+    }
+}
+
+async function getMemberPermissionOverrides(req, res){
+    try{
+        const {  organization_id, organization_version_id, sessionId } = req.query;
+
+        const overrides = await organizationsModel.getMemberPermissionOverrides(organization_id, organization_version_id);
+        
+        if(sessionId){
+            subscribeToChannel(sessionId, `member_permission_${organization_id}_${organization_version_id}`);
+        }
+        
+        res.status(200).json(overrides);
+    } catch (error) {
+        console.error('Error fetching member permission overrides:', error);
+        res.status(500).json({
+            error: error.message || "An error occurred while fetching member permission overrides.",
+        });
+    }
+}
+
+async function getEmailSuggestionOverride(req, res) {
+    try {
+        const { organization_id, organization_version_id, pattern } = req.query;
+
+
+        // Get email suggestions for users not in permission overrides
+        const suggestions = await organizationsModel.getEmailSuggestionOverride(
+            parseInt(organization_id), 
+            parseInt(organization_version_id),
+            pattern
+        );
+
+        res.json({
+            success: true,
+            message: 'Email suggestion override retrieved successfully',
+            data: suggestions || []
+        });
+
+    } catch (error) {
+        console.error('Error getting email suggestion override:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message || 'An error occurred while fetching email suggestion override'
+        });
+    }
+}
+
+async function addMemberPermissionOverride(req, res) {
+    try {
+        const { email, permissions, organization_id, organization_version_id, user_details } = req.body;
+        const action_by_email = req.user.email;
+
+        // Validate required fields
+        if (!email || !Array.isArray(permissions) || !organization_id || !organization_version_id) {
+            return res.status(400).json({
+                success: false,
+                message: 'Missing required fields: email, permissions array, organization_id, and organization_version_id'
+            });
+        }
+
+        // Validate permissions array format
+        for (const permission of permissions) {
+            if (!permission.permission_name || typeof permission.is_allowed !== 'boolean') {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Each permission must have permission_name and is_allowed (boolean) properties'
+                });
+            }
+        }
+
+        // Add member permission overrides
+        const result = await organizationsModel.addMemberPermissionOverride(
+            email,
+            permissions,
+            parseInt(organization_id),
+            parseInt(organization_version_id),
+            action_by_email
+        );
+
+        // Publish to real-time channel
+        publishToChannel(`member_permission_${organization_id}_${organization_version_id}`, {
+            operation: 'CREATE',
+            data: result,
+            user_details: user_details || null
+        });
+
+        res.json({
+            success: true,
+            message: 'Member permission overrides added successfully',
+            data: result
+        });
+
+    } catch (error) {
+        console.error('Error adding member permission override:', error);
+        
+        // Handle specific error messages from stored procedure
+        let errorMessage = error.message;
+        if (error.sqlMessage) {
+            errorMessage = error.sqlMessage;
+        }
+
+        res.status(500).json({
+            success: false,
+            error: errorMessage || 'An error occurred while adding member permission overrides'
+        });
+    }
+}
+
+async function updateMemberPermissionOverride(req, res) {
+    try {
+        const { member_id, organization_id, organization_version_id, permission_lists } = req.body;
+        const action_by_email = req.user.email;
+
+        // Validate required fields
+        if (!member_id || !organization_id || !organization_version_id || !Array.isArray(permission_lists)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Missing required fields: member_id, organization_id, organization_version_id, and permission_lists array'
+            });
+        }
+
+        // Validate permission_lists array format
+        for (const permission of permission_lists) {
+            if (!permission.permission_name || typeof permission.is_allowed !== 'boolean') {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Each permission must have permission_name and is_allowed (boolean) properties'
+                });
+            }
+        }
+
+        // Update member permission overrides
+        const result = await organizationsModel.updateMemberPermissionOverride(
+            parseInt(member_id),
+            parseInt(organization_id),
+            parseInt(organization_version_id),
+            permission_lists,
+            action_by_email
+        );
+
+        // Publish to real-time channel
+        publishToChannel(`member_permission_${organization_id}_${organization_version_id}`, {
+            operation: 'UPDATE',
+            data: result
+        });
+
+        res.json({
+            success: true,
+            message: 'Member permission overrides updated successfully',
+            data: result
+        });
+
+    } catch (error) {
+        console.error('Error updating member permission override:', error);
+        
+        // Handle specific error messages from stored procedure
+        let errorMessage = error.message;
+        if (error.sqlMessage) {
+            errorMessage = error.sqlMessage;
+        }
+
+        res.status(500).json({
+            success: false,
+            error: errorMessage || 'An error occurred while updating member permission overrides'
+        });
+    }
+}
+
+async function removeMemberPermissionOverride(req, res) {
+    try {
+        const { member_id, organization_id, organization_version_id } = req.body;
+        const action_by_email = req.user.email;
+
+        // Validate required fields
+        if (!member_id || !organization_id || !organization_version_id) {
+            return res.status(400).json({
+                success: false,
+                message: 'Missing required fields: member_id, organization_id, and organization_version_id'
+            });
+        }
+
+        // Remove all member permission overrides
+        const result = await organizationsModel.removeMemberPermissionOverride(
+            parseInt(member_id),
+            parseInt(organization_id),
+            parseInt(organization_version_id),
+            action_by_email
+        );
+        console.log(result);
+        // Publish to real-time channel
+        publishToChannel(`member_permission_${organization_id}_${organization_version_id}`, {
+            operation: 'DELETE',
+            data: result
+        });
+
+        res.json({
+            success: true,
+            message: 'All member permission overrides removed successfully',
+            data: result
+        });
+
+    } catch (error) {
+        console.error('Error removing member permission override:', error);
+        
+        // Handle specific error messages from stored procedure
+        let errorMessage = error.message;
+        if (error.sqlMessage) {
+            errorMessage = error.sqlMessage;
+        }
+
+        res.status(500).json({
+            success: false,
+            error: errorMessage || 'An error occurred while removing member permission overrides'
+        });
+    }
+}
 
 
 module.exports = {
@@ -1507,5 +1872,15 @@ module.exports = {
     checkOrgRenewalStatus,
     getAllApplicationsByOrganization,
     getOrganizationDashboardOverview,
-    getAllOrganizations
+    getAllOrganizations,
+    getOrganizationCommitteeRoles,
+    getOrganizationExecutives,
+    getOrganizationPermissions,
+    updateCommitteePermissions,
+    updateExecutivePermissions,
+    getMemberPermissionOverrides,
+    getEmailSuggestionOverride,
+    addMemberPermissionOverride,
+    updateMemberPermissionOverride,
+    removeMemberPermissionOverride
 };
