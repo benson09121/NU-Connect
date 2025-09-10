@@ -1,4 +1,5 @@
 const eventModel = require('../models/eventModel');
+const userModel = require('../models/userModel');
 const { redisClient, redisSubscriber } = require('../../config/redis');
 const path = require('path');
 const fs = require('fs');
@@ -11,7 +12,9 @@ const { get } = require('http');
 
 async function getEvents(req, res) {
     try {
-        const events = await eventModel.getAllEvents();
+        const user = await userModel.getUser(req.user.email);
+        const events = await eventModel.getAllEvents(user.user_id);
+        console.log(events);
         res.json(events);
     } catch (error) {
         res.status(500).json({ message: error.message });
@@ -110,9 +113,10 @@ async function archiveEvent(req, res) {
 async function getSpecificEvent(req, res) {
     try {
         const eventId = parseInt(req.params.eventId, 10);
-        const userId = req.params.userId;
-        console.log(userId);
-        const event = await eventModel.getSpecificEvent(eventId, userId);
+        const userEmail = req.params.userEmail;
+        console.log(userEmail);
+        const user = await userModel.getUser(userEmail);
+        const event = await eventModel.getSpecificEvent(eventId, user.user_id);
         let attendees = await eventModel.getEventAttendees(eventId);
         if (attendees) {
             attendees = attendees[0][0];

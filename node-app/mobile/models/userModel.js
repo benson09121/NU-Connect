@@ -5,8 +5,8 @@ require('dotenv').config();
 async function getUser(mail) {
     const connection = await pool.getConnection();
     try {
-        const [rows] = await connection.query('SELECT * FROM tbl_user WHERE email = ?', [mail]);
-        return rows;
+        const [rows] = await connection.query('CALL GetEmail(?);', [mail]);
+        return rows[0][0];
     } finally {
         connection.release();
     }
@@ -15,30 +15,19 @@ async function getUser(mail) {
 async function generateToken(email) {
     const connection = await pool.getConnection();
     try {
-        const [rows] = await connection.query('SELECT * FROM tbl_user WHERE email = ?', [email]);
+        const [rows] = await connection.query('CALL GetUserPermissions(?)', [email]);
         if (!rows || rows.length === 0) { // Ensure rows is not undefined or empty
             throw new Error('User not found');
         }
-        const { user_id, email: userEmail, f_name, l_name } = rows[0]; // Use a different variable name for destructured email
-        const result = { user_id, email: userEmail, f_name, l_name };
+        const result = rows[0]; // Extract the first element which contains user data and permissions
+        console.log(result);
         const token = jwt.sign({ result }, process.env.JWT_SECRET, { expiresIn: '7d' });
+        console.log(token);
         return token;
     } finally {
         connection.release();
     }
 }
 
-async function createUser(id, mail, surname, givenName) {
-    const connection = await pool.getConnection();
-    try {
-        const [rows] = await connection.query(
-            'INSERT INTO tbl_user (user_id, email, l_name, f_name) VALUES (?, ?, ?, ?)',
-            [id, mail, surname, givenName]
-        );
-        return rows;
-    } finally {
-        connection.release();
-    }
-}
 
-module.exports = { getUser, generateToken, createUser };
+module.exports = { getUser, generateToken };

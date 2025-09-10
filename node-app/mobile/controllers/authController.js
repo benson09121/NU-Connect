@@ -3,8 +3,7 @@ const jwt = require('jsonwebtoken');
 
 async function login(req, res) {
     try {
-        const { mail, surname, givenName, id } = req.body;
-        console.log("Login request received:", { mail, surname, givenName, id });
+        const { mail } = req.body;
         const result = await userModel.getUser(mail);
         if (result && result.length > 0) {
             const token = await userModel.generateToken(mail);
