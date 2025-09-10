@@ -3764,127 +3764,147 @@ END $$
 DELIMITER ;
 
 DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE GetEventsByUserRole(IN p_user_id VARCHAR(200))
+DROP PROCEDURE IF EXISTS GetEventsByUserRole $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetEventsByUserRole(
+    IN p_user_id VARCHAR(200)
+)
 BEGIN
-    DECLARE v_role_name VARCHAR(100);
-    DECLARE v_college_id INT;
-    DECLARE v_program_id INT;
+    DECLARE v_role_name  VARCHAR(100) DEFAULT '';
+    DECLARE v_college_id INT          DEFAULT NULL;
+    DECLARE v_program_id INT          DEFAULT NULL;
 
-    -- Get user role, program, and college
-    SELECT r.role_name, u.program_id, p.college_id
+    /* Load user context (default role to empty string to avoid NULL/NOT IN traps) */
+    SELECT COALESCE(r.role_name,''), u.program_id, pr.college_id
       INTO v_role_name, v_program_id, v_college_id
       FROM tbl_user u
-      JOIN tbl_role r ON u.role_id = r.role_id
-      LEFT JOIN tbl_program p ON u.program_id = p.program_id
+      JOIN tbl_role r  ON u.role_id = r.role_id
+ LEFT JOIN tbl_program pr ON pr.program_id = u.program_id
      WHERE u.user_id = p_user_id
      LIMIT 1;
 
-    -- SDAO or Academic Director: show all events
-    IF v_role_name IN ('SDAO', 'Academic Director') THEN
-        SELECT 
-            e.*, 
-            o.name AS organization_name,
-            (
-                SELECT JSON_ARRAYAGG(
-                    JSON_OBJECT(
-                        'organization_id', ec.organization_id,
-                        'organization_name', co.name,
-                        'base_program_id', co.base_program_id,
-                        'logo', co.logo
-                    )
-                )
-                FROM tbl_event_collaborator ec
-                LEFT JOIN tbl_organization co ON ec.organization_id = co.organization_id
-                WHERE ec.event_id = e.event_id
-            ) AS collaborators
-        FROM tbl_event e
-        LEFT JOIN tbl_organization o ON e.organization_id = o.organization_id;
+    /* Build helper sets */
+    DROP TEMPORARY TABLE IF EXISTS tmp_my_orgs;
+    CREATE TEMPORARY TABLE tmp_my_orgs (
+        organization_id INT PRIMARY KEY
+    ) ENGINE=Memory;
 
-    -- Dean: show all SDAO events, all org events under same college, and collaborations
-    ELSEIF v_role_name = 'Dean' THEN
-        SELECT DISTINCT 
-            e.*, 
-            o.name AS organization_name,
-            (
-                SELECT JSON_ARRAYAGG(
-                    JSON_OBJECT(
-                        'organization_id', ec.organization_id,
-                        'organization_name', co.name,
-                        'base_program_id', co.base_program_id,
-                        'logo', co.logo
-                    )
-                )
-                FROM tbl_event_collaborator ec
-                LEFT JOIN tbl_organization co ON ec.organization_id = co.organization_id
-                WHERE ec.event_id = e.event_id
-            ) AS collaborators
-        FROM tbl_event e
-        LEFT JOIN tbl_organization o ON e.organization_id = o.organization_id
-        LEFT JOIN tbl_program p ON o.base_program_id = p.program_id
-        LEFT JOIN tbl_event_collaborator ec ON e.event_id = ec.event_id
-        LEFT JOIN tbl_organization co ON ec.organization_id = co.organization_id
-        LEFT JOIN tbl_program cp ON co.base_program_id = cp.program_id
-        WHERE 
-            e.event_type = 'SDAO'
-            OR (p.college_id = v_college_id)
-            OR (cp.college_id = v_college_id);
+    INSERT IGNORE INTO tmp_my_orgs (organization_id)
+    SELECT DISTINCT om.organization_id
+      FROM tbl_organization_members om
+     WHERE om.user_id = p_user_id;
 
-    -- Program Chair: show all SDAO events, all org events under same program, and collaborations
-    ELSEIF v_role_name = 'Program Chair' THEN
-        SELECT DISTINCT 
-            e.*, 
-            o.name AS organization_name,
-            (
-                SELECT JSON_ARRAYAGG(
-                    JSON_OBJECT(
-                        'organization_id', ec.organization_id,
-                        'organization_name', co.name,
-                        'base_program_id', co.base_program_id,
-                        'logo', co.logo
-                    )
-                )
-                FROM tbl_event_collaborator ec
-                LEFT JOIN tbl_organization co ON ec.organization_id = co.organization_id
-                WHERE ec.event_id = e.event_id
-            ) AS collaborators
-        FROM tbl_event e
-        LEFT JOIN tbl_organization o ON e.organization_id = o.organization_id
-        LEFT JOIN tbl_event_collaborator ec ON e.event_id = ec.event_id
-        LEFT JOIN tbl_organization co ON ec.organization_id = co.organization_id
-        WHERE 
-            e.event_type = 'SDAO'
-            OR (o.base_program_id = v_program_id)
-            OR (co.base_program_id = v_program_id);
+    DROP TEMPORARY TABLE IF EXISTS tmp_allowed_events;
+    CREATE TEMPORARY TABLE tmp_allowed_events (
+        event_id INT PRIMARY KEY
+    ) ENGINE=Memory;
 
-    -- Other users: SDAO/institution events, org-owned events, and collaborations
-    ELSE
-        SELECT DISTINCT 
-            e.*, 
-            o.name AS organization_name,
-            (
-                SELECT JSON_ARRAYAGG(
-                    JSON_OBJECT(
-                        'organization_id', ec.organization_id,
-                        'organization_name', co.name,
-                        'base_program_id', co.base_program_id,
-                        'logo', co.logo
-                    )
-                )
-                FROM tbl_event_collaborator ec
-                LEFT JOIN tbl_organization co ON ec.organization_id = co.organization_id
-                WHERE ec.event_id = e.event_id
-            ) AS collaborators
-        FROM tbl_event e
-        LEFT JOIN tbl_organization o ON e.organization_id = o.organization_id
-        LEFT JOIN tbl_event_collaborator ec ON e.event_id = ec.event_id
-        LEFT JOIN tbl_organization_members om ON om.organization_id = ec.organization_id AND om.user_id = p_user_id
-        WHERE 
-            e.event_type = 'SDAO'
-            OR e.user_id = p_user_id
-            OR e.organization_id IN (SELECT organization_id FROM tbl_organization_members WHERE user_id = p_user_id)
-            OR om.user_id IS NOT NULL;
+    /* SDAO / Academic Director → all events */
+    IF v_role_name IN ('SDAO','Academic Director') THEN
+        INSERT IGNORE INTO tmp_allowed_events(event_id)
+        SELECT e.event_id FROM tbl_event e;
     END IF;
-END$$
+
+    /* Dean → SDAO OR owner-college OR collaborator-college */
+    IF v_role_name = 'Dean' AND v_college_id IS NOT NULL THEN
+        /* owner-college */
+        INSERT IGNORE INTO tmp_allowed_events(event_id)
+        SELECT e.event_id
+          FROM tbl_event e
+          LEFT JOIN tbl_organization o ON o.organization_id = e.organization_id
+          LEFT JOIN tbl_program    p ON p.program_id = o.base_program_id
+         WHERE e.event_type = 'SDAO'
+            OR (p.college_id = v_college_id);
+
+        /* collaborator-college */
+        INSERT IGNORE INTO tmp_allowed_events(event_id)
+        SELECT ec.event_id
+          FROM tbl_event_collaborator ec
+          JOIN tbl_organization co ON co.organization_id = ec.organization_id
+          LEFT JOIN tbl_program cp ON cp.program_id = co.base_program_id
+         WHERE cp.college_id = v_college_id;
+    END IF;
+
+    /* Program Chair → SDAO OR owner-program OR collaborator-program */
+    IF v_role_name = 'Program Chair' AND v_program_id IS NOT NULL THEN
+        /* owner-program */
+        INSERT IGNORE INTO tmp_allowed_events(event_id)
+        SELECT e.event_id
+          FROM tbl_event e
+          LEFT JOIN tbl_organization o ON o.organization_id = e.organization_id
+         WHERE e.event_type = 'SDAO'
+            OR (o.base_program_id = v_program_id);
+
+        /* collaborator-program */
+        INSERT IGNORE INTO tmp_allowed_events(event_id)
+        SELECT ec.event_id
+          FROM tbl_event_collaborator ec
+          JOIN tbl_organization co ON co.organization_id = ec.organization_id
+         WHERE co.base_program_id = v_program_id;
+    END IF;
+
+    /* Other users (students, staff, etc.) */
+    IF v_role_name NOT IN ('SDAO','Academic Director','Dean','Program Chair') THEN
+        /* Global SDAO/System */
+        INSERT IGNORE INTO tmp_allowed_events(event_id)
+        SELECT e.event_id
+          FROM tbl_event e
+         WHERE e.event_type IN ('SDAO','System');
+
+        /* Events created by the user (covers proposals they filed) */
+        INSERT IGNORE INTO tmp_allowed_events(event_id)
+        SELECT e.event_id
+          FROM tbl_event e
+         WHERE e.user_id = p_user_id;
+
+        /* Owner org is any of the user's orgs */
+        INSERT IGNORE INTO tmp_allowed_events(event_id)
+        SELECT e.event_id
+          FROM tbl_event e
+          JOIN tmp_my_orgs mo ON mo.organization_id = e.organization_id;
+
+        /* Collaborator is any of the user's orgs */
+        INSERT IGNORE INTO tmp_allowed_events(event_id)
+        SELECT ec.event_id
+          FROM tbl_event_collaborator ec
+          JOIN tmp_my_orgs mo ON mo.organization_id = ec.organization_id;
+
+        /* ✅ Explicitly include events where the user is the APPLICANT in the event application */
+        INSERT IGNORE INTO tmp_allowed_events(event_id)
+        SELECT ea.proposed_event_id
+          FROM tbl_event_application ea
+         WHERE ea.applicant_user_id = p_user_id
+           AND ea.proposed_event_id IS NOT NULL;
+
+        /* ✅ And proposals filed by the user's orgs (even if another user filed) */
+        INSERT IGNORE INTO tmp_allowed_events(event_id)
+        SELECT ea.proposed_event_id
+          FROM tbl_event_application ea
+          JOIN tmp_my_orgs mo ON mo.organization_id = ea.organization_id
+         WHERE ea.proposed_event_id IS NOT NULL;
+    END IF;
+
+    /* Return all matched events (ALL STATUSES, ALL DATES) + collaborators JSON + owner org name */
+    SELECT
+        e.*,
+        o.name AS organization_name,
+        (
+            SELECT JSON_ARRAYAGG(
+                       JSON_OBJECT(
+                           'organization_id', co.organization_id,
+                           'organization_name', co.name,
+                           'base_program_id', co.base_program_id,
+                           'logo', co.logo
+                       )
+                   )
+              FROM tbl_event_collaborator ec
+              LEFT JOIN tbl_organization co ON co.organization_id = ec.organization_id
+             WHERE ec.event_id = e.event_id
+        ) AS collaborators
+    FROM tbl_event e
+    LEFT JOIN tbl_organization o ON o.organization_id = e.organization_id
+    JOIN tmp_allowed_events ae ON ae.event_id = e.event_id
+    ORDER BY e.start_date DESC, e.created_at DESC;
+END $$
 DELIMITER ;
 
 DELIMITER $$
@@ -5197,6 +5217,261 @@ END$$
 DELIMITER ;
 
 DELIMITER $$
+DROP PROCEDURE IF EXISTS GetOrgRelevantLogs $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetOrgRelevantLogs(
+    IN p_user_id    VARCHAR(200),
+    IN p_type       VARCHAR(100),
+    IN p_start_date DATETIME,
+    IN p_end_date   DATETIME
+)
+BEGIN
+    DECLARE v_role_name  VARCHAR(100) DEFAULT NULL;
+    DECLARE v_program_id INT          DEFAULT NULL;
+    DECLARE v_college_id INT          DEFAULT NULL;
+
+    /* Identify the user */
+    SELECT r.role_name, u.program_id, pr.college_id
+      INTO v_role_name, v_program_id, v_college_id
+      FROM tbl_user u
+      JOIN tbl_role r  ON r.role_id = u.role_id
+ LEFT JOIN tbl_program pr ON pr.program_id = u.program_id
+     WHERE u.user_id = p_user_id
+     LIMIT 1;
+
+    /* SDAO / Academic Director => all logs, honor filters */
+    IF v_role_name IN ('SDAO','Academic Director') THEN
+        SELECT 
+            l.log_id,
+            l.user_id,
+            CONCAT(u.f_name, ' ', u.l_name) AS full_name,
+            u.profile_picture,
+            l.timestamp,
+            l.action_type AS action,
+            l.redirect_url,
+            l.file_path,
+            l.meta_data,
+            l.type
+        FROM tbl_logs l
+        LEFT JOIN tbl_user u ON u.user_id = l.user_id
+        WHERE (p_type IS NULL OR l.type = p_type)
+          AND (p_start_date IS NULL OR l.timestamp >= p_start_date)
+          AND (p_end_date   IS NULL OR l.timestamp <= p_end_date)
+        ORDER BY l.timestamp DESC;
+    ELSE
+        /* Build user's relevant org set */
+        DROP TEMPORARY TABLE IF EXISTS tmp_user_orgs;
+        CREATE TEMPORARY TABLE tmp_user_orgs (
+            organization_id INT PRIMARY KEY
+        ) ENGINE=Memory;
+
+        /* Adviser orgs */
+        INSERT IGNORE INTO tmp_user_orgs (organization_id)
+        SELECT o.organization_id
+          FROM tbl_organization o
+         WHERE o.adviser_id = p_user_id;
+
+        /* Active member orgs */
+        INSERT IGNORE INTO tmp_user_orgs (organization_id)
+        SELECT DISTINCT m.organization_id
+          FROM tbl_organization_members m
+         WHERE m.user_id = p_user_id
+           AND (m.status IS NULL OR m.status = 'Active');
+
+        /* Program Chair coverage */
+        IF v_role_name = 'Program Chair' AND v_program_id IS NOT NULL THEN
+            INSERT IGNORE INTO tmp_user_orgs (organization_id)
+            SELECT o.organization_id
+              FROM tbl_organization o
+             WHERE o.base_program_id = v_program_id;
+
+            INSERT IGNORE INTO tmp_user_orgs (organization_id)
+            SELECT oc.organization_id
+              FROM tbl_organization_course oc
+             WHERE oc.program_id = v_program_id;
+        END IF;
+
+        /* Dean coverage */
+        IF v_role_name = 'Dean' AND v_college_id IS NOT NULL THEN
+            INSERT IGNORE INTO tmp_user_orgs (organization_id)
+            SELECT o.organization_id
+              FROM tbl_organization o
+              JOIN tbl_program bp ON bp.program_id = o.base_program_id
+             WHERE bp.college_id = v_college_id;
+
+            INSERT IGNORE INTO tmp_user_orgs (organization_id)
+            SELECT DISTINCT oc.organization_id
+              FROM tbl_organization_course oc
+              JOIN tbl_program p ON p.program_id = oc.program_id
+             WHERE p.college_id = v_college_id;
+        END IF;
+
+        /* Expand & resolve logs → owner org + event id (for collaborator checks) */
+        WITH
+        log_expanded AS (
+            SELECT
+              l.log_id,
+              l.user_id,
+              l.timestamp,
+              l.action_type,
+              l.redirect_url,
+              l.file_path,
+              l.meta_data,
+              l.type,
+
+              /* JSON candidates (different apps use different keys) */
+              JSON_UNQUOTE(JSON_EXTRACT(l.meta_data, '$.organization_id'))    AS org_json1,
+              JSON_UNQUOTE(JSON_EXTRACT(l.meta_data, '$.organizationId'))     AS org_json2,
+              JSON_UNQUOTE(JSON_EXTRACT(l.meta_data, '$.org_id'))             AS org_json3,
+              JSON_UNQUOTE(JSON_EXTRACT(l.meta_data, '$.orgId'))              AS org_json4,
+              JSON_UNQUOTE(JSON_EXTRACT(l.meta_data, '$.data.organization_id')) AS org_json5,
+
+              JSON_UNQUOTE(JSON_EXTRACT(l.meta_data, '$.event_id'))           AS evt_json1,
+              JSON_UNQUOTE(JSON_EXTRACT(l.meta_data, '$.eventId'))            AS evt_json2,
+              JSON_UNQUOTE(JSON_EXTRACT(l.meta_data, '$.event.id'))           AS evt_json3,
+              JSON_UNQUOTE(JSON_EXTRACT(l.meta_data, '$.data.event_id'))      AS evt_json4,
+
+              JSON_UNQUOTE(JSON_EXTRACT(l.meta_data, '$.transaction_id'))     AS txn_json1,
+              JSON_UNQUOTE(JSON_EXTRACT(l.meta_data, '$.transactionId'))      AS txn_json2,
+
+              JSON_UNQUOTE(JSON_EXTRACT(l.meta_data, '$.application_id'))         AS app_json1,
+              JSON_UNQUOTE(JSON_EXTRACT(l.meta_data, '$.event_application_id'))   AS app_json2,
+              JSON_UNQUOTE(JSON_EXTRACT(l.meta_data, '$.eventApplicationId'))     AS app_json3,
+
+              /* URL extraction (support absolute and nested paths) */
+              CASE
+                WHEN LOCATE('/events/', l.redirect_url) > 0
+                  THEN SUBSTRING_INDEX(SUBSTRING(l.redirect_url, LOCATE('/events/', l.redirect_url) + 8), '/', 1)
+                WHEN LOCATE('/event/', l.redirect_url) > 0
+                  THEN SUBSTRING_INDEX(SUBSTRING(l.redirect_url, LOCATE('/event/', l.redirect_url) + 7), '/', 1)
+                ELSE NULL
+              END AS evt_url_id,
+
+              CASE
+                WHEN LOCATE('/organizations/', l.redirect_url) > 0
+                  THEN SUBSTRING_INDEX(SUBSTRING(l.redirect_url, LOCATE('/organizations/', l.redirect_url) + 15), '/', 1)
+                WHEN LOCATE('/organization/', l.redirect_url) > 0
+                  THEN SUBSTRING_INDEX(SUBSTRING(l.redirect_url, LOCATE('/organization/', l.redirect_url) + 14), '/', 1)
+                WHEN LOCATE('/org/', l.redirect_url) > 0
+                  THEN SUBSTRING_INDEX(SUBSTRING(l.redirect_url, LOCATE('/org/', l.redirect_url) + 5), '/', 1)
+                ELSE NULL
+              END AS org_url_id,
+
+              CASE
+                WHEN LOCATE('/transactions/', l.redirect_url) > 0
+                  THEN SUBSTRING_INDEX(SUBSTRING(l.redirect_url, LOCATE('/transactions/', l.redirect_url) + 14), '/', 1)
+                WHEN LOCATE('/transaction/', l.redirect_url) > 0
+                  THEN SUBSTRING_INDEX(SUBSTRING(l.redirect_url, LOCATE('/transaction/', l.redirect_url) + 13), '/', 1)
+                ELSE NULL
+              END AS txn_url_id
+            FROM tbl_logs l
+        ),
+        log_resolved AS (
+            SELECT
+              le.*,
+
+              /* Best-effort unified IDs (cast to UNSIGNED IF numeric) */
+              CAST(
+                  NULLIF(
+                      COALESCE(le.org_json1, le.org_json2, le.org_json3, le.org_json4, le.org_json5, le.org_url_id),
+                      ''
+                  ) AS UNSIGNED
+              ) AS org_id_any,
+
+              CAST(
+                  NULLIF(
+                      COALESCE(le.evt_json1, le.evt_json2, le.evt_json3, le.evt_json4, le.evt_url_id),
+                      ''
+                  ) AS UNSIGNED
+              ) AS evt_id_any,
+
+              CAST(
+                  NULLIF(
+                      COALESCE(le.txn_json1, le.txn_json2, le.txn_url_id),
+                      ''
+                  ) AS UNSIGNED
+              ) AS txn_id_any,
+
+              CAST(
+                  NULLIF(
+                      COALESCE(le.app_json1, le.app_json2, le.app_json3),
+                      ''
+                  ) AS UNSIGNED
+              ) AS app_id_any
+            FROM log_expanded le
+        ),
+        log_with_owner AS (
+            SELECT
+              lr.*,
+
+              /* owner-org resolver */
+              COALESCE(
+                lr.org_id_any,
+
+                /* event → owner */
+                (SELECT e.organization_id
+                   FROM tbl_event e
+                  WHERE e.event_id = lr.evt_id_any
+                  LIMIT 1),
+
+                /* txn → membership org */
+                (SELECT tm.organization_id
+                   FROM tbl_transaction_membership tm
+                  WHERE tm.transaction_id = lr.txn_id_any
+                  LIMIT 1),
+
+                /* txn → event → owner */
+                (SELECT e.organization_id
+                   FROM tbl_transaction_event te
+                   JOIN tbl_event e ON e.event_id = te.event_id
+                  WHERE te.transaction_id = lr.txn_id_any
+                  LIMIT 1),
+
+                /* application → org */
+                (SELECT ea.organization_id
+                   FROM tbl_event_application ea
+                  WHERE ea.event_application_id = lr.app_id_any
+                  LIMIT 1)
+              ) AS owner_org_id
+            FROM log_resolved lr
+        )
+        SELECT 
+            lwo.log_id,
+            lwo.user_id,
+            CONCAT(u.f_name, ' ', u.l_name) AS full_name,
+            u.profile_picture,
+            lwo.timestamp,
+            lwo.action_type AS action,
+            lwo.redirect_url,
+            lwo.file_path,
+            lwo.meta_data,
+            lwo.type
+        FROM log_with_owner lwo
+        LEFT JOIN tbl_user u ON u.user_id = lwo.user_id
+        /* Relevant if:
+           1) The resolved owner org is one of the user's orgs, OR
+           2) The log references an event (evt_id_any) that has a collaborator that is one of the user's orgs.
+        */
+        WHERE
+          (
+              EXISTS (SELECT 1 FROM tmp_user_orgs uo WHERE uo.organization_id = lwo.owner_org_id)
+           OR ( lwo.evt_id_any IS NOT NULL
+                AND EXISTS (
+                    SELECT 1
+                      FROM tbl_event_collaborator ec
+                      JOIN tmp_user_orgs uo ON uo.organization_id = ec.organization_id
+                     WHERE ec.event_id = lwo.evt_id_any
+                )
+              )
+          )
+          AND (p_type IS NULL OR lwo.type = p_type)
+          AND (p_start_date IS NULL OR lwo.timestamp >= p_start_date)
+          AND (p_end_date   IS NULL OR lwo.timestamp <= p_end_date)
+        ORDER BY lwo.timestamp DESC;
+    END IF;
+END $$
+DELIMITER ;
+
+DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE CheckOrganizationName(
     IN p_organization_name VARCHAR(100)
 )
@@ -5729,7 +6004,7 @@ CREATE DEFINER='admin'@'%' PROCEDURE GetEventApplicationDetails(
     IN p_event_application_id INT
 )
 BEGIN
-    -- Get basic event application information
+    /* ========== 1) Application + Event + Collaborators (JSON) ========== */
     SELECT 
         ea.event_application_id,
         ea.organization_id,
@@ -5758,17 +6033,49 @@ BEGIN
         applicant.email AS applicant_email,
         ea.status AS application_status,
         ea.created_at AS application_created_at,
-        ea.updated_at AS application_updated_at
+        ea.updated_at AS application_updated_at,
+
+        /* NEW: collaborators as JSON array (empty [] if none) */
+        (
+            SELECT IFNULL(
+                JSON_ARRAYAGG(
+                    JSON_OBJECT(
+                        'organization_id', ec.organization_id,
+                        'organization_name', co.name,
+                        'base_program_id', co.base_program_id,
+                        'logo', co.logo
+                    )
+                ),
+                JSON_ARRAY()
+            )
+            FROM tbl_event_collaborator ec
+            LEFT JOIN tbl_organization co
+                   ON co.organization_id = ec.organization_id
+            WHERE ec.event_id = ea.proposed_event_id
+        ) AS collaborators,
+
+        /* Optional helper: how many collaborators */
+        (
+            SELECT COUNT(*)
+            FROM tbl_event_collaborator ec
+            WHERE ec.event_id = ea.proposed_event_id
+        ) AS collaborators_count
+
     FROM tbl_event_application ea
-    JOIN tbl_organization o ON ea.organization_id = o.organization_id
-    LEFT JOIN tbl_event e ON ea.proposed_event_id = e.event_id
-    JOIN tbl_renewal_cycle rc ON ea.organization_id = rc.organization_id 
-        AND ea.cycle_number = rc.cycle_number
-    JOIN tbl_user applicant ON ea.applicant_user_id = applicant.user_id
-    JOIN tbl_user adviser ON o.adviser_id = adviser.user_id
+    JOIN tbl_organization o
+      ON ea.organization_id = o.organization_id
+    LEFT JOIN tbl_event e
+      ON ea.proposed_event_id = e.event_id
+    JOIN tbl_renewal_cycle rc
+      ON ea.organization_id = rc.organization_id 
+     AND ea.cycle_number   = rc.cycle_number
+    JOIN tbl_user applicant
+      ON ea.applicant_user_id = applicant.user_id
+    JOIN tbl_user adviser
+      ON o.adviser_id = adviser.user_id
     WHERE ea.event_application_id = p_event_application_id;
-    
-    -- Get all submitted requirements for this application
+
+    /* ========== 2) Submitted requirements for this application (unchanged) ========== */
     SELECT 
         ers.submission_id,
         ers.requirement_id,
@@ -5779,11 +6086,13 @@ BEGIN
         CONCAT(u.f_name, ' ', u.l_name) AS submitted_by_name,
         ers.submitted_at
     FROM tbl_event_requirement_submissions ers
-    JOIN tbl_event_application_requirement ear ON ers.requirement_id = ear.requirement_id
-    JOIN tbl_user u ON ers.submitted_by = u.user_id
+    JOIN tbl_event_application_requirement ear
+      ON ers.requirement_id = ear.requirement_id
+    JOIN tbl_user u
+      ON ers.submitted_by = u.user_id
     WHERE ers.event_application_id = p_event_application_id
     ORDER BY ear.is_applicable_to, ear.requirement_name;
-END$$
+END $$
 DELIMITER ;
 
 DELIMITER $$
@@ -6866,7 +7175,7 @@ BEGIN
               ') has been closed. All pending applications in this period were rejected.'
             ),
             NULL,                 -- url
-            'application',        -- entity_type
+            'system',        -- entity_type
             v_period_id,          -- entity_id (period context)
             p_terminated_by,      -- sender_id
             COALESCE(v_applicant_emails, JSON_ARRAY()), -- recipients JSON
@@ -11330,47 +11639,179 @@ END$$
 DELIMITER ;
 
 DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE GetSystemCounts()
+CREATE DEFINER='admin'@'%' PROCEDURE GetSystemCounts(
+    IN p_user_id VARCHAR(200) -- pass NULL/'' for system-only totals
+)
 BEGIN
-    DECLARE v_total_orgs INT DEFAULT 0;
-    DECLARE v_total_app_org INT DEFAULT 0;
-    DECLARE v_total_app_user INT DEFAULT 0;
-    DECLARE v_total_event_apps INT DEFAULT 0;
+    /* ---------- System-wide totals ---------- */
+    DECLARE v_total_orgs            INT DEFAULT 0;
+    DECLARE v_total_app_org         INT DEFAULT 0;
+    DECLARE v_total_app_user        INT DEFAULT 0;
+    DECLARE v_total_event_apps      INT DEFAULT 0;
     DECLARE v_total_upcoming_events INT DEFAULT 0;
 
-    -- Total organizations (all rows)
-    SELECT COUNT(*) INTO v_total_orgs
-    FROM tbl_organization;
+    /* ---------- Student-scoped ---------- */
+    DECLARE v_student_pending_proposals    INT DEFAULT 0;
+    DECLARE v_student_pending_transactions INT DEFAULT 0;
+    DECLARE v_student_upcoming_events      INT DEFAULT 0;
+    DECLARE v_student_total_reports        INT DEFAULT 0; -- post-event only
 
-    -- Total organization applications (only Pending)
-    SELECT COUNT(*) INTO v_total_app_org
-    FROM tbl_application
-    WHERE status = 'Pending';
+    /* ---------- Adviser-scoped ---------- */
+    DECLARE v_adviser_total_members    INT DEFAULT 0;
+    DECLARE v_adviser_total_reports    INT DEFAULT 0;
+    DECLARE v_adviser_total_events     INT DEFAULT 0;
+    DECLARE v_adviser_upcoming_events  INT DEFAULT 0;
 
-    -- Total user applications (only Pending)
-    SELECT COUNT(*) INTO v_total_app_user
-    FROM tbl_user_application
-    WHERE status = 'Pending';
+    /* ---------- System totals ---------- */
+    SELECT COUNT(*) INTO v_total_orgs            FROM tbl_organization;
+    SELECT COUNT(*) INTO v_total_app_org         FROM tbl_application      WHERE status = 'Pending';
+    SELECT COUNT(*) INTO v_total_app_user        FROM tbl_user_application WHERE status = 'Pending';
+    SELECT COUNT(*) INTO v_total_event_apps      FROM tbl_event_application;
+    SELECT COUNT(*) INTO v_total_upcoming_events FROM tbl_event
+     WHERE status = 'Approved' AND start_date >= CURDATE();
 
-    -- Total event proposals / applications
-    SELECT COUNT(*) INTO v_total_event_apps
-    FROM tbl_event_application;
+    /* ---------- If no user provided, return system totals only ---------- */
+    IF p_user_id IS NULL OR p_user_id = '' THEN
 
-    -- Total upcoming events (approved and starting today or later)
-    SELECT COUNT(*) INTO v_total_upcoming_events
-    FROM tbl_event
-    WHERE status = 'Approved'
-      AND start_date >= CURDATE();
+        SELECT
+            v_total_orgs            AS total_organizations,
+            v_total_app_org         AS total_organization_applications,
+            v_total_app_user        AS total_user_applications,
+            (v_total_app_org + v_total_app_user) AS total_applications,
+            v_total_event_apps      AS total_event_proposals,
+            v_total_upcoming_events AS total_upcoming_events,
 
-    -- Return a single row with all counts
-    SELECT
-        v_total_orgs AS total_organizations,
-        v_total_app_org AS total_organization_applications,
-        v_total_app_user AS total_user_applications,
-        (v_total_app_org + v_total_app_user) AS total_applications,
-        v_total_event_apps AS total_event_proposals,
-        v_total_upcoming_events AS total_upcoming_events;
-END$$
+            /* student-scoped (zero without user) */
+            v_student_pending_proposals    AS student_pending_proposals,
+            v_student_pending_transactions AS student_pending_transactions,
+            v_student_upcoming_events      AS student_upcoming_events,
+            v_student_total_reports        AS student_total_reports,
+
+            /* adviser-scoped (zero without user) */
+            v_adviser_total_members      AS adviser_total_members,
+            v_adviser_total_reports      AS adviser_total_reports,
+            v_adviser_total_events       AS adviser_total_events,
+            v_adviser_upcoming_events    AS adviser_upcoming_events;
+
+    ELSE
+        /* ---------- Build per-user organization sets ---------- */
+        DROP TEMPORARY TABLE IF EXISTS tmp_student_orgs;
+        CREATE TEMPORARY TABLE tmp_student_orgs (
+            organization_id INT PRIMARY KEY
+        ) ENGINE=Memory;
+
+        INSERT IGNORE INTO tmp_student_orgs (organization_id)
+        SELECT DISTINCT m.organization_id
+          FROM tbl_organization_members m
+         WHERE m.user_id = p_user_id
+           AND m.status = 'Active';
+
+        DROP TEMPORARY TABLE IF EXISTS tmp_adviser_orgs;
+        CREATE TEMPORARY TABLE tmp_adviser_orgs (
+            organization_id INT PRIMARY KEY
+        ) ENGINE=Memory;
+
+        INSERT IGNORE INTO tmp_adviser_orgs (organization_id)
+        SELECT o.organization_id
+          FROM tbl_organization o
+         WHERE o.adviser_id = p_user_id;
+
+        /* ---------- Student-scoped counts ---------- */
+
+        /* 1) Pending event proposals for the student's orgs */
+        SELECT COUNT(*)
+          INTO v_student_pending_proposals
+          FROM tbl_event_application ea
+         WHERE ea.status = 'Pending'
+           AND EXISTS (SELECT 1 FROM tmp_student_orgs s WHERE s.organization_id = ea.organization_id);
+
+        /* 2) Pending transactions touching student's orgs (materialize first) */
+        DROP TEMPORARY TABLE IF EXISTS tmp_student_txns;
+        CREATE TEMPORARY TABLE tmp_student_txns (
+            transaction_id INT PRIMARY KEY
+        ) ENGINE=Memory;
+
+        /* membership-linked */
+        INSERT IGNORE INTO tmp_student_txns (transaction_id)
+        SELECT t.transaction_id
+          FROM tbl_transaction t
+          JOIN tbl_transaction_membership tm ON tm.transaction_id = t.transaction_id
+          JOIN tmp_student_orgs s            ON s.organization_id   = tm.organization_id
+         WHERE t.status = 'Pending';
+
+        /* event-linked */
+        INSERT IGNORE INTO tmp_student_txns (transaction_id)
+        SELECT t.transaction_id
+          FROM tbl_transaction t
+          JOIN tbl_transaction_event te ON te.transaction_id = t.transaction_id
+          JOIN tbl_event e              ON e.event_id        = te.event_id
+          JOIN tmp_student_orgs s       ON s.organization_id = e.organization_id
+         WHERE t.status = 'Pending';
+
+        SELECT COUNT(*) INTO v_student_pending_transactions FROM tmp_student_txns;
+
+        /* 3) Upcoming events for student's orgs */
+        SELECT COUNT(*)
+          INTO v_student_upcoming_events
+          FROM tbl_event e
+         WHERE e.status = 'Approved'
+           AND e.start_date >= CURDATE()
+           AND EXISTS (SELECT 1 FROM tmp_student_orgs s WHERE s.organization_id = e.organization_id);
+
+        /* 4) Student “reports”: ONLY post-event submissions */
+        SELECT COUNT(*)
+          INTO v_student_total_reports
+          FROM tbl_event_requirement_submissions ers
+          JOIN tbl_event_application_requirement r ON r.requirement_id = ers.requirement_id
+         WHERE r.is_applicable_to = 'post-event'
+           AND EXISTS (SELECT 1 FROM tmp_student_orgs s WHERE s.organization_id = ers.organization_id);
+
+        /* ---------- Adviser-scoped counts ---------- */
+        SELECT COUNT(*)
+          INTO v_adviser_total_members
+          FROM tbl_organization_members m
+         WHERE m.status = 'Active'
+           AND EXISTS (SELECT 1 FROM tmp_adviser_orgs a WHERE a.organization_id = m.organization_id);
+
+        SELECT COUNT(*)
+          INTO v_adviser_total_reports
+          FROM tbl_event_requirement_submissions ers
+         WHERE EXISTS (SELECT 1 FROM tmp_adviser_orgs a WHERE a.organization_id = ers.organization_id);
+
+        SELECT COUNT(*)
+          INTO v_adviser_total_events
+          FROM tbl_event e
+         WHERE EXISTS (SELECT 1 FROM tmp_adviser_orgs a WHERE a.organization_id = e.organization_id);
+
+        SELECT COUNT(*)
+          INTO v_adviser_upcoming_events
+          FROM tbl_event e
+         WHERE e.status = 'Approved'
+           AND e.start_date >= CURDATE()
+           AND EXISTS (SELECT 1 FROM tmp_adviser_orgs a WHERE a.organization_id = e.organization_id);
+
+        /* ---------- Return single row ---------- */
+        SELECT
+            v_total_orgs            AS total_organizations,
+            v_total_app_org         AS total_organization_applications,
+            v_total_app_user        AS total_user_applications,
+            (v_total_app_org + v_total_app_user) AS total_applications,
+            v_total_event_apps      AS total_event_proposals,
+            v_total_upcoming_events AS total_upcoming_events,
+
+            /* Student-scoped */
+            v_student_pending_proposals    AS student_pending_proposals,
+            v_student_pending_transactions AS student_pending_transactions,
+            v_student_upcoming_events      AS student_upcoming_events,
+            v_student_total_reports        AS student_total_reports,
+
+            /* Adviser-scoped */
+            v_adviser_total_members      AS adviser_total_members,
+            v_adviser_total_reports      AS adviser_total_reports,
+            v_adviser_total_events       AS adviser_total_events,
+            v_adviser_upcoming_events    AS adviser_upcoming_events;
+    END IF;
+END $$
 DELIMITER ;
 
 DELIMITER $$
@@ -14913,7 +15354,7 @@ VALUES("CREATE_EVENT","Organization"),
 ("UPDATE_EVALUATION","Organization"),
 ("DELETE_EVALUATION","Organization"),
 ("VIEW_EVALUATION","Organization"),
-("VIEW_LOGS","SDAO"),
+("VIEW_LOGS","Global"),
 ("WEB_ACCESS","Global"),
 ("MANAGE_REGISTRATION","SDAO"),
 ("SUBMIT_REQUIREMENTS","Global"),
@@ -14922,7 +15363,7 @@ VALUES("CREATE_EVENT","Organization"),
 ("APPLY_NEW_ORGANIZATION","Global"),
 ("APPLY_RENEWAL_ORGANIZATION","Organization"),
 ("VIEW_TRANSACTIONS","Global"),
-("MANAGE_TRANSACTIONS","Global"),
+("MANAGE_TRANSACTIONS","Organization"),
 ("MANAGE_SDAO_EVENT","SDAO"),
 ("MANAGE_COLLEGES","SDAO");
 
@@ -14951,7 +15392,6 @@ VALUES
 (4,26),
 (4,27),
 (4,30),
-(4,31),
 (4,32),
 (4,33),
 (2,6),
@@ -14959,8 +15399,10 @@ VALUES
 (2,14),
 (2,16),
 (2,17),
+(2,22),
 (2,23),
 (2,28),
+(2,31),
 (3,17),
 (4,17),
 (5,17),
@@ -15090,6 +15532,7 @@ INSERT INTO tbl_rank_permission(rank_id, permission_id) VALUES
 (1,19),
 (1,20),
 (1,21),
+(1,22),
 (1,29),
 (1,30),
 (1,31);

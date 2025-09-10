@@ -18,11 +18,28 @@ async function getLogs(req, res) {
     }
 }
 
+async function getOrgRelevantLogs(req, res) {
+    try {
+        const { user_id, type, start_date, end_date, sessionId } = req.query;
+
+        // allow client to subscribe to org logs SSE channel
+        if (sessionId) subscribeToChannel(sessionId, 'org_logs');
+
+        const logs = await logModel.getOrgRelevantLogs({ user_id, type, start_date, end_date });
+        res.status(200).json(logs);
+    } catch (error) {
+        console.error('[logs.getOrgRelevantLogs]', error);
+        res.status(500).json({ error: error.message || "An error occurred while fetching the org relevant logs." });
+    }
+}
+
 async function getSystemCounts(req, res) {
     try {
-        const { sessionId } = req.query;
+        const { user_id: queryUserId, sessionId } = req.query;
+        // Prefer explicit query param, else use JWT user_id if available
+        const user_id = queryUserId ?? req.user?.user_id ?? null;
 
-        const counts = await logModel.getSystemCounts();
+        const counts = await logModel.getSystemCounts(user_id);
 
         // publish counts to SSE channel for realtime dashboards
         try {
@@ -74,6 +91,7 @@ async function createLog(req, res) {
 
 module.exports = {
     getLogs,
+    getOrgRelevantLogs,
     getSystemCounts,
     createLog
 };

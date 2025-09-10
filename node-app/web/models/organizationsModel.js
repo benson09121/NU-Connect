@@ -120,8 +120,12 @@ async function getOrganizationDetails(org_id, org_version_id){
       
 async function getUserByEmail(email) {
     const connection = await pool.getConnection();
-        try {
-            const [rows] = await connection.query('CALL GetEmail(?);', [email]);
+    try {
+        // Make sure to trim and lowercase the email for comparison
+        const [rows] = await connection.query(
+            "SELECT * FROM tbl_user WHERE LOWER(TRIM(email)) = LOWER(TRIM(?)) LIMIT 1",
+            [email]
+        );
         return rows[0] || null;
     } finally {
         connection.release();
