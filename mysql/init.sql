@@ -4012,6 +4012,7 @@ BEGIN
         e.certificate,
         o.name AS organization_name,
         rc.cycle_number AS renewal_cycle_number,
+        rc.org_version_id AS organization_version_id,
         (
             SELECT JSON_ARRAYAGG(
                 JSON_OBJECT(
@@ -5998,7 +5999,6 @@ BEGIN
 END$$
 DELIMITER ;
 
-
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetEventApplicationDetails(
     IN p_event_application_id INT
@@ -6013,6 +6013,7 @@ BEGIN
         CONCAT(adviser.f_name, ' ', adviser.l_name) AS adviser_name,
         ea.cycle_number,
         rc.start_date AS cycle_start_date,
+        rc.org_version_id AS organization_version_id,
         ea.proposed_event_id,
         e.title,
         e.description,
@@ -6140,6 +6141,7 @@ BEGIN
     DECLARE v_first_step INT;
     DECLARE v_organization_name VARCHAR(100);
     DECLARE v_cycle_number INT;
+    DECLARE v_org_version_id INT; -- Add this declaration
 
     DECLARE v_collab_count INT DEFAULT 0;
     DECLARE v_collab_org_id INT;
@@ -6157,8 +6159,8 @@ BEGIN
     FROM tbl_organization
     WHERE organization_id = p_organization_id;
 
-    -- Get current president for the organization
-    SELECT cycle_number INTO v_cycle_number
+    -- Get current president for the organization and org_version_id
+    SELECT cycle_number, org_version_id INTO v_cycle_number, v_org_version_id
     FROM tbl_renewal_cycle
     WHERE organization_id = p_organization_id
     ORDER BY cycle_number DESC
@@ -6269,7 +6271,7 @@ BEGIN
                 SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = v_error_msg;
             END IF;
 
-            -- Store requirement submission
+            -- Store requirement submission with org_version_id
             INSERT INTO tbl_event_requirement_submissions (
                 event_id,
                 event_application_id,
@@ -6297,14 +6299,15 @@ BEGIN
 
     COMMIT;
 
-    -- Return success information
+    -- Return success information with org_version_id
     SELECT 
         v_event_id AS event_id,
         v_event_application_id AS event_application_id,
         JSON_UNQUOTE(JSON_EXTRACT(p_event, '$.title')) AS event_title,
         p_organization_id AS organization_id,
         v_organization_name AS organization_name,
-        v_cycle_number AS cycle_number;
+        v_cycle_number AS cycle_number,
+        v_org_version_id AS org_version_id;
 
 END$$
 DELIMITER ;

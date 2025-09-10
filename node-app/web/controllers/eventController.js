@@ -497,7 +497,7 @@ async function createEventApplication(req, res) {
       collaborators // <-- pass collaborators
     );
 
-    const orgDir = path.join('/app/organizations', String(dbResult[0].organization_name), String(dbResult[0].cycle_number), 'events', String(dbResult[0].event_id));
+    const orgDir = path.join('/app/organizations', String(dbResult[0].organization_id), String(dbResult[0].org_version_id), 'events', String(dbResult[0].event_id));
     if (!fs.existsSync(orgDir)) {
       fs.mkdirSync(orgDir, { recursive: true });
     }
@@ -574,23 +574,22 @@ async function getEventApplicationRequirement(req, res) {
 }
 
 async function getEventApplicationPublicationImage(req, res) {
-  let { organization_name, cycle_number, event_id, image_name } = req.query;
+  let { organization_id, organization_version_id, event_id, image_name } = req.query;
 
-  if (!organization_name || !cycle_number || !event_id || !image_name) {
+  if (!organization_id || !organization_version_id || !event_id || !image_name) {
     return res.status(400).json({
-      error: "Missing required parameters: organization_name, cycle_number, event_id, image_name"
+      error: "Missing required parameters: organization_id, organization_version_id, event_id, image_name"
     });
   }
 
   // Encode for URL and filesystem safety
-  const organization_name_encoded = encodeURIComponent(organization_name);
   const image_name_encoded = encodeURIComponent(image_name);
 
   // Physical path for existence check (optional, but good for error handling)
   const physicalPath = path.join(
     '/app/organizations',
-    organization_name,
-    String(cycle_number),
+    String(organization_id),
+    String(organization_version_id),
     'events',
     String(event_id),
     'publication_images',
@@ -599,8 +598,8 @@ async function getEventApplicationPublicationImage(req, res) {
 
   // Log for debugging
   console.log(`getEventApplicationPublicationImage: Attempting to serve image`, {
-    organization_name,
-    cycle_number,
+    organization_id,
+    organization_version_id,
     event_id,
     image_name,
     physicalPath,
@@ -622,7 +621,7 @@ async function getEventApplicationPublicationImage(req, res) {
     res.setHeader('Content-Disposition', `inline; filename="${image_name}"`);
     res.setHeader(
       'X-Accel-Redirect',
-      `/protected-organization-requirements/${organization_name_encoded}/${cycle_number}/events/${event_id}/publication_images/${image_name_encoded}`
+      `/protected-organization-requirements/${organization_id}/${organization_version_id}/events/${event_id}/publication_images/${image_name_encoded}`
     );
     res.end();
   } catch (error) {
@@ -1257,9 +1256,9 @@ async function getEventPublicationImage(req, res) {
     physicalPath = path.join('/app/events/SDAO', String(event_id), 'publication_images', image_name);
   } else {
     // Organization event: Always use the complex path
-    if (!organization_name || !cycle_number) {
+    if (!organization_id || !organization_version_id) {
       return res.status(400).json({
-        error: "Missing required parameters: organization_name, cycle_number for organization event"
+        error: "Missing required parameters: organization_id, organization_version_id for organization event"
       });
     }
     physicalPath = path.join(
