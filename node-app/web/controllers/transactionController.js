@@ -15,7 +15,11 @@ function unwrapSPResult(row) {
 }
 
 function sanitizeOrgId(orgId) {
-  return String(orgId).replace(/[^0-9]/g, '');
+  return orgId ? String(orgId) : null;
+}
+
+function sanitizeVersionId(versionId) {
+  return versionId ? String(versionId) : null;
 }
 
 async function create(req, res) {
@@ -35,8 +39,14 @@ async function create(req, res) {
       payer_name_override,
       event_remarks,
       organization_id,
-      cycle_number
+      cycle_number,
+      organization_version_id
     } = req.body;
+
+    // Validate required fields for organization transactions
+    if (organization_id && !organization_version_id) {
+      return res.status(400).json({ message: 'organization_version_id is required when organization_id is provided' });
+    }
 
     // Handle file upload (proof_image)
     let proofImagePath = null;
@@ -52,14 +62,16 @@ async function create(req, res) {
       }
 
       let relPath, absPath;
-      if (organization_id) {
+      if (organization_id && organization_version_id) {
         const safeOrgId = sanitizeOrgId(organization_id);
+        const safeVersionId = sanitizeVersionId(organization_version_id);
         if (!safeOrgId) return res.status(400).json({ message: 'Invalid organization_id' });
+        if (!safeVersionId) return res.status(400).json({ message: 'Invalid organization_version_id' });
         const safeName = `proof-${Date.now()}${ext}`;
-        const orgDir = path.join('/app/organizations', safeOrgId, 'transactions');
+        const orgDir = path.join('/app/organizations', safeOrgId, safeVersionId, 'transactions');
         if (!fs.existsSync(orgDir)) fs.mkdirSync(orgDir, { recursive: true });
         absPath = path.join(orgDir, safeName);
-        relPath = path.posix.join('organizations', safeOrgId, 'transactions', safeName);
+        relPath = path.posix.join('organizations', safeOrgId, safeVersionId, 'transactions', safeName);
       } else {
         // For SDAO/system users, store in a generic system directory
         const sysDir = path.join('/app/organizations', 'system', 'transactions');
@@ -119,6 +131,7 @@ async function update(req, res) {
       payer_name_override,
       event_remarks,
       organization_id,        // preferred for pathing when uploading a new file
+      organization_version_id, // required if organization_id is provided
       remove_proof_image      // flag to remove existing file+db (true/1/'true')
     } = req.body;
 
@@ -126,33 +139,15 @@ async function update(req, res) {
       return res.status(400).json({ message: 'transaction_id required' });
     }
 
-    // ---- helpers (same behavior as create) ----
-    const sanitizeOrgId = (id) => {
-      if (id === null || id === undefined) return null;
-      
-      // Convert to string and trim
-      let s = String(id).trim();
-      
-      // If it's already a clean number, return it
-      if (/^\d+$/.test(s)) {
-        return s;
-      }
-      
-      // Extract only digits
-      const digits = s.replace(/[^0-9]/g, '');
-      
-      // Return null if no digits found, otherwise return the first numeric part
-      if (!digits.length) return null;
-      
-      // Take only the first sequence of digits to prevent concatenation
-      const firstNumber = digits.match(/^\d+/);
-      return firstNumber ? firstNumber[0] : null;
-    };
+    // Validate required fields for organization transactions
+    if (organization_id && !organization_version_id) {
+      return res.status(400).json({ message: 'organization_version_id is required when organization_id is provided' });
+    }
 
-    const buildOrgTxnPaths = (safeOrgId, filename) => {
-      if (safeOrgId) {
-        const dir = path.join('/app/organizations', safeOrgId, 'transactions');
-        const rel = path.posix.join('organizations', safeOrgId, 'transactions', filename);
+    const buildOrgTxnPaths = (safeOrgId, safeVersionId, filename) => {
+      if (safeOrgId && safeVersionId) {
+        const dir = path.join('/app/organizations', safeOrgId, safeVersionId, 'transactions');
+        const rel = path.posix.join('organizations', safeOrgId, safeVersionId, 'transactions', filename);
         return { absDir: dir, relPath: rel, absPath: path.join(dir, filename) };
       } else {
         const dir = path.join('/app/organizations', 'system', 'transactions');
@@ -164,6 +159,7 @@ async function update(req, res) {
     // ---- fetch existing transaction (for current image & deriving org) ----
     let current = { proof_image: null };
     let derivedOrgId = null;
+    let derivedOrgVersionId = null;
     try {
       const conn = await pool.getConnection();
       try {
@@ -173,26 +169,32 @@ async function update(req, res) {
         );
         if (curRows.length) current = curRows[0];
 
-        // derive org_id if not provided:
-        if (!organization_id) {
+        // derive org_id and org_version_id if not provided:
+        if (!organization_id || !organization_version_id) {
           // 1) membership link
           const [mRows] = await conn.query(
-            'SELECT organization_id FROM tbl_transaction_membership WHERE transaction_id = ? LIMIT 1',
+            `SELECT tm.organization_id, rc.org_version_id 
+             FROM tbl_transaction_membership tm
+             LEFT JOIN tbl_renewal_cycle rc ON tm.organization_id = rc.organization_id AND tm.cycle_number = rc.cycle_number
+             WHERE tm.transaction_id = ? LIMIT 1`,
             [transaction_id]
           );
           if (mRows.length && mRows[0].organization_id != null) {
             derivedOrgId = mRows[0].organization_id;
+            derivedOrgVersionId = mRows[0].org_version_id;
           } else {
             // 2) event link → event org
             const [eRows] = await conn.query(
-              `SELECT e.organization_id
+              `SELECT e.organization_id, rc.org_version_id
                  FROM tbl_transaction_event te
                  JOIN tbl_event e ON e.event_id = te.event_id
+                 LEFT JOIN tbl_renewal_cycle rc ON e.organization_id = rc.organization_id AND e.cycle_number = rc.cycle_number
                 WHERE te.transaction_id = ? LIMIT 1`,
               [transaction_id]
             );
             if (eRows.length && eRows[0].organization_id != null) {
               derivedOrgId = eRows[0].organization_id;
+              derivedOrgVersionId = eRows[0].org_version_id;
             }
           }
         }
@@ -205,7 +207,9 @@ async function update(req, res) {
 
     // choose org for STORAGE (same as create)
     const chosenOrgId = organization_id ?? derivedOrgId ?? null;
+    const chosenOrgVersionId = organization_version_id ?? derivedOrgVersionId ?? null;
     const safeOrgId = sanitizeOrgId(chosenOrgId);
+    const safeVersionId = sanitizeVersionId(chosenOrgVersionId);
 
     // ----- FILE HANDLING (KEEP / REPLACE / REMOVE) -----
     let proofImagePath = undefined; // undefined => "no change" to DB
@@ -242,7 +246,7 @@ async function update(req, res) {
 
       // save new using the SAME directory logic as "create"
       const filename = `proof-${Date.now()}${ext}`;
-      const { absDir, absPath, relPath } = buildOrgTxnPaths(safeOrgId, filename);
+      const { absDir, absPath, relPath } = buildOrgTxnPaths(safeOrgId, safeVersionId, filename);
       try {
         if (!fs.existsSync(absDir)) fs.mkdirSync(absDir, { recursive: true });
         fs.writeFileSync(absPath, file.data);
@@ -289,6 +293,7 @@ async function update(req, res) {
 
     console.log('[transactions.update] Proof image handling:', {
       orgForStorage: safeOrgId ?? 'system',
+      orgVersionForStorage: safeVersionId ?? 'N/A',
       hasNewFile: !!(req.files && req.files.proof_image),
       removeRequested: removeFlag,
       proofImageFromBody: proof_image,
@@ -488,10 +493,10 @@ async function getFinancialCategories(req,res){
 
 async function getTransactionFile(req, res) {
   try {
-    const { organization_id, filename } = req.params;
+    const { organization_id, organization_version_id, filename } = req.params;
 
-    if (!organization_id || !filename) {
-      return res.status(400).json({ message: 'Organization ID and filename are required' });
+    if (!organization_id || !organization_version_id || !filename) {
+      return res.status(400).json({ message: 'Organization ID, organization version ID, and filename are required' });
     }
 
     // Security: validate filename to prevent directory traversal
@@ -504,8 +509,10 @@ async function getTransactionFile(req, res) {
       // SDAO/system files
       protectedPath = `/protected-transactions/system/transactions/${filename}`;
     } else {
-      // Regular organization files
-      protectedPath = `/protected-transactions/${organization_id}/transactions/${filename}`;
+      // Regular organization files with version ID - sanitize the IDs
+      const safeOrgId = sanitizeOrgId(organization_id);
+      const safeVersionId = sanitizeVersionId(organization_version_id);
+      protectedPath = `/protected-transactions/${safeOrgId}/${safeVersionId}/transactions/${filename}`;
     }
 
     res.set('X-Accel-Redirect', protectedPath);
