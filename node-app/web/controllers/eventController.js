@@ -1558,25 +1558,36 @@ async function getBlockedPeriodsByStatus(req, res) {
 
 async function getEventsByUserRole(req, res) {
   try {
-    let user_id = req.user?.user_id || req.query.user_id;
-    const user_email = req.query.user_email;
+    let user_id = req.query.user_id;
+    let user_email = req.query.user_email;
 
-    // If user_id is not provided but user_email is, look up user_id
-    if ((!user_id || user_id === 'undefined' || user_id === 'null') && user_email) {
+    // If user_email is provided, always use it to look up user_id
+    if (user_email) {
       const user = await eventModel.getUserByEmail(user_email);
+      console.log('[getEventsByUserRole] Looked up user by email:', user_email, 'Result:', user);
       if (!user) {
         return res.status(404).json({ message: "User not found for the provided email." });
       }
       user_id = user.user_id;
+    } else if (!user_id) {
+      // Fallback to JWT user_id if no user_id or user_email in query
+      user_id = req.user?.user_id;
     }
 
     if (!user_id) {
       return res.status(400).json({ message: "user_id (or user_email) is required." });
     }
 
-    const events = await eventModel.getEventsByUserRole(user_id);
+    const param = user_id;
+    console.log('[getEventsByUserRole] Using param for SP:', param);
+
+    const events = await eventModel.getEventsByUserRole(param);
+
+    console.log('[getEventsByUserRole] Events returned:', Array.isArray(events) ? events.length : events, events);
+
     res.status(200).json(events);
   } catch (error) {
+    console.error('[getEventsByUserRole] Error:', error);
     res.status(500).json({
       error: error.message || "An error occurred while fetching events by user role.",
     });

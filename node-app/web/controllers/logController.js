@@ -20,7 +20,18 @@ async function getLogs(req, res) {
 
 async function getOrgRelevantLogs(req, res) {
     try {
-        const { user_id, type, start_date, end_date, sessionId } = req.query;
+        let { user_id, user_email, type, start_date, end_date, sessionId } = req.query;
+
+        // If user_id is not provided but user_email is, look up user_id
+        if ((!user_id || user_id === 'undefined' || user_id === 'null') && user_email) {
+            // You need a getUserByEmail function in your user model
+            const userModel = require('../models/userModel'); // adjust path if needed
+            const user = await userModel.getUserByEmail(user_email);
+            if (!user) {
+                return res.status(404).json({ message: "User not found for the provided email." });
+            }
+            user_id = user.user_id;
+        }
 
         // allow client to subscribe to org logs SSE channel
         if (sessionId) subscribeToChannel(sessionId, 'org_logs');
