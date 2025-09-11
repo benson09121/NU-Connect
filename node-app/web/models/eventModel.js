@@ -537,10 +537,12 @@ async function getBlockedPeriodsByStatus(status) {
     }
 }
 
-async function getEventsByUserRole(user_id) {
+async function getEventsByUserRole(user_id_or_email) {
     const connection = await pool.getConnection();
     try {
-        const [rows] = await connection.query('CALL GetEventsByUserRole(?);', [user_id]);
+        const [rows] = await connection.query('CALL GetEventsByUserRole(?);', [user_id_or_email]);
+        console.log('[eventModel.getEventsByUserRole] Raw rows:', JSON.stringify(rows));
+        // rows[0] should be an array of events
         return rows[0];
     } finally {
         connection.release();

@@ -132,7 +132,6 @@ CREATE TABLE tbl_organization (
 );
 
 CREATE TABLE tbl_organization_version (
-
     org_version_id INT AUTO_INCREMENT PRIMARY KEY,
     organization_id INT NULL,
     name VARCHAR(255) NOT NULL,
@@ -3789,33 +3788,46 @@ END $$
 DELIMITER ;
 
 DELIMITER $$
+
+DROP PROCEDURE IF EXISTS GetEventsByUserRole $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetEventsByUserRole(
-    IN p_user_id_or_email VARCHAR(200)
+    IN p_user_id_or_email VARCHAR(200)  -- user_id OR email
 )
 proc_main: BEGIN
-    DECLARE v_user_id VARCHAR(200) DEFAULT NULL;
-    DECLARE v_role_name VARCHAR(100) DEFAULT '';
-    DECLARE v_program_id INT DEFAULT NULL;
-    DECLARE v_college_id INT DEFAULT NULL;
+    DECLARE v_user_id    VARCHAR(200) DEFAULT NULL;
+    DECLARE v_role_name  VARCHAR(100) DEFAULT '';
+    DECLARE v_program_id INT          DEFAULT NULL;
+    DECLARE v_college_id INT          DEFAULT NULL;
 
-    -- Resolve user identity and context
-    SELECT u.user_id, COALESCE(r.role_name,''), u.program_id, pr.college_id
+    /* Resolve user by id or email (email case-insensitive) */
+    SELECT u.user_id,
+           COALESCE(r.role_name,''),
+           u.program_id,
+           pr.college_id
       INTO v_user_id, v_role_name, v_program_id, v_college_id
       FROM tbl_user u
-      JOIN tbl_role r ON r.role_id = u.role_id
+      JOIN tbl_role r  ON r.role_id = u.role_id
  LEFT JOIN tbl_program pr ON pr.program_id = u.program_id
-     WHERE u.user_id = p_user_id_or_email OR u.email = p_user_id_or_email
+     WHERE u.user_id = p_user_id_or_email
+        OR LOWER(u.email) = LOWER(p_user_id_or_email)
      LIMIT 1;
 
-    -- Exit early if user not found
+    /* If user not found → show only global events */
     IF v_user_id IS NULL THEN
-        SELECT * FROM tbl_event WHERE 1=0;
+        SELECT e.*,
+               o.name AS organization_name,
+               GetEventCollaborators(e.event_id) AS collaborators
+          FROM tbl_event e
+     LEFT JOIN tbl_organization o ON o.organization_id = e.organization_id
+         WHERE e.event_type IN ('SDAO','System')
+      ORDER BY e.start_date DESC, e.created_at DESC;
         LEAVE proc_main;
     END IF;
 
-    -- Super admin roles see everything
+    /* SDAO / Academic Director → everything */
     IF v_role_name IN ('SDAO','Academic Director') THEN
-        SELECT e.*, o.name AS organization_name,
+        SELECT e.*,
+               o.name AS organization_name,
                GetEventCollaborators(e.event_id) AS collaborators
           FROM tbl_event e
      LEFT JOIN tbl_organization o ON o.organization_id = e.organization_id
@@ -3823,55 +3835,122 @@ proc_main: BEGIN
         LEAVE proc_main;
     END IF;
 
-    -- Main query: events visible to user based on role and permissions
-    WITH user_org_scope AS (
-        -- UNIFIED APPROACH: All roles get organizations through membership
-        -- This ensures Students and Advisers see the same organization events
-        SELECT m.organization_id FROM tbl_organization_members m 
-         WHERE m.user_id = v_user_id AND (m.status IS NULL OR m.status = 'Active')
-        UNION
-        -- Additional scope for Advisers: organizations they directly advise
-        -- (Only if you want advisers to see additional organizations beyond their memberships)
-        SELECT o.organization_id FROM tbl_organization o 
-         WHERE v_role_name = 'Adviser' AND o.adviser_id = v_user_id
-        UNION
-        -- Program Chair scope: base program organizations
-        SELECT o.organization_id FROM tbl_organization o 
-         WHERE v_role_name = 'Program Chair' AND v_program_id IS NOT NULL 
-           AND o.base_program_id = v_program_id
-        UNION
-        -- Program Chair scope: cross-listed course organizations
-        SELECT oc.organization_id FROM tbl_organization_course oc 
-         WHERE v_role_name = 'Program Chair' AND v_program_id IS NOT NULL
-           AND oc.program_id = v_program_id
-        UNION
-        -- Dean scope: organizations with base programs in dean's college
-        SELECT o.organization_id FROM tbl_organization o 
-          JOIN tbl_program bp ON bp.program_id = o.base_program_id
-         WHERE v_role_name = 'Dean' AND v_college_id IS NOT NULL 
-           AND bp.college_id = v_college_id
-        UNION
-        -- Dean scope: organizations with mapped courses in dean's college
-        SELECT oc.organization_id FROM tbl_organization_course oc
-          JOIN tbl_program p ON p.program_id = oc.program_id
-         WHERE v_role_name = 'Dean' AND v_college_id IS NOT NULL
-           AND p.college_id = v_college_id
-    )
-    SELECT DISTINCT e.*, o.name AS organization_name,
+    /* Everyone else (Dean, Program Chair, Adviser, Student) */
+    SELECT DISTINCT
+           e.*,
+           o.name AS organization_name,
            GetEventCollaborators(e.event_id) AS collaborators
       FROM tbl_event e
  LEFT JOIN tbl_organization o ON o.organization_id = e.organization_id
-     WHERE e.event_type IN ('SDAO','System')  -- Global events
-        OR e.user_id = v_user_id              -- User-created events
-        OR e.organization_id IN (SELECT organization_id FROM user_org_scope)  -- Owned by user's orgs
-        OR EXISTS (SELECT 1 FROM tbl_event_collaborator ec 
-                    WHERE ec.event_id = e.event_id 
-                      AND ec.organization_id IN (SELECT organization_id FROM user_org_scope))  -- Collaborating orgs
-        OR EXISTS (SELECT 1 FROM tbl_event_application ea 
-                    WHERE ea.proposed_event_id = e.event_id 
-                      AND ea.proposed_event_id IS NOT NULL
-                      AND (ea.applicant_user_id = v_user_id 
-                           OR ea.organization_id IN (SELECT organization_id FROM user_org_scope)))  -- Proposed events
+     WHERE
+           /* Global */
+           e.event_type IN ('SDAO','System')
+
+        /* Created by the user */
+        OR e.user_id = v_user_id
+
+        /* Owner org: user is a member (Active/Pending) */
+        OR EXISTS (
+              SELECT 1
+                FROM tbl_organization_members m
+               WHERE m.user_id = v_user_id
+                 AND (m.status IS NULL OR m.status IN ('Active','Pending'))
+                 AND m.organization_id = e.organization_id
+          )
+
+        /* Collaborator org: user is a member (Active/Pending) */
+        OR EXISTS (
+              SELECT 1
+                FROM tbl_event_collaborator ec
+                JOIN tbl_organization_members m
+                  ON m.organization_id = ec.organization_id
+               WHERE ec.event_id = e.event_id
+                 AND m.user_id = v_user_id
+                 AND (m.status IS NULL OR m.status IN ('Active','Pending'))
+          )
+
+        /* Adviser: org they advise (owner or collaborator) */
+        OR (v_role_name = 'Adviser' AND EXISTS (
+              SELECT 1
+                FROM tbl_organization ao
+               WHERE ao.organization_id = e.organization_id
+                 AND ao.adviser_id = v_user_id
+          ))
+        OR (v_role_name = 'Adviser' AND EXISTS (
+              SELECT 1
+                FROM tbl_event_collaborator ec2
+                JOIN tbl_organization ao2
+                  ON ao2.organization_id = ec2.organization_id
+               WHERE ec2.event_id = e.event_id
+                 AND ao2.adviser_id = v_user_id
+          ))
+
+        /* Program Chair: base program (owner or collaborator) */
+        OR (v_role_name = 'Program Chair' AND v_program_id IS NOT NULL AND EXISTS (
+              SELECT 1
+                FROM tbl_organization po
+               WHERE po.organization_id = e.organization_id
+                 AND po.base_program_id = v_program_id
+          ))
+        OR (v_role_name = 'Program Chair' AND v_program_id IS NOT NULL AND EXISTS (
+              SELECT 1
+                FROM tbl_event_collaborator ec3
+                JOIN tbl_organization po2
+                  ON po2.organization_id = ec3.organization_id
+               WHERE ec3.event_id = e.event_id
+                 AND po2.base_program_id = v_program_id
+          ))
+
+        /* Dean: college of the owner/collaborator base program */
+        OR (v_role_name = 'Dean' AND v_college_id IS NOT NULL AND EXISTS (
+              SELECT 1
+                FROM tbl_organization do1
+                JOIN tbl_program dp1 ON dp1.program_id = do1.base_program_id
+               WHERE do1.organization_id = e.organization_id
+                 AND dp1.college_id = v_college_id
+          ))
+        OR (v_role_name = 'Dean' AND v_college_id IS NOT NULL AND EXISTS (
+              SELECT 1
+                FROM tbl_event_collaborator ec4
+                JOIN tbl_organization do2 ON do2.organization_id = ec4.organization_id
+                JOIN tbl_program     dp2 ON dp2.program_id = do2.base_program_id
+               WHERE ec4.event_id = e.event_id
+                 AND dp2.college_id = v_college_id
+          ))
+
+        /* Proposed events: by the user OR by an org they’re related to */
+        OR EXISTS (
+              SELECT 1
+                FROM tbl_event_application ea
+               WHERE ea.proposed_event_id = e.event_id
+                 AND (
+                       ea.applicant_user_id = v_user_id
+                    OR EXISTS (
+                          SELECT 1
+                            FROM tbl_organization_members m2
+                           WHERE m2.user_id = v_user_id
+                             AND (m2.status IS NULL OR m2.status IN ('Active','Pending'))
+                             AND m2.organization_id = ea.organization_id
+                       )
+                    OR (v_role_name = 'Adviser' AND EXISTS (
+                          SELECT 1 FROM tbl_organization ao3
+                           WHERE ao3.organization_id = ea.organization_id
+                             AND ao3.adviser_id = v_user_id
+                       ))
+                    OR (v_role_name = 'Program Chair' AND v_program_id IS NOT NULL AND EXISTS (
+                          SELECT 1 FROM tbl_organization po3
+                           WHERE po3.organization_id = ea.organization_id
+                             AND po3.base_program_id = v_program_id
+                       ))
+                    OR (v_role_name = 'Dean' AND v_college_id IS NOT NULL AND EXISTS (
+                          SELECT 1
+                            FROM tbl_organization do3
+                            JOIN tbl_program dp3 ON dp3.program_id = do3.base_program_id
+                           WHERE do3.organization_id = ea.organization_id
+                             AND dp3.college_id = v_college_id
+                       ))
+                 )
+          )
   ORDER BY e.start_date DESC, e.created_at DESC;
 
 END proc_main $$
