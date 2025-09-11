@@ -11148,6 +11148,7 @@ BEGIN
            te.remarks,
            tm.organization_id,
            tm.cycle_number,
+           rc.org_version_id AS organization_version_id,
            u.f_name AS user_first_name,
            u.l_name AS user_last_name,
            u.email AS user_email
@@ -11157,6 +11158,7 @@ BEGIN
     LEFT JOIN tbl_financial_category fc ON t.category_id = fc.category_id
     LEFT JOIN tbl_transaction_event te ON t.transaction_id = te.transaction_id
     LEFT JOIN tbl_transaction_membership tm ON t.transaction_id = tm.transaction_id
+    LEFT JOIN tbl_renewal_cycle rc ON tm.organization_id = rc.organization_id AND tm.cycle_number = rc.cycle_number
     LEFT JOIN tbl_user u ON t.user_id = u.user_id
     WHERE (v_user_id IS NULL OR t.user_id = v_user_id)
       AND (p_status IS NULL OR t.status = p_status)
@@ -11188,6 +11190,7 @@ BEGIN
            te.remarks,
            tm.organization_id,
            tm.cycle_number,
+           rc.org_version_id AS organization_version_id,
            u.f_name AS user_first_name,
            u.l_name AS user_last_name,
            u.email AS user_email
@@ -11197,6 +11200,7 @@ BEGIN
     LEFT JOIN tbl_financial_category fc ON t.category_id = fc.category_id
     LEFT JOIN tbl_transaction_event te ON t.transaction_id = te.transaction_id
     LEFT JOIN tbl_transaction_membership tm ON t.transaction_id = tm.transaction_id
+    LEFT JOIN tbl_renewal_cycle rc ON tm.organization_id = rc.organization_id AND tm.cycle_number = rc.cycle_number
     LEFT JOIN tbl_user u ON t.user_id = u.user_id
     WHERE tm.organization_id = p_organization_id
     ORDER BY t.created_at DESC;

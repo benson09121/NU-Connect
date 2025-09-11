@@ -71,14 +71,14 @@ router.get(
 );
 
 router.get(
-  '/transactions/:organization_id/files/:filename',
+  '/transactions/:organization_id/versions/:organization_version_id/files/:filename',
   middleware.validateAzureJWT,
   middleware.hasPermission([VIEW, MANAGE]),
   controller.getTransactionFile
 );
 
 router.get(
-  '/organizations/:organization_id/transactions',
+  '/organizations/:organization_id/versions/:organization_version_id/transactions',
   middleware.validateAzureJWT,
   middleware.hasPermission([VIEW, MANAGE]),
   controller.getTransactionsByOrganization
