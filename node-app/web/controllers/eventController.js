@@ -125,7 +125,7 @@ async function getaddEventStatus(req, res){
 
 async function getEventById(req, res) {
   try {
-    const event_id = req.params.id || req.query.event_id;
+    const event_id = req.query.event_id ;
     const { sessionId } = req.query;
 
     let eventResult = await eventModel.getEventById(event_id);
@@ -135,15 +135,6 @@ async function getEventById(req, res) {
       return res.status(404).json({ message: 'Event not found' });
     }
     event = parseCollaboratorsField(event);
-
-    // Fetch attendees with details
-    let attendees = [];
-    try {
-      attendees = await eventModel.getAttendeesByEventId(event_id);
-    } catch (attErr) {
-      console.warn('[getEventById] Failed to fetch attendees:', attErr.message);
-    }
-    event.attendees = attendees;
 
     // Fetch event statistics
     try {
@@ -175,17 +166,12 @@ async function getEventById(req, res) {
 async function getAttendeesbyEventId(req, res) {
   try {
     const { event_id, sessionId } = req.query;
-
+    console.log(event_id);
     const attendees = await eventModel.getAttendeesByEventId(event_id);
 
     if (sessionId) {
       const ch = `attendees_${event_id}`;
       subscribeToChannel(sessionId, ch);
-      publishToChannel(ch, {
-        channel: ch,
-        operation: 'SNAPSHOT',
-        data: Array.isArray(attendees) ? attendees : []
-      });
     }
 
     res.status(200).json(attendees);

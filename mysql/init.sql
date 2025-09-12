@@ -1128,77 +1128,81 @@ BEGIN
     SELECT v_notification_id AS notification_id;
 END$$
 DELIMITER ;
-
 DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE GetAllEvents(IN p_user_id VARCHAR(200))
+CREATE DEFINER='admin'@'%' PROCEDURE GetAllEventsByOrganizations(
+    IN p_orgs JSON
+)
 BEGIN
-    DECLARE v_program_id INT;
-    
-    -- Get user's program
-    SELECT program_id INTO v_program_id 
-    FROM tbl_user 
-    WHERE user_id = p_user_id;
+    DECLARE i INT DEFAULT 0;
+    DECLARE v_len INT DEFAULT 0;
+    DECLARE v_org_id INT;
 
-    -- Get all organizations the user belongs to
-    WITH UserOrganizations AS (
-        SELECT organization_id 
-        FROM tbl_organization_members 
-        WHERE user_id = p_user_id
-        
-        UNION
-        
-        SELECT c.organization_id 
-        FROM tbl_committee_members cm
-        JOIN tbl_committee c ON cm.committee_id = c.committee_id
-        WHERE cm.user_id = p_user_id
-    )
-    
+    -- Normalize input
+    IF p_orgs IS NULL OR JSON_TYPE(p_orgs) <> 'ARRAY' THEN
+        SET p_orgs = JSON_ARRAY();
+    END IF;
+
+    -- Temp table for org IDs
+    DROP TEMPORARY TABLE IF EXISTS tmp_orgs;
+    CREATE TEMPORARY TABLE tmp_orgs (
+        organization_id INT PRIMARY KEY
+    ) ENGINE=Memory;
+
+    -- Populate org IDs from JSON array
+    SET v_len = JSON_LENGTH(p_orgs);
+    WHILE i < v_len DO
+        SET v_org_id = CAST(
+            JSON_UNQUOTE(JSON_EXTRACT(p_orgs, CONCAT('$[', i, '].organization_id')))
+            AS UNSIGNED
+        );
+        IF v_org_id IS NOT NULL THEN
+            INSERT IGNORE INTO tmp_orgs (organization_id) VALUES (v_org_id);
+        END IF;
+        SET i = i + 1;
+    END WHILE;
+
+    -- Return merged list
     SELECT
         e.event_id,
         e.title,
         e.user_id AS organizer_id,
         o.name AS organization_name,
+        e.organization_id,
+        o.logo AS organization_logo,
+        rc.org_version_id AS organization_version_id,
         e.description,
         e.venue,
         e.image,
         e.start_time,
         e.end_time,
-        e.start_date,
-        e.end_date,
+        DATE_FORMAT(e.start_date, '%Y-%m-%d') AS start_date,
+        DATE_FORMAT(e.end_date, '%Y-%m-%d') AS end_date,
         e.created_at,
         e.status,
         e.type,
-        -- Use e.is_open_to ENUM for access_type
-        CASE 
-            WHEN e.is_open_to = 'Open to all' THEN 'Open to All'
-            ELSE 'Restricted'
-        END AS access_type,
+        e.is_open_to AS access_type,
         COALESCE(e.fee, 0) AS event_fee,
         e.capacity,
         CASE 
             WHEN TIMESTAMP(e.end_date, e.end_time) < CURRENT_TIMESTAMP THEN 'Ended'
             ELSE 'Upcoming'
         END AS event_status,
-        e.certificate AS certificate_available
+        e.certificate AS certificate_available,
+        CASE 
+            WHEN e.event_type = 'SDAO' THEN 1
+            ELSE 0
+        END AS is_sdao_event
     FROM tbl_event e
-    INNER JOIN tbl_organization o ON e.organization_id = o.organization_id
-    LEFT JOIN UserOrganizations uo ON e.organization_id = uo.organization_id
+    LEFT JOIN tbl_organization o ON e.organization_id = o.organization_id
+    LEFT JOIN tbl_renewal_cycle rc ON e.organization_id = rc.organization_id 
+        AND e.cycle_number = rc.cycle_number
     WHERE e.status = 'Approved'
       AND (
-          e.is_open_to = 'Open to all'
-          OR EXISTS (
-              SELECT 1 
-              FROM tbl_event_course ec 
-              WHERE ec.event_id = e.event_id 
-                AND ec.program_id = v_program_id
-          )
-          OR uo.organization_id IS NOT NULL
+           e.is_open_to IN ('Open to all', 'NU Students only')
+        OR EXISTS (SELECT 1 FROM tmp_orgs t WHERE t.organization_id = e.organization_id)
       )
     ORDER BY 
-        CASE 
-            WHEN TIMESTAMP(e.end_date, e.end_time) < CURRENT_TIMESTAMP THEN 1 
-            ELSE 0 
-        END,
+        CASE WHEN TIMESTAMP(e.end_date, e.end_time) < CURRENT_TIMESTAMP THEN 1 ELSE 0 END,
         e.start_date ASC,
         e.start_time ASC;
 END $$
@@ -1223,6 +1227,9 @@ SELECT a.event_id,
 a.title,
 a.description,
 c.name as organization_name,
+c.logo as organization_logo,
+a.organization_id,
+rc.org_version_id as organization_version_id,
 a.venue_type,
 a.venue, 
 a.start_time, 
@@ -1238,10 +1245,15 @@ a.capacity,
 a.certificate,
 a.image,
 a.created_at,
+ees.start_time as evaluation_start_time,
+ees.end_time as evaluation_end_time,
 COALESCE(b.status, "Not Registered") as student_status
 FROM tbl_event a
 LEFT JOIN tbl_event_attendance b ON a.event_id = b.event_id AND b.user_id = userId
 LEFT JOIN tbl_organization c ON a.organization_id = c.organization_id
+LEFT JOIN tbl_renewal_cycle rc ON a.organization_id = rc.organization_id 
+    AND a.cycle_number = rc.cycle_number
+LEFT JOIN tbl_event_evaluation_settings ees ON a.event_id = ees.event_id
 WHERE a.event_id = eventId;
 END $$
 DELIMITER ;
@@ -1569,16 +1581,11 @@ CREATE DEFINER='admin'@'%' PROCEDURE UpdateEvent(
     IN p_is_open_to ENUM('Members only', 'Open to all', 'NU Students only'),
     IN p_fee INT,
     IN p_capacity INT,
-    IN p_image TEXT,           -- NULL = remove, <filename> = set/replace, unchanged value = keep
-    IN p_user_id VARCHAR(200),
-    IN p_collaborators JSON    -- NULL = leave unchanged; [] = remove all; [<orgId>, ...] = replace
+    IN p_image TEXT,
+    IN p_user_id VARCHAR(200)
 )
 BEGIN
     DECLARE v_user_email VARCHAR(100);
-    DECLARE v_prev_image TEXT;
-    DECLARE v_collab_count INT DEFAULT 0;
-    DECLARE v_collab_org_id INT;
-    DECLARE i INT DEFAULT 0;
 
     IF p_event_id IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'event_id required';
@@ -1587,83 +1594,40 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'user_id required';
     END IF;
 
-    -- Only allow updates for SDAO events with this proc
     IF NOT EXISTS (SELECT 1 FROM tbl_event WHERE event_id = p_event_id AND event_type = 'SDAO') THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Only SDAO events can be updated with this procedure';
     END IF;
 
-    -- Capture current image for audit logging and optimistic "keep" semantics
-    SELECT image INTO v_prev_image
-    FROM tbl_event
-    WHERE event_id = p_event_id
-    FOR UPDATE;
-
-    -- Update the event core fields
     UPDATE tbl_event
-    SET title       = p_title,
+    SET title = p_title,
         description = p_description,
-        venue_type  = p_venue_type,
-        venue       = p_venue,
-        start_date  = p_start_date,
-        end_date    = p_end_date,
-        start_time  = p_start_time,
-        end_time    = p_end_time,
-        status      = p_status,
-        type        = p_type,
-        is_open_to  = p_is_open_to,
-        fee         = p_fee,
-        capacity    = p_capacity,
-        image       = p_image
+        venue_type = p_venue_type,
+        venue = p_venue,
+        start_date = p_start_date,
+        end_date = p_end_date,
+        start_time = p_start_time,
+        end_time = p_end_time,
+        status = p_status,
+        type = p_type,
+        is_open_to = p_is_open_to,
+        fee = p_fee,
+        capacity = p_capacity,
+        image = p_image
     WHERE event_id = p_event_id;
 
-    /*
-      Collaborators handling:
-      - NULL  -> do nothing (keep existing)
-      - '[]'  -> delete all
-      - array -> replace with provided set
-    */
-    IF p_collaborators IS NOT NULL THEN
-        -- Replace semantics: clear then insert new (if any)
-        DELETE FROM tbl_event_collaborator WHERE event_id = p_event_id;
-
-        SET v_collab_count = JSON_LENGTH(p_collaborators);
-        SET i = 0;
-
-        WHILE i < v_collab_count DO
-            SET v_collab_org_id = CAST(JSON_UNQUOTE(JSON_EXTRACT(p_collaborators, CONCAT('$[', i, ']'))) AS UNSIGNED);
-            IF v_collab_org_id IS NOT NULL THEN
-                INSERT IGNORE INTO tbl_event_collaborator (event_id, organization_id)
-                VALUES (p_event_id, v_collab_org_id);
-            END IF;
-            SET i = i + 1;
-        END WHILE;
-    END IF;
-
-    -- Actor email (for logging)
     SELECT email INTO v_user_email FROM tbl_user WHERE user_id = p_user_id LIMIT 1;
     IF v_user_email IS NULL THEN SET v_user_email = ''; END IF;
 
-    -- Audit log (include image change details)
     CALL LogAction(
         v_user_email,
         CONCAT('Updated SDAO event ID ', p_event_id),
         'event',
-        JSON_OBJECT(
-            'event_id',    p_event_id,
-            'title',       p_title,
-            'status',      p_status,
-            'image_prev',  v_prev_image,
-            'image_new',   p_image,
-            'updated_at',  NOW()
-        ),
+        JSON_OBJECT('event_id', p_event_id, 'updated_at', NOW()),
         CONCAT('/events/', p_event_id),
         NULL
     );
 
-    -- Return the updated row
     SELECT * FROM tbl_event WHERE event_id = p_event_id LIMIT 1;
-
-    COMMIT;
 END$$
 DELIMITER ;
 
@@ -1683,51 +1647,96 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'user_id required';
     END IF;
 
-    -- Ensure SDAO event
     IF NOT EXISTS (SELECT 1 FROM tbl_event WHERE event_id = p_event_id AND event_type = 'SDAO') THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Only SDAO events can be deleted with this procedure';
     END IF;
 
-    START TRANSACTION;
+    DELETE FROM tbl_event WHERE event_id = p_event_id;
 
-      -- If you have related tables, clear them first (idempotent & safe)
-      DELETE FROM tbl_event_collaborator WHERE event_id = p_event_id;
-      DELETE FROM tbl_event_course       WHERE event_id = p_event_id;
+    SELECT email INTO v_user_email FROM tbl_user WHERE user_id = p_user_id LIMIT 1;
+    IF v_user_email IS NULL THEN SET v_user_email = ''; END IF;
 
-      -- Finally remove the event
-      DELETE FROM tbl_event WHERE event_id = p_event_id;
-
-      SELECT email INTO v_user_email FROM tbl_user WHERE user_id = p_user_id LIMIT 1;
-      IF v_user_email IS NULL THEN SET v_user_email = ''; END IF;
-
-      CALL LogAction(
-          v_user_email,
-          CONCAT(
-              'Deleted SDAO event ID ', p_event_id,
-              IF(p_reason IS NOT NULL AND p_reason <> '', CONCAT(' (Reason: ', p_reason, ')'), '')
-          ),
-          'event',
-          JSON_OBJECT('event_id', p_event_id, 'deleted_at', NOW(), 'reason', p_reason),
-          '/events',
-          NULL
-      );
-
-      -- Optional: return a simple confirmation payload
-      SELECT JSON_OBJECT('deleted', TRUE, 'event_id', p_event_id) AS result;
-
-    COMMIT;
+    CALL LogAction(
+        v_user_email,
+        CONCAT('Deleted SDAO event ID ', p_event_id, IF(p_reason IS NOT NULL, CONCAT(' (Reason: ', p_reason, ')'), '')),
+        'event',
+        JSON_OBJECT('event_id', p_event_id, 'deleted_at', NOW(), 'reason', p_reason),
+        '/events',
+        NULL
+    );
 END$$
 DELIMITER ;
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE RegisterEvent(IN
-	event_id INT,   
+    event_id INT,   
     user_id VARCHAR(200)
 )
 BEGIN
 INSERT INTO tbl_event_attendance (event_id, user_id, status) 
 VALUES (event_id, user_id, "Registered");
-SELECT * FROM tbl_event_attendance WHERE attendance_id = LAST_INSERT_ID();
+
+SELECT
+    ea.attendance_id as id,
+    ea.event_id,
+    ea.user_id,
+    CONCAT(u.f_name, ' ', u.l_name) AS full_name,
+    u.email,
+    u.profile_picture,
+    ea.status AS attendance_status,
+    te.remarks,
+    ea.time_in,
+    ea.time_out,
+    ea.created_at AS registration_date,
+    t.transaction_id,
+    t.amount,
+    tt.label AS transaction_type,
+    t.status AS transaction_status,
+    t.proof_image,
+    t.created_at AS transaction_created_at
+FROM tbl_event_attendance ea
+LEFT JOIN tbl_user u ON ea.user_id = u.user_id
+LEFT JOIN tbl_transaction_event te ON ea.event_id = te.event_id 
+LEFT JOIN tbl_transaction t ON te.transaction_id = t.transaction_id AND ea.user_id = t.user_id
+LEFT JOIN tbl_transaction_type tt ON t.transaction_type_id = tt.transaction_type_id
+WHERE ea.event_id = event_id AND ea.user_id = user_id;
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE UnRegisterEvent(IN
+    event_id INT,
+    user_id VARCHAR(200)
+)
+BEGIN
+-- Select the record first for real-time updates
+SELECT
+    ea.attendance_id as id,
+    ea.event_id,
+    ea.user_id,
+    CONCAT(u.f_name, ' ', u.l_name) AS full_name,
+    u.email,
+    u.profile_picture,
+    ea.status AS attendance_status,
+    te.remarks,
+    ea.time_in,
+    ea.time_out,
+    ea.created_at AS registration_date,
+    t.transaction_id,
+    t.amount,
+    tt.label AS transaction_type,
+    t.status AS transaction_status,
+    t.proof_image,
+    t.created_at AS transaction_created_at
+FROM tbl_event_attendance ea
+LEFT JOIN tbl_user u ON ea.user_id = u.user_id
+LEFT JOIN tbl_transaction_event te ON ea.event_id = te.event_id 
+LEFT JOIN tbl_transaction t ON te.transaction_id = t.transaction_id AND ea.user_id = t.user_id
+LEFT JOIN tbl_transaction_type tt ON t.transaction_type_id = tt.transaction_type_id
+WHERE ea.event_id = event_id AND ea.user_id = user_id;
+
+-- Then delete the record
+DELETE FROM tbl_event_attendance WHERE event_id = event_id AND user_id = user_id;
 END $$
 DELIMITER ;
 
@@ -1902,33 +1911,28 @@ BEGIN
     ORDER BY o.category, o.name;
 END $$
 DELIMITER ;
-
 DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE GetUpcomingEvents(IN p_user_id VARCHAR(200))
+CREATE DEFINER='admin'@'%' PROCEDURE GetUpcomingEvents(IN p_orgs JSON)
 BEGIN
-    WITH UserOrganizations AS (
-        SELECT organization_id 
-        FROM tbl_organization_members 
-        WHERE user_id = p_user_id
-        
-        UNION
-        
-        SELECT c.organization_id 
-        FROM tbl_committee_members cm
-        JOIN tbl_committee c ON cm.committee_id = c.committee_id
-        WHERE cm.user_id = p_user_id
-    )
-    
-    SELECT 
+    -- Normalize input
+    IF p_orgs IS NULL OR JSON_TYPE(p_orgs) <> 'ARRAY' THEN
+        SET p_orgs = JSON_ARRAY();
+    END IF;
+
+    -- Return upcoming events using JSON_CONTAINS instead of temp table
+    SELECT
         e.event_id,
         e.title AS event_title,
-        e.start_date,
-        e.end_date,
+        DATE_FORMAT(e.start_date, '%Y-%m-%d') AS start_date,
+        DATE_FORMAT(e.end_date, '%Y-%m-%d') AS end_date,
         e.start_time,
         e.end_time,
         e.venue,
+        e.image,
         o.name AS organization_name,
         o.logo AS organization_logo,
+        e.organization_id,
+        rc.org_version_id AS organization_version_id,
         (
             SELECT GROUP_CONCAT(profile_picture ORDER BY RAND() SEPARATOR ',')
             FROM (
@@ -1937,6 +1941,7 @@ BEGIN
                 JOIN tbl_user u ON ea.user_id = u.user_id
                 WHERE ea.event_id = e.event_id
                 AND ea.status = 'Registered'
+                AND u.profile_picture IS NOT NULL
                 ORDER BY RAND()
                 LIMIT 4
             ) AS random_attendees
@@ -1946,17 +1951,36 @@ BEGIN
             FROM tbl_event_attendance 
             WHERE event_id = e.event_id
             AND status = 'Registered'
-        ) AS total_attendees
+        ) AS total_attendees,
+        -- Count total organizations involved (main org + collaborators)
+        (
+            1 + COALESCE((
+                SELECT COUNT(*)
+                FROM tbl_event_collaborator ec
+                WHERE ec.event_id = e.event_id
+            ), 0)
+        ) AS total_organizations_involved
     FROM tbl_event e
-    JOIN tbl_organization o ON e.organization_id = o.organization_id
-    LEFT JOIN UserOrganizations uo ON e.organization_id = uo.organization_id
+    LEFT JOIN tbl_organization o ON e.organization_id = o.organization_id
+    LEFT JOIN tbl_renewal_cycle rc ON e.organization_id = rc.organization_id 
+        AND e.cycle_number = rc.cycle_number
     WHERE e.status = 'Approved'
       AND e.start_date >= CURDATE()
       AND (
-          e.is_open_to = 'Open to all'
-          OR uo.organization_id IS NOT NULL
+           e.is_open_to IN ('Open to all', 'NU Students only')
+        OR (
+            e.organization_id IS NOT NULL 
+            AND JSON_CONTAINS(p_orgs, JSON_OBJECT('organization_id', e.organization_id))
+        )
+        OR EXISTS (
+            SELECT 1 FROM tbl_event_collaborator ec
+            WHERE ec.event_id = e.event_id
+            AND JSON_CONTAINS(p_orgs, JSON_OBJECT('organization_id', ec.organization_id))
+        )
       )
-    ORDER BY e.start_date ASC, e.start_time ASC
+    ORDER BY 
+        e.start_date ASC, 
+        e.start_time ASC
     LIMIT 5;
 END $$
 DELIMITER ;
@@ -3764,7 +3788,64 @@ END $$
 DELIMITER ;
 
 DELIMITER $$
-DROP PROCEDURE IF EXISTS GetEventsByUserRole $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetEventsByUserRole(IN p_user_id VARCHAR(200))
+BEGIN
+    DECLARE v_role_name VARCHAR(100);
+    DECLARE v_college_id INT;
+    DECLARE v_program_id INT;
+
+    -- Get user role, program, and college
+    SELECT r.role_name, u.program_id, p.college_id
+      INTO v_role_name, v_program_id, v_college_id
+      FROM tbl_user u
+      JOIN tbl_role r ON u.role_id = r.role_id
+      LEFT JOIN tbl_program p ON u.program_id = p.program_id
+     WHERE u.user_id = p_user_id
+     LIMIT 1;
+
+    -- SDAO or Academic Director: show all events
+    IF v_role_name IN ('SDAO', 'Academic Director') THEN
+        SELECT 
+            e.*, 
+            o.name AS organization_name,
+            (
+                SELECT JSON_ARRAYAGG(
+                    JSON_OBJECT(
+                        'organization_id', ec.organization_id,
+                        'organization_name', co.name,
+                        'base_program_id', co.base_program_id,
+                        'logo', co.logo
+                    )
+                )
+                FROM tbl_event_collaborator ec
+                LEFT JOIN tbl_organization co ON ec.organization_id = co.organization_id
+                WHERE ec.event_id = e.event_id
+            ) AS collaborators
+        FROM tbl_event e
+        LEFT JOIN tbl_organization o ON e.organization_id = o.organization_id;
+
+    -- Dean: show all SDAO events, all org events under same college, and collaborations
+    ELSEIF v_role_name = 'Dean' THEN
+        SELECT DISTINCT 
+            e.*, 
+            o.name AS organization_name,
+            (
+                SELECT JSON_ARRAYAGG(
+                    JSON_OBJECT(
+                        'organization_id', ec.organization_id,
+                        'organization_name', co.name,
+                        'base_program_id', co.base_program_id,
+                        'logo', co.logo
+                    )
+                )
+                FROM tbl_event_collaborator ec
+                LEFT JOIN tbl_organization co ON ec.organization_id = co.organization_id
+                WHERE ec.event_id = e.event_id
+            ) AS collaborators
+        FROM tbl_event e
+        LEFT JOIN tbl_organization o ON e.organization_id = o.organization_id
+        LEFT JOIN tbl_program p ON o.base_program_id = p.program_id
+        LEFT JOIN tbDROP PROCEDURE IF EXISTS GetEventsByUserRole $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetEventsByUserRole(
     IN p_user_id VARCHAR(200)
 )
@@ -15540,7 +15621,3 @@ INSERT INTO tbl_rank_permission(rank_id, permission_id) VALUES
 (1,20),
 (1,21),
 (1,22),
-(1,29),
-(1,30),
-(1,31);
-

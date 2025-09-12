@@ -50,7 +50,7 @@ router.get('/events/add-event-status', middleware.validateAzureJWT, eventControl
 router.get('/event-requirements', middleware.validateAzureJWT, middleware.hasPermission(["CREATE_EVENT","CREATE_SDAO_EVENT"]),eventController.getEventRequirements);
 router.post('/event-requirements/save', middleware.validateAzureJWT, middleware.hasPermission("MANAGE_REQUIREMENTS"), eventController.saveEventRequirements);
 router.post('/events/addcertificate', middleware.validateAzureJWT, middleware.hasPermission("UPDATE_EVALUATION"), eventController.addCertificate);
-router.get('/events/:id', middleware.validateAzureJWT, middleware.hasPermission("VIEW_EVENT"), eventController.getEventById);
+router.get('/events/specific', middleware.validateAzureJWT, middleware.hasPermission("VIEW_EVENT"), eventController.getEventById);
 router.get('/events/attendees', middleware.validateAzureJWT, middleware.hasPermission("VIEW_EVENT"), eventController.getAttendeesbyEventId);
 router.get('/events/:id/stats', middleware.validateAzureJWT, middleware.hasPermission("VIEW_EVENT"), eventController.getEventStats);
 

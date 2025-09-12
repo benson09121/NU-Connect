@@ -9,67 +9,27 @@ const { Auth } = require("../models/userIdModel");
 const TemplateHandler = require('easy-template-x').TemplateHandler;
 const convertDocxToPdf = require('../../config/convertToPdf');
 const { get } = require('http');
+const { subscribeToChannel, publishToChannel } = require('../../web/controllers/sseController');
+
+function getContentType(filename) {
+  const ext = path.extname(filename).toLowerCase();
+  const contentTypes = {
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.gif': 'image/gif',
+    '.webp': 'image/webp',
+    '.svg': 'image/svg+xml',
+    '.bmp': 'image/bmp',
+    '.ico': 'image/x-icon',
+  };
+  return contentTypes[ext] || 'application/octet-stream';
+}
 
 async function getEvents(req, res) {
     try {
-        const user = await userModel.getUser(req.user.email);
-        const events = await eventModel.getAllEvents(user.user_id);
-        console.log(events);
+        const events = await eventModel.getAllEvents(req.user.organizations);
         res.json(events);
-    } catch (error) {
-        res.status(500).json({ message: error.message });
-    }
-}
-
-async function createEvent(req, res) {
-    try {
-        const { 
-            user_id, 
-            title, 
-            description, 
-            venue_type, 
-            venue, 
-            start_date, 
-            end_date, 
-            start_time, 
-            end_time, 
-            organization_id, 
-            cycle_number,
-            event_type,
-            status, 
-            type, 
-            is_open_to,
-            fee,
-            capacity 
-        } = req.body;
-        
-        const orgId = organization_id ? parseInt(organization_id, 10) : null;
-        const cycleNum = cycle_number ? parseInt(cycle_number, 10) : null;
-        const eventFee = fee ? parseInt(fee, 10) : null;
-        const eventCapacity = capacity ? parseInt(capacity, 10) : null;
-        
-        const newEvent = await eventModel.createEvent(
-            user_id, 
-            title, 
-            description, 
-            venue_type || 'Face to face',
-            venue, 
-            start_date || end_date, // fallback for backward compatibility
-            end_date || start_date, // fallback for backward compatibility
-            start_time, 
-            end_time, 
-            orgId, 
-            cycleNum,
-            event_type || 'Organization',
-            status || 'Pending', 
-            type || 'Free', 
-            is_open_to || 'Members only',
-            eventFee,
-            eventCapacity
-        );
-
-        // No cache updates or notifications here since the event is pending approval
-        res.status(201).json(newEvent);
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
@@ -78,33 +38,39 @@ async function createEvent(req, res) {
 async function registerEvent(req, res) {
     try {
         const event_id = parseInt(req.body.event_id, 10);
-        const checkRegister = await eventModel.checkEventRegistration(event_id);
+        const user = await userModel.getUser(req.user.email);
+        const checkRegister = await eventModel.checkEventRegistration(event_id, user.user_id);
         if (checkRegister) {
             return res.status(400).json({ message: 'Already registered for this event' });
         }
-        const newAttendee = await eventModel.registerEvent(event_id);
+        const newAttendee = await eventModel.registerEvent(event_id, user.user_id);
         if (!newAttendee) {
             return res.status(404).json({ message: 'Event not found' });
         }
-        redisClient.publish(`events:attendees:${event_id}`, JSON.stringify({ type: 'Register', attendee: newAttendee }));
-
-        // Refresh the cache
-        await eventModel.refreshAttendeesCache(event_id);
-
+        publishToChannel(`attendees_${event_id}`, {
+            operation: 'CREATE',
+            data: newAttendee
+        });
         res.status(201).json(newAttendee);
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
 }
 
-async function archiveEvent(req, res) {
+async function unregisterEvent(req, res) {
     try {
-        const { event_id } = req.body;
-        await eventModel.archiveEvent(event_id);
-
-        redisClient.publish('events', JSON.stringify({ type: 'archive', event_id }));
-
-        res.status(200).json({ message: 'Event Archived' });
+        const event_id = parseInt(req.body.event_id, 10);
+        const user = await userModel.getUser(req.user.email);
+        console.log(user.user_id);
+        const unregister = await eventModel.unregisterEvent(event_id, user.user_id);
+        if (!unregister) {
+            return res.status(404).json({ message: 'Event not found or not registered' });
+        }
+            publishToChannel(`attendees_${event_id}`, {
+            operation: 'DELETE',
+            data: unregister
+        });
+        res.status(200).json({ message: 'Successfully unregistered from the event' });
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
@@ -112,9 +78,8 @@ async function archiveEvent(req, res) {
 
 async function getSpecificEvent(req, res) {
     try {
-        const eventId = parseInt(req.params.eventId, 10);
-        const userEmail = req.params.userEmail;
-        console.log(userEmail);
+        const { eventId } = req.query;
+        const userEmail = req.user.email;
         const user = await userModel.getUser(userEmail);
         const event = await eventModel.getSpecificEvent(eventId, user.user_id);
         let attendees = await eventModel.getEventAttendees(eventId);
@@ -130,62 +95,17 @@ async function getSpecificEvent(req, res) {
             event: event,
             attendees: attendees
         };
+        console.log(response);
         res.json(response);
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
 }
 
-// // SSE endpoint for real-time updates
-// function sseUpdates(req, res) {
-//     const userId = req.userId; // Extract user_id from the authenticated request
-
-//     res.setHeader('Content-Type', 'text/event-stream');
-//     res.setHeader('Cache-Control', 'no-cache');
-//     res.setHeader('Connection', 'keep-alive');
-
-//     const onMessage = (channel, message) => {
-//         if (channel === `events:user:${userId}`) {
-//             res.write(`data: ${message}\n\n`);
-//         }
-//     };
-
-//     redisSubscriber.on('message', onMessage);
-//     redisSubscriber.subscribe(`events:user:${userId}`);
-
-//     req.on('close', () => {
-//         redisSubscriber.unsubscribe(`events:user:${userId}`);
-//         redisSubscriber.removeListener('message', onMessage);
-//         res.end();
-//     });
-// }
-
-async function sseEventAttendees(req, res) {
-    const eventId = parseInt(req.params.eventId, 10);
-
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-
-    const onMessage = (channel, message) => {
-        if (channel === `events:attendees:${eventId}`) {
-            res.write(`data: ${message}\n\n`);
-        }
-    };
-
-    redisSubscriber.on('message', onMessage);
-    redisSubscriber.subscribe(`events:attendees:${eventId}`);
-
-    req.on('close', () => {
-        redisSubscriber.unsubscribe(`events:attendees:${eventId}`);
-        redisSubscriber.removeListener('message', onMessage);
-        res.end();
-    });
-}
-
 async function getTickets(req, res) {
     try {
-        const getTicket = await eventModel.getTickets();
+        const user = await userModel.getUser(req.user.email);
+        const getTicket = await eventModel.getTickets(user.user_id);
         res.json(getTicket);
     } catch (error) {
         res.status(500).json({ message: error.message });
@@ -195,7 +115,7 @@ async function getTickets(req, res) {
 
 async function getUpcomingEvents(req, res) {
     try {
-        const upcomingEvents = await eventModel.getUpcomingEvents();
+        const upcomingEvents = await eventModel.getUpcomingEvents(req.user.organizations);
         res.json(upcomingEvents);
     } catch (error) {
         res.status(500).json({ message: error.message });
@@ -206,7 +126,7 @@ async function addGeneratedCertificate(req) {
     try {
         const { event_id } = req.body;
         const verification_code = uuidv4();
-
+        const user = await userModel.getUser(req.user.email);
         console.log('addGeneratedCertificate: Fetching certificate template for event_id:', event_id);
         const template = await eventModel.getCertificateTemplate(event_id);
         if (!template || !template[0]) throw new Error('No template found for this event');
@@ -223,8 +143,8 @@ async function addGeneratedCertificate(req) {
         };
 
         // Generate filenames
-        const safeFirstName = Auth.get_first_name.replace(/[^a-z0-9]/gi, '_').toLowerCase();
-        const safeLastName = Auth.get_last_name.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+        const safeFirstName = user.f_name.replace(/[^a-z0-9]/g, '_').toLowerCase();
+        const safeLastName = user.l_name.replace(/[^a-z0-9]/gi, '_').toLowerCase();
         const baseFilename = `Certificate_${safeFirstName}_${safeLastName}`;
         const docxPath = path.join("/app/certificates/templates", `${baseFilename}_${verification_code}.docx`);
         const pdfFilename = `${baseFilename}_${verification_code}.pdf`;
@@ -295,7 +215,8 @@ async function submitEvaluation(req, res) {
 
 async function getAllEventCertificates(req, res) {
     try {
-        const certificates = await eventModel.getAllEventCertificates();
+        const user = await userModel.getUser(req.user.email);
+        const certificates = await eventModel.getAllEventCertificates(user.user_id);
         if (!certificates || certificates.length === 0) {
             return res.status(404).json({ message: 'No certificates found for this event' });
         }
@@ -325,9 +246,10 @@ async function getEventCertificate(req, res) {
 async function scanTicket(req, res) {
     try {
         const { email, event_title } = req.body;
+        const user = await userModel.getUser(req.user.email);
         console.log('scanTicket: email:', email, 'event_title:', event_title);
 
-        const scannedTicket = await eventModel.scanTicket(email,event_title);
+        const scannedTicket = await eventModel.scanTicket(email,event_title, user.user_id);
         if (!scannedTicket) {
             return res.status(404).json({ message: 'Ticket not found' });
         }
@@ -338,19 +260,40 @@ async function scanTicket(req, res) {
         console.error('scanTicket: Error:', error.message);
     }
 }
+
+async function getEventPublicationImage(req, res) {
+  let { organization_id, organization_version_id, event_id, image } = req.query;
+ console.log('getEventPublicationImage: Received parameters:', { organization_id, organization_version_id, event_id, image });
+  try {
+    res.header('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Authorization, Content-Type, Accept');
+    res.setHeader('Content-Type', getContentType(image));
+    res.setHeader('Content-Disposition', `inline; filename="${image}"`);
+    res.setHeader(
+      'X-Accel-Redirect',
+      `/protected-organization-requirements/${organization_id}/${organization_version_id}/events/${event_id}/publication_images/${image}`
+    );
+    res.end();
+  } catch (error) {
+    console.error('getEventPublicationImage error:', error);
+    res.status(500).json({
+      error: error.message || "An error occurred while fetching the publication image.",
+    });
+  }
+}
+
 module.exports = {
     getEvents,
-    createEvent,
     registerEvent,
-    archiveEvent,
     getSpecificEvent,
     getTickets,
-    sseEventAttendees,
     getUpcomingEvents,
     addGeneratedCertificate,
     getEvaluation,
     submitEvaluation,
     getEventCertificate,
     getAllEventCertificates,
-    scanTicket  
+    scanTicket,
+    getEventPublicationImage,
+    unregisterEvent
 };

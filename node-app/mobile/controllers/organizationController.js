@@ -112,10 +112,28 @@ async function submitOrganizationApplication(req, res) {
     }
 }
 
+async function getOrganizationLogo(req, res) {
+    let organization_id = req.query.organization_id;
+    let organization_version_id = req.query.organization_version_id;
+    let logo = req.query.logo_name;
+    try {
+        // Set Content-Disposition so browser handles as image (inline) 
+        res.setHeader('Content-Disposition', `inline; filename="${logo}"`);
+        // X-Accel-Redirect for Nginx internal serving
+        res.setHeader('X-Accel-Redirect', `/protected-organization-requirements/${organization_id}/${organization_version_id}/logo/${logo}`);
+        res.end();
+    } catch (error) {
+        res.status(500).json({
+            error: error.message || "An error occurred while fetching the logo.",
+        });
+    }
+}
+
 module.exports = {
     getOrganizations,
     getUserOrganization,
     getOrganizationQuestion,
     getOrganizationFee,
-    submitOrganizationApplication
-}
+    submitOrganizationApplication,
+    getOrganizationLogo
+};

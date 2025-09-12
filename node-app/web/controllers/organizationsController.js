@@ -555,16 +555,15 @@ async function getOrganizationRequirement(req, res) {
 }
 
 async function getOrganizationLogo(req, res) {
-    let org_name = req.query.org_name;
+    let organization_id = req.query.organization_id;
+    let organization_version_id = req.query.organization_version_id;
     let logo_name = req.query.logo_name;
-    const org_name_encoded = encodeURIComponent(org_name);
-    const cycle_number = req.query.cycle_number;
     try {
         res.header('Access-Control-Allow-Origin', 'http://localhost:5173');
         // Set Content-Disposition so browser handles as image (inline) 
         res.setHeader('Content-Disposition', `inline; filename="${logo_name}"`);
         // X-Accel-Redirect for Nginx internal serving
-        res.setHeader('X-Accel-Redirect', `/protected-organization-requirements/${org_name_encoded}/${cycle_number}/logo/${logo_name}`);
+        res.setHeader('X-Accel-Redirect', `/protected-organization-requirements/${organization_id}/${organization_version_id}/logo/${logo_name}`);
         res.end();
     } catch (error) {
         res.status(500).json({
