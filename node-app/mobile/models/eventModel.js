@@ -1,88 +1,50 @@
 const pool = require('../../config/db');
 const { redisClient } = require('../../config/redis');
-const { Auth } = require("./userIdModel");
 
-async function getAllEvents(user_id) {
+async function getAllEvents(organizations) {
 
     const connection = await pool.getConnection();
     try {
-        const [rows] = await connection.query('CALL GetAllEvents(?);',[user_id]);
-        console.log(rows);
+        const [rows] = await connection.query('CALL GetAllEventsByOrganizations(?);', [JSON.stringify(organizations)]);
         return rows[0];
     } finally {
         connection.release();
     }
 }
-
-async function createEvent(user_id, title, description, venue_type, venue, start_date, end_date, start_time, end_time, organization_id, cycle_number, event_type, status, type, is_open_to, fee, capacity) {
+async function registerEvent(event_id, user_id) {
     const connection = await pool.getConnection();
     try {
         const [result] = await connection.query(
-            'CALL CreateEvent(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);',
-            [
-                user_id, 
-                title, 
-                description, 
-                venue_type || 'Face to face',
-                venue, 
-                start_date, 
-                end_date,
-                start_time, 
-                end_time, 
-                organization_id, 
-                cycle_number,
-                event_type || 'Organization',
-                status || 'Pending', 
-                type || 'Free', 
-                is_open_to || 'Members only',
-                fee,
-                capacity
-            ]
+            'CALL RegisterEvent(?, ?)',  // Make sure this matches exactly
+            [event_id, user_id]
         );
-        // Invalidate the cache
-        await redisClient.del(`events:user:${user_id}`);
-        return result[0][0];
+        return result[0];
     } finally {
         connection.release();
     }
 }
 
-async function registerEvent(event_id) {
+async function unregisterEvent(event_id, user_id) {
     const connection = await pool.getConnection();
     try {
         const [result] = await connection.query(
-            'CALL RegisterEvent(?, ?)',
-            [event_id, Auth.get_userId]
+            'CALL UnRegisterEvent(?, ?)',
+            [event_id, user_id]
         );
-        return result[0][0];
+        return result[0];
     } finally {
         connection.release();
     }
 }
 
-async function checkEventRegistration(event_id) {
+async function checkEventRegistration(event_id, user_id) {
     const connection = await pool.getConnection();
     try {
         const [rows] = await connection.query(
             'CALL CheckEventRegistration(?, ?)',
-            [event_id, Auth.get_userId]
+            [event_id, user_id]
         );
         return rows[0][0];
-    } finally {
-        connection.release();
-    }
-}
-
-async function archiveEvent(event_id) {
-    const connection = await pool.getConnection();
-    try {
-        await connection.query(
-            'UPDATE tbl_event SET status = "Archived" WHERE event_id = ?',
-            [event_id]
-        );
-
-        // Invalidate the cache
-        await redisClient.del('events:all');
     } finally {
         connection.release();
     }
@@ -101,60 +63,29 @@ async function getSpecificEvent(eventId, userId) {
     }
 }
 
-async function getEventAttendees(eventId) {
-    const cacheKey = `events:attendees:${eventId}`;
-    const cachedAttendees = await redisClient.get(cacheKey);
-    if (cachedAttendees) {
-        return JSON.parse(cachedAttendees);
-    }
+async function getTickets(user_id) {
     const connection = await pool.getConnection();
     try {
-        const [rows] = await connection.query(
-            'CALL GetEventAttendees(?);',
-            [eventId]
-        );
-        return rows;
-    } finally {
-        connection.release();
-    }
-}
-
-async function refreshAttendeesCache(eventId) {
-    const connection = await pool.getConnection();
-    try {
-        const rows = await connection.query(`CALL GetEventAttendees(?);`,
-            [eventId]
-        );
-        // Update the cache in Redis
-        await redisClient.set(`events:attendees:${eventId}`, JSON.stringify(rows), 'EX', 3600);
-    } finally {
-        connection.release();
-    }
-}
-async function getTickets() {
-    const connection = await pool.getConnection();
-    try {
-
-        const [rows] = await connection.query("Call GetUserEventRegistrations(?);", [Auth.get_userId]);
+        const [rows] = await connection.query("Call GetUserEventRegistrations(?);", [user_id]);
         return rows[0];
     } finally {
         connection.release();
     }
 }
-async function getUpcomingEvents() {
+async function getUpcomingEvents(organizations) {
     const connection = await pool.getConnection();
     try {
-        const [rows] = await connection.query('CALL GetUpcomingEvents(?);', [Auth.get_userId]);
+        const [rows] = await connection.query('CALL GetUpcomingEvents(?);', [JSON.stringify(organizations)]);
         return rows[0];
     } finally {
         connection.release();
     }
 }
 
-async function addGeneratedCertificate({ event_id, template_id, pdfFilename, verification_code }) {
+async function addGeneratedCertificate({ event_id, template_id, pdfFilename, verification_code, user_id }) {
     const connection = await pool.getConnection();
     try{
-    const [rows] = await connection.query('CALL AddGeneratedCertificate(?, ?, ?, ?, ?);', [event_id, Auth.get_userId ,template_id, pdfFilename, verification_code]); // Ensure only 5 arguments are passed
+    const [rows] = await connection.query('CALL AddGeneratedCertificate(?, ?, ?, ?, ?);', [event_id, user_id ,template_id, pdfFilename, verification_code]); // Ensure only 5 arguments are passed
     return rows[0];
     }
     finally{
@@ -182,34 +113,44 @@ async function submitEvaluation(response) {
         connection.release();
     }
 }
-async function getAllEventCertificates() {
+async function getAllEventCertificates(user_id) {
     const connection = await pool.getConnection();
     try {
-        const [rows] = await connection.query('CALL GetAllEventCertificates(?);', [Auth.get_userId]);
+        const [rows] = await connection.query('CALL GetAllEventCertificates(?);', [user_id]);
         return rows[0];
     } finally {
         connection.release();
     }
 }
 
-async function scanTicket(email, event_id) {
+async function scanTicket(email, event_id,  user_id) {
     const connection = await pool.getConnection();
     try {
-        const [rows] = await connection.query('CALL ScanTicket(?, ?, ?);', [email, event_id, Auth.get_userId]);
+        const [rows] = await connection.query('CALL ScanTicket(?, ?, ?);', [email, event_id, user_id]);
         return rows[0];
     } finally {
         connection.release();
     }
 }
+
+async function getEventAttendees(eventId) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query(
+            'CALL GetEventAttendees(?);',
+            [eventId]
+        );
+        return rows;
+    } finally {
+        connection.release();
+    }
+}
+
 
 module.exports = {
     getAllEvents,
-    createEvent,
     registerEvent,
-    archiveEvent,
     getSpecificEvent,
-    getEventAttendees,
-    refreshAttendeesCache,
     checkEventRegistration,
     getTickets,
     getUpcomingEvents,
@@ -217,5 +158,7 @@ module.exports = {
     getEvaluation,
     submitEvaluation,
     getAllEventCertificates,
-    scanTicket
+    scanTicket,
+    getEventAttendees,
+    unregisterEvent
 };
