@@ -2029,6 +2029,8 @@ CREATE DEFINER='admin'@'%' PROCEDURE AddCertificateTemplate(
     IN p_uploaded_by VARCHAR(200)
 )
 BEGIN
+    DECLARE v_user_email VARCHAR(100);
+
     -- Check if uploaded_by exists
     IF NOT EXISTS (SELECT 1 FROM tbl_user WHERE user_id = p_uploaded_by) THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Uploader user_id does not exist';
@@ -2038,6 +2040,9 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM tbl_event WHERE event_id = p_event_id) THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Event does not exist';
     END IF;
+
+    -- Get email for logging
+    SELECT email INTO v_user_email FROM tbl_user WHERE user_id = p_uploaded_by LIMIT 1;
 
     IF EXISTS (SELECT 1 FROM tbl_certificate_template WHERE event_id = p_event_id) THEN
         UPDATE tbl_certificate_template 
@@ -2049,6 +2054,63 @@ BEGIN
         INSERT INTO tbl_certificate_template (event_id, template_path, uploaded_by)
         VALUES (p_event_id, p_template_path, p_uploaded_by);
     END IF;
+
+    -- Log the action
+    CALL LogAction(
+        v_user_email,
+        CONCAT('Uploaded/Updated certificate template for event ', p_event_id),
+        'certificate',
+        JSON_OBJECT('event_id', p_event_id, 'template_path', p_template_path),
+        CONCAT('/events/', p_event_id),
+        p_template_path
+    );
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE DeleteCertificateTemplate(
+    IN p_event_id INT
+)
+BEGIN
+    DECLARE v_template_path VARCHAR(255);
+    DECLARE v_uploaded_by VARCHAR(200);
+    DECLARE v_user_email VARCHAR(100);
+
+    -- Ensure the event exists
+    IF NOT EXISTS (SELECT 1 FROM tbl_event WHERE event_id = p_event_id) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Event does not exist';
+    END IF;
+
+    -- Get current template (if any) and uploader
+    SELECT template_path, uploaded_by
+      INTO v_template_path, v_uploaded_by
+      FROM tbl_certificate_template
+     WHERE event_id = p_event_id
+     LIMIT 1;
+
+    IF v_template_path IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'No certificate template to delete for this event';
+    END IF;
+
+    -- Get email for logging
+    SELECT email INTO v_user_email FROM tbl_user WHERE user_id = v_uploaded_by LIMIT 1;
+
+    -- Log the action
+    CALL LogAction(
+        v_user_email,
+        CONCAT('Deleted certificate template for event ', p_event_id),
+        'certificate',
+        JSON_OBJECT('event_id', p_event_id, 'template_path', v_template_path),
+        CONCAT('/events/', p_event_id),
+        v_template_path
+    );
+
+    -- Return the path so the caller can delete the file on disk
+    SELECT v_template_path AS deleted_template_path;
+
+    -- Remove the DB record
+    DELETE FROM tbl_certificate_template
+     WHERE event_id = p_event_id;
 END $$
 DELIMITER ;
 
@@ -11150,6 +11212,8 @@ BEGIN
            te.remarks,
            tm.organization_id,
            tm.cycle_number,
+           -- Add current_org_version_id from tbl_organization
+           o.current_org_version_id,
            u.f_name AS user_first_name,
            u.l_name AS user_last_name,
            u.email AS user_email
@@ -11159,6 +11223,7 @@ BEGIN
     LEFT JOIN tbl_financial_category fc ON t.category_id = fc.category_id
     LEFT JOIN tbl_transaction_event te ON t.transaction_id = te.transaction_id
     LEFT JOIN tbl_transaction_membership tm ON t.transaction_id = tm.transaction_id
+    LEFT JOIN tbl_organization o ON tm.organization_id = o.organization_id
     LEFT JOIN tbl_user u ON t.user_id = u.user_id
     WHERE t.transaction_id = p_transaction_id;
 END $$
@@ -15467,6 +15532,7 @@ VALUES
 (4,30),
 (4,32),
 (4,33),
+(2,1),
 (2,6),
 (2,9),
 (2,14),
@@ -15607,4 +15673,4 @@ INSERT INTO tbl_rank_permission(rank_id, permission_id) VALUES
 (1,19),
 (1,20),
 (1,21),
-(1,22),
+(1,22);
