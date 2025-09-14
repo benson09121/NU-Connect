@@ -1000,10 +1000,21 @@ async function getAllCommitteeMembers(req, res) {
         });
     }
 }
+
 async function addCommitteeMember(req, res) {
     try {
-        const { committee_id, user_email, role, orgId, orgVersionId } = req.body;
-        const action_by_email = req.user.email;
+        // Destructure action_by_email from req.body (sent from frontend)
+        const { committee_id, user_email, role, action_by_email, orgId, orgVersionId } = req.body;
+        
+        // Validate that action_by_email is provided from frontend
+        if (!action_by_email) {
+            return res.status(400).json({ error: 'action_by_email is required' });
+        }
+
+        // Validate that user_email is provided from frontend
+        if (!user_email) {
+            return res.status(400).json({ error: 'user_email is required from frontend' });
+        }
 
         const result = await organizationsModel.addCommitteeMember({
             committee_id,
@@ -1035,17 +1046,17 @@ async function addCommitteeMember(req, res) {
         res.status(400).json({ error: sqlMessage });
     }
 }
+
 async function updateCommitteeMember(req, res) {
     try {
-        const { committee_member_id, new_role, orgId, orgVersionId, committee_id } = req.body;
+        const { committee_member_id, new_role, orgId, orgVersionId } = req.body;  // Removed committee_id from destructuring
         const action_by_email = req.user.email;
 
         const result = await organizationsModel.updateCommitteeMember({
             committee_member_id,
             new_role,
-            action_by_email,
-            committee_id
-        });
+            action_by_email
+        });  // Removed committee_id from call
 
         publishToChannel(`committee_members_${orgId}_${orgVersionId}`, {
             operation: 'UPDATE',
@@ -1061,6 +1072,7 @@ async function updateCommitteeMember(req, res) {
         res.status(400).json({ error: sqlMessage });
     }
 }
+
 async function archiveCommitteeMember(req, res) {
     try {
         const { committee_member_id, reason, orgId, orgVersionId } = req.body;
@@ -1195,6 +1207,25 @@ async function editOrganizationMember(req, res) {
         });
     }
 }
+
+async function getArchivedOrganizationMembers(req, res) {
+    try {
+        const { org_id, org_version_id, sessionId } = req.query;
+        if (!org_id || !org_version_id) {
+            return res.status(400).json({ message: 'org_id and org_version_id are required.' });
+        }
+        const archivedMembers = await organizationsModel.getArchivedOrganizationMembers(org_id, org_version_id);
+        if (sessionId) {
+            subscribeToChannel(sessionId, `archived_organization_members_${org_id}_${org_version_id}`);
+        }
+        res.status(200).json(archivedMembers);
+    } catch (error) {
+        res.status(500).json({
+            error: error.message || "An error occurred while fetching archived organization members.",
+        });
+    }
+}
+
 async function archiveOrganizationMember(req, res) {
     try {
         const { member_id, reason, orgId, orgVersionId } = req.body;
@@ -1216,6 +1247,35 @@ async function archiveOrganizationMember(req, res) {
     } catch (error) {
         res.status(400).json({
             error: error.sqlMessage || error.message || "An error occurred while archiving the organization member."
+        });
+    }
+}
+
+async function unarchiveOrganizationMember(req, res) {
+    try {
+        const { member_id, reason, orgId, orgVersionId } = req.body;
+        if (!member_id || !orgId || !orgVersionId) {
+            return res.status(400).json({ message: 'member_id, orgId, and orgVersionId are required.' });
+        }
+        const unarchivedByEmail = req.user.email;
+        const result = await organizationsModel.unarchiveOrganizationMember(
+            member_id,
+            unarchivedByEmail,
+            reason || null,
+            orgId,
+            orgVersionId
+        );
+
+        // Real-time notification: notify clients that member was restored
+        publishToChannel(`organization_members_${orgId}_${orgVersionId}`, {
+            operation: 'CREATE',
+            data: result
+        });
+
+        res.status(200).json({ message: 'Organization member unarchived successfully.' });
+    } catch (error) {
+        res.status(500).json({
+            error: error.message || "An error occurred while unarchiving the organization member."
         });
     }
 }
@@ -1890,5 +1950,7 @@ module.exports = {
     getEmailSuggestionOverride,
     addMemberPermissionOverride,
     updateMemberPermissionOverride,
-    removeMemberPermissionOverride
+    removeMemberPermissionOverride,
+    getArchivedOrganizationMembers,
+    unarchiveOrganizationMember
 };
