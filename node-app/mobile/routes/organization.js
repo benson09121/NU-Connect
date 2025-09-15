@@ -9,5 +9,6 @@ router.get('/organization-fee', middleware.authMiddleware, organizationControlle
 router.get('/profile/organization', middleware.authMiddleware, organizationController.getUserOrganization);
 router.get('/organization/question', middleware.authMiddleware, organizationController.getOrganizationQuestion);
 router.post('/organization-application/submit', middleware.authMiddleware, organizationController.submitOrganizationApplication);
+router.get('/organization/leave', middleware.authMiddleware, organizationController.leaveOrganization);
 router.get('/organization/logo', organizationController.getOrganizationLogo);
 module.exports = router;

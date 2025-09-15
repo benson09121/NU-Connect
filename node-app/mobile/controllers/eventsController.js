@@ -1,4 +1,5 @@
 const eventModel = require('../models/eventModel');
+const webEventModel = require('../../web/models/eventModel');
 const userModel = require('../models/userModel');
 const { redisClient, redisSubscriber } = require('../../config/redis');
 const path = require('path');
@@ -9,6 +10,7 @@ const { Auth } = require("../models/userIdModel");
 const TemplateHandler = require('easy-template-x').TemplateHandler;
 const convertDocxToPdf = require('../../config/convertToPdf');
 const { get } = require('http');
+const certificateQueue = require('../../jobs/certificateQueue');
 const { subscribeToChannel, publishToChannel } = require('../../web/controllers/sseController');
 
 function getContentType(filename) {
@@ -61,7 +63,6 @@ async function unregisterEvent(req, res) {
     try {
         const event_id = parseInt(req.body.event_id, 10);
         const user = await userModel.getUser(req.user.email);
-        console.log(user.user_id);
         const unregister = await eventModel.unregisterEvent(event_id, user.user_id);
         if (!unregister) {
             return res.status(404).json({ message: 'Event not found or not registered' });
@@ -83,9 +84,6 @@ async function getSpecificEvent(req, res) {
         const user = await userModel.getUser(userEmail);
         const event = await eventModel.getSpecificEvent(eventId, user.user_id);
         let attendees = await eventModel.getEventAttendees(eventId);
-        if (attendees) {
-            attendees = attendees[0][0];
-        }
         if (!event) {
             return res.status(404).json({ message: 'Event not found' });
         }
@@ -95,7 +93,6 @@ async function getSpecificEvent(req, res) {
             event: event,
             attendees: attendees
         };
-        console.log(response);
         res.json(response);
     } catch (error) {
         res.status(500).json({ message: error.message });
@@ -124,9 +121,9 @@ async function getUpcomingEvents(req, res) {
 
 async function addGeneratedCertificate(req) {
     try {
-        const { event_id } = req.body;
+        const { event_id, email } = req.body;
         const verification_code = uuidv4();
-        const user = await userModel.getUser(req.user.email);
+        const user = await userModel.getUser(email);
         console.log('addGeneratedCertificate: Fetching certificate template for event_id:', event_id);
         const template = await eventModel.getCertificateTemplate(event_id);
         if (!template || !template[0]) throw new Error('No template found for this event');
@@ -139,7 +136,7 @@ async function addGeneratedCertificate(req) {
         }
 
         const data = {
-            name: `${Auth.get_first_name} ${Auth.get_last_name}`,
+            name: `${user.f_name} ${user.l_name}`,
         };
 
         // Generate filenames
@@ -198,15 +195,37 @@ async function submitEvaluation(req, res) {
     try {
         const response = req.body;
         const event_id = req.body.event_id;
-        console.log(response);
+        const email = req.user.email;
+        
+        console.log('Submitting evaluation:', response);
+        const user = await userModel.getUser(email);
 
+        // Submit evaluation first - this must complete successfully
         await eventModel.submitEvaluation(response);
 
-        // Call addGeneratedCertificate and handle its result
-        const certificateResult = await addGeneratedCertificate({ body: { event_id } });
-        console.log(certificateResult);
+        const updatedMember = await eventModel.updateMemberEventStatus(user.user_id, event_id);
+        publishToChannel(`attendees_${event_id}`, {
+            operation: 'UPDATE',
+            data: updatedMember
+        });
 
-        res.status(201).json({ message: 'Evaluation submitted successfully', certificate: certificateResult });
+        // Add to certificate queue (fire and forget)
+        const queueResult = await certificateQueue.addToQueue(event_id, email);
+        
+        console.log('Certificate generation queued:', queueResult);
+
+        // Return immediate success response
+        res.status(201).json({ 
+            message: 'Evaluation submitted successfully! Your certificate is being generated in the background.',
+            evaluation_submitted: true,
+            certificate: {
+                status: 'queued',
+                job_id: queueResult.job_id,
+                queue_position: queueResult.queue_position,
+                message: queueResult.message
+            }
+        });
+        
     } catch (error) {
         console.error('submitEvaluation: Error:', error.message);
         res.status(500).json({ message: error.message });
@@ -245,14 +264,23 @@ async function getEventCertificate(req, res) {
 
 async function scanTicket(req, res) {
     try {
-        const { email, event_title } = req.body;
+        const { email, event_id } = req.body;  // Changed from event_title to event_id
         const user = await userModel.getUser(req.user.email);
-        console.log('scanTicket: email:', email, 'event_title:', event_title);
+        console.log('scanTicket: email:', email, 'event_id:', event_id);
 
-        const scannedTicket = await eventModel.scanTicket(email,event_title, user.user_id);
+        const scannedTicket = await eventModel.scanTicket(email, event_id, user.user_id);
         if (!scannedTicket) {
             return res.status(404).json({ message: 'Ticket not found' });
         }
+        await webEventModel.getAttendeesByEventId(event_id);
+        
+        const attendees = await webEventModel.getOneEventAttendeesWithDetails(event_id, email);
+        const ch = `attendees_${event_id}`;
+    publishToChannel(ch, {
+      channel: ch,
+      operation: 'UPDATE',
+      data: attendees
+    });
         console.log('scanTicket: Scanned ticket:', scannedTicket);
         res.status(200).json(scannedTicket);
     } catch (error) {

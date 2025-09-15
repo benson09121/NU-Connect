@@ -82,7 +82,9 @@ app.use('/api/web/public', publicRoutes);
 
 // Initialize cron jobs
 const { initializeCronJobs } = require('./jobs');
+const certificateQueue = require('./jobs/certificateQueue');
 initializeCronJobs();
+certificateQueue.processQueue();
 
 // Add this line with other route uses
 // Global error handler for unhandled promise rejections

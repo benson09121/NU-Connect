@@ -623,6 +623,16 @@ async function deleteEventSDAO(event_id, user_id, reason) {
   }
 }
 
+async function getOneEventAttendeesWithDetails(event_id, user_id) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetOneEventAttendeesWithDetails(?, ?);', [event_id, user_id]);
+        return rows[0];
+    } finally {
+        connection.release();
+    }
+}
+
 module.exports = {
     addEvent,
     getEventRequirements,
@@ -667,5 +677,6 @@ module.exports = {
     archiveEvent,
     unarchiveEvent,
     updateEventSDAO,
-    deleteEventSDAO
+    deleteEventSDAO,
+    getOneEventAttendeesWithDetails
 };

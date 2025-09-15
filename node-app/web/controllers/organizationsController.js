@@ -1103,13 +1103,24 @@ async function getPendingOrganizationMembers(req, res) {
 }
 async function approveMembershipApplication(req, res) {
     try {
-        const { application_id, remarks, org_name } = req.body;
+        const { application_id, remarks, organization_id, organization_version_id } = req.body;
         const reviewer_email = req.user.email;
         if (!application_id) {
             return res.status(400).json({ error: "application_id is required." });
         }
-        await organizationsModel.approveMembershipApplication(application_id, reviewer_email, remarks || null, org_name);
-        
+        const result = await organizationsModel.approveMembershipApplication(application_id, reviewer_email, remarks || null);
+        publishToChannel(`pending_organization_members_${organization_id}_${organization_version_id}`,{
+            operation: 'DELETE',
+            data: result,
+        });
+
+        const updateMembers = await organizationsModel.getSingleOrganizationMember(result[0].id, organization_id);
+
+        publishToChannel(`organization_members_${organization_id}_${organization_version_id}`, {
+            operation: 'CREATE',
+            data: updateMembers,
+        });
+
         res.json({ message: 'Membership application approved successfully.' });
     } catch (error) {
         res.status(500).json({

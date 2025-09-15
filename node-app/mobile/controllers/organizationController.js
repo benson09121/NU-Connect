@@ -1,10 +1,12 @@
+const { publishToChannel } = require('../../web/controllers/sseController');
 const organizationModel = require('../models/organizationModel'); 
-
+const userModel = require('../models/userModel');
 
 
 async function getOrganizations(req, res) {
     try {
-        const organizations = await organizationModel.getOrganizations();
+        const user = await userModel.getUser(req.user.email);
+        const organizations = await organizationModel.getOrganizations(user.user_id);
         res.json(organizations);
     } catch (error) {
         res.status(500).json({ message: error.message });
@@ -37,77 +39,88 @@ async function getOrganizationFee(req, res) {
         res.status(500).json({ message: error.message });
     }
 }
-async function submitOrganizationApplication(req, res) {
-    // req.body may be { data: '[...]' } or an array
-    let bodyArr = req.body;
-    console.log('Raw req.body:', req.body);
 
-    // If bodyArr has a 'data' property, parse it
+async function submitOrganizationApplication(req, res) {
+    let bodyArr = req.body.data;
+    console.log(bodyArr);
+    console.log(req.file);
+    const user = await userModel.getUser(req.user.email);
+    
+    // Parse data if needed
     if (bodyArr && typeof bodyArr.data === 'string') {
-        try {
-            bodyArr = JSON.parse(bodyArr.data);
-            console.log('Parsed bodyArr from data:', bodyArr);
-        } catch (e) {
-            console.error('JSON parse error:', e);
-            return res.status(400).json({ message: 'Invalid JSON format in data' });
-        }
+        bodyArr = JSON.parse(bodyArr.data);
     } else if (typeof bodyArr === 'string') {
-        try {
-            bodyArr = JSON.parse(bodyArr);
-            console.log('Parsed bodyArr:', bodyArr);
-        } catch (e) {
-            console.error('JSON parse error:', e);
-            return res.status(400).json({ message: 'Invalid JSON format' });
-        }
-    } else {
-        console.log('bodyArr is already an object/array:', bodyArr);
+        bodyArr = JSON.parse(bodyArr);
     }
 
     const paymentObj = bodyArr.find(obj => obj.paymentData);
-    console.log('paymentObj:', paymentObj);
-    let paymentData = null;
-    let json = null;
-    let paymentDataString = null;
-    if (paymentObj && paymentObj.paymentData !== 'free') {
-        paymentData = paymentObj.paymentData;
-        let membership_fee = null, payment_type = null, payment_proof = null;
-        membership_fee = paymentData.membership_fee;
-        payment_type = paymentData.payment_type;
-        payment_proof = paymentData.payment_proof;
-        json = {
-            membership_fee: membership_fee,
-            payment_type: payment_type,
-            payment_proof: payment_proof
-        };
-        paymentDataString = JSON.stringify(json);
-    }
-    
-    
-    console.log('paymentData:', paymentData);
-
     const orgObj = bodyArr.find(obj => obj.organization_id);
-    console.log('orgObj:', orgObj);
     const reasonObj = bodyArr.find(obj => obj.application_reason);
-    console.log('reasonObj:', reasonObj);
 
-    const org_id = orgObj ? orgObj.organization_id : null;
-    const answers = reasonObj ? reasonObj.application_reason : [];
+    const org_id = orgObj?.organization_id;
+    const organization_version_id = orgObj?.organization_version_id; // Extract organization_version_id
+    const answers = reasonObj?.application_reason || [];
     
-    const question_id = answers.map(answer => answer.question_id);
-    const answer = answers.map(answer => answer.answer);
-    console.log('org_id:', org_id);
-    console.log('question_id:', question_id[0]);
+    if (!org_id || answers.length === 0) {
+        return res.status(400).json({ message: 'Missing required data' });
+    }
+
+    // Log the organization_version_id for reference
+    console.log('Organization Version ID:', organization_version_id);
 
     try {
-        if (typeof organizationModel.submitOrganizationApplication !== 'function') {
-            console.error('organizationModel.submitOrganizationApplication is not a function');
-            return res.status(500).json({ message: 'Server error: submitOrganizationApplication is not implemented in organizationModel.' });
+        // Apply for membership first
+        const membershipResult = await organizationModel.submitOrganizationApplication(
+            org_id, 
+            user.user_id, 
+            answers[0].question_id, 
+            answers[0].answer
+        );
+        console.log('Membership application result:', membershipResult);
+        publishToChannel(`pending_organization_members_${org_id}_${organization_version_id}`,{
+            operation: 'CREATE',
+            data: membershipResult,
+        });
+
+        let transactionResult = null;
+        
+        // Handle payment if provided and not free
+        if (paymentObj && paymentObj.paymentData !== 'free') {
+            const paymentData = JSON.stringify(paymentObj.paymentData);
+            transactionResult = await organizationModel.createMembershipTransaction(
+                org_id, 
+                user.user_id, 
+                paymentData
+            );
         }
-        const result = await organizationModel.submitOrganizationApplication(org_id, question_id[0], answer[0],paymentDataString);
-        console.log('Submission result:', result);
-        res.status(200).json({"message": "Application submitted successfully"});
+
+        console.log('Membership result:', membershipResult);
+        console.log('Transaction result:', transactionResult);
+        
+        res.status(200).json({
+            message: "Application submitted successfully",
+            membership: membershipResult,
+            transaction: transactionResult,
+            organization_version_id: organization_version_id // Include in response for reference
+        });
     } catch (error) {
         console.error('Submission error:', error);
+        res.status(500).json({ message: error.message });
+    }
+}
+
+async function leaveOrganization(req, res) {
+    try {
+        
+        const user = await userModel.getUser(req.user.email);
+        const { organization_id } = req.query;
+        const result = await organizationModel.leaveOrganization(organization_id, user.user_id);
+        publishToChannel(`user_organizations_${user.user_id}`, {
+            operation: 'DELETE',
+            data: result,
+        });
+    } catch (error) {
+        console.error('Error leaving organization:', error);
         res.status(500).json({ message: error.message });
     }
 }
@@ -135,5 +148,6 @@ module.exports = {
     getOrganizationQuestion,
     getOrganizationFee,
     submitOrganizationApplication,
-    getOrganizationLogo
+    getOrganizationLogo,
+    leaveOrganization
 };

@@ -582,15 +582,6 @@ async function getEventApplicationPublicationImage(req, res) {
     image_name
   );
 
-  // Log for debugging
-  console.log(`getEventApplicationPublicationImage: Attempting to serve image`, {
-    organization_id,
-    organization_version_id,
-    event_id,
-    image_name,
-    physicalPath,
-    exists: fs.existsSync(physicalPath)
-  });
 
   if (!fs.existsSync(physicalPath)) {
     return res.status(404).json({
