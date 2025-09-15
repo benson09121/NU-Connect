@@ -457,14 +457,13 @@ async function addCommitteeMember({
 async function updateCommitteeMember({
     committee_member_id,
     new_role,
-    action_by_email,
-    committee_id
+    action_by_email
 }) {
     const connection = await pool.getConnection();
     try {
         const [rows] = await connection.query(
-            `CALL UpdateCommitteeMember(?, ?, ?, ?)`,
-            [committee_member_id, new_role, action_by_email, committee_id]
+            `CALL UpdateCommitteeMember(?, ?, ?)`,  // Fixed: Now 3 parameters
+            [committee_member_id, new_role, action_by_email]  // Removed committee_id
         );
         return rows[0];
     } catch (error) {
@@ -583,6 +582,19 @@ async function editOrganizationMember({
     }
 }
 
+async function getArchivedOrganizationMembers(orgId, orgVersionId) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetArchivedOrganizationMembers(?, ?);', [orgId, orgVersionId]);
+        return rows[0];
+    } catch (error) {
+        console.error('Error fetching archived organization members:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
 async function archiveOrganizationMember({ member_id, archived_by_email, reason, orgId, orgVersionId }) {
     const connection = await pool.getConnection();
     try {
@@ -593,6 +605,25 @@ async function archiveOrganizationMember({ member_id, archived_by_email, reason,
         return rows[0];
     } catch (error) {
         console.error('Error archiving organization member:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function unarchiveOrganizationMember(memberId, unarchivedByEmail, reason, orgId, orgVersionId) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL UnarchiveOrganizationMember(?, ?, ?, ?, ?);', [
+            memberId,
+            unarchivedByEmail,
+            reason,
+            orgId,
+            orgVersionId
+        ]);
+        return rows[0];
+    } catch (error) {
+        console.error('Error unarchiving organization member:', error);
         throw error;
     } finally {
         connection.release();
@@ -1188,5 +1219,7 @@ module.exports = {
     getEmailSuggestionOverride,
     addMemberPermissionOverride,
     updateMemberPermissionOverride,
-    removeMemberPermissionOverride
+    removeMemberPermissionOverride,
+    getArchivedOrganizationMembers,
+    unarchiveOrganizationMember
 };

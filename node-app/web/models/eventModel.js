@@ -430,9 +430,17 @@ async function getEventEvaluationFeedbackPeriod(event_id){
       connection.release();
   }
 }
-async function AddCertificateTemplate(event_id, filepath, user_id) {
+
+async function AddCertificateTemplate(event_id, filepath, user_id_or_email) {
     const connection = await pool.getConnection();
     try {
+        let user_id = user_id_or_email;
+        // If it's an email, look up user_id
+        if (user_id_or_email && user_id_or_email.includes('@')) {
+            const [rows] = await connection.query('SELECT user_id FROM tbl_user WHERE email = ?', [user_id_or_email]);
+            if (!rows[0]) throw new Error('Uploader user not found');
+            user_id = rows[0].user_id;
+        }
         const [rows] = await connection.query('CALL AddCertificateTemplate(?, ?, ?);', [event_id, filepath, user_id]);
         return rows[0];
     } finally {
@@ -445,6 +453,17 @@ async function getCertificateTemplate(event_id) {
     try {
         const [rows] = await connection.query('CALL GetCertificateTemplate(?);', [event_id]);
         return rows[0]; // returns [{ template_path: 'event-86-template.docx', ... }]
+    } finally {
+        connection.release();
+    }
+}
+
+async function DeleteCertificateTemplate(event_id) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL DeleteCertificateTemplate(?);', [event_id]);
+        // MySQL SP returns: [[{ deleted_template_path: 'filename.docx' }], ...]
+        return rows[0]?.deleted_template_path || rows[0]?.[0]?.deleted_template_path || null;
     } finally {
         connection.release();
     }
@@ -623,6 +642,7 @@ async function deleteEventSDAO(event_id, user_id, reason) {
   }
 }
 
+
 async function getOneEventAttendeesWithDetails(event_id, user_id) {
     const connection = await pool.getConnection();
     try {
@@ -631,6 +651,20 @@ async function getOneEventAttendeesWithDetails(event_id, user_id) {
     } finally {
         connection.release();
     }
+}
+
+async function getOrganizationVersionId(organization_id) {
+  const connection = await pool.getConnection();
+  try {
+    const [rows] = await connection.query(
+      'SELECT current_org_version_id FROM tbl_organization WHERE organization_id = ? LIMIT 1',
+      [organization_id]
+    );
+    return rows[0]?.current_org_version_id || null;
+  } finally {
+    connection.release();
+  }
+
 }
 
 module.exports = {
@@ -665,6 +699,7 @@ module.exports = {
     getEventEvaluationFeedbackPeriod,
     AddCertificateTemplate,
     getCertificateTemplate,
+    DeleteCertificateTemplate,
     checkEventTitle,
     checkScheduleConflict,
     createBlockedPeriod,
@@ -678,5 +713,7 @@ module.exports = {
     unarchiveEvent,
     updateEventSDAO,
     deleteEventSDAO,
-    getOneEventAttendeesWithDetails
+    getOneEventAttendeesWithDetails,
+    getOrganizationVersionId
+
 };

@@ -738,12 +738,17 @@ async function uploadOrUpdatePostEventRequirement(req, res) {
     const organization_id = parseInt(req.body.organization_id);
     const submitted_by_email = req.body.submitted_by_email;
 
-    const event_application_id = req.body.event_application_id === "" ?
-      null : parseInt(req.body.event_application_id);
+    const event_application_id = req.body.event_application_id === ""
+      ? null : parseInt(req.body.event_application_id);
 
+    // Always resolve submitted_by to user_id
     let submitted_by = req.body.submitted_by;
-    if (!submitted_by && submitted_by_email) {
-      const user = await eventModel.getUserByEmail(submitted_by_email);
+    if (!submitted_by || submitted_by.includes('@')) {
+      const email = submitted_by || submitted_by_email;
+      if (!email) {
+        return res.status(400).json({ message: "submitted_by (user_id) or submitted_by_email is required." });
+      }
+      const user = await eventModel.getUserByEmail(email);
       if (!user) {
         return res.status(404).json({ message: "User not found for the provided email." });
       }
@@ -752,15 +757,26 @@ async function uploadOrUpdatePostEventRequirement(req, res) {
 
     const file_path = req.body.file_path;
 
-    if (!event_id || !requirement_id || !cycle_number || !organization_id || !file_path || !submitted_by_email) {
+    if (!event_id || !requirement_id || !cycle_number || !organization_id || !file_path || !submitted_by) {
       return res.status(400).json({ message: "Missing required fields." });
     }
 
+    // Fetch current organization version ID
+    let organization_version_id = req.body.organization_version_id;
+    if (!organization_version_id) {
+      organization_version_id = await eventModel.getOrganizationVersionId(organization_id);
+      if (!organization_version_id) {
+        return res.status(400).json({ message: "Organization version not found." });
+      }
+    }
+
     let savedFilePath = file_path;
-    if (req.file) {
+    const uploadedFile = req.files?.file;
+    if (uploadedFile) {
       const requirementsDir = path.join(
         '/app/organizations',
         String(organization_id),
+        String(organization_version_id),
         'events',
         String(event_id),
         'requirements'
@@ -770,12 +786,12 @@ async function uploadOrUpdatePostEventRequirement(req, res) {
         fs.mkdirSync(requirementsDir, { recursive: true });
       }
 
-      const filename = `requirement-${Date.now()}-${req.file.originalname}`;
+      const filename = `requirement-${Date.now()}-${uploadedFile.name}`;
       savedFilePath = filename;
 
       fs.writeFileSync(
         path.join(requirementsDir, filename),
-        req.file.buffer || req.file.data
+        uploadedFile.data
       );
     }
 
@@ -786,12 +802,13 @@ async function uploadOrUpdatePostEventRequirement(req, res) {
       cycle_number,
       organization_id,
       file_path: savedFilePath,
-      submitted_by
+      submitted_by // <-- always user_id now
     });
 
     res.status(200).json({
       message: "Post-event requirement uploaded/updated successfully.",
-      file_path: savedFilePath
+      file_path: savedFilePath,
+      organization_version_id
     });
   } catch (error) {
     res.status(500).json({
@@ -1039,57 +1056,36 @@ async function getEventEvaluationFeedbackPeriod(req, res) {
 
 async function addCertificate(req, res) {
   try {
-    console.log('addCertificate: Request received');
-    const { event_id, user_email } = req.body;
-    console.log('addCertificate: event_id:', event_id);
+    const { event_id, user_email, user_id } = req.body;
+    let uploader = user_id || user_email || req.user?.user_id || req.user?.email;
 
     if (!req.files || !req.files.file) {
-      console.error('addCertificate: No file uploaded');
       return res.status(400).json({ message: 'No file uploaded' });
     }
 
     // Always prefer DB user_id if email is provided
-    let user_id = req.user?.user_id;
-    if (user_email) {
-      const user = await eventModel.getUserByEmail(user_email);
+    if (uploader && uploader.includes('@')) {
+      const user = await eventModel.getUserByEmail(uploader);
       if (!user) {
         return res.status(404).json({ message: "User not found for the provided email." });
       }
-      user_id = user.user_id;
+      uploader = user.user_id;
     }
-    if (!user_id) {
+
+    if (!uploader) {
       return res.status(400).json({ message: "user_id (or user_email) is required." });
     }
 
     const uploadedFile = req.files.file;
-    console.log('addCertificate: Uploaded file details:', uploadedFile);
-
-    const fileBuffer = uploadedFile.data;
-    console.log('addCertificate: File buffer size:', fileBuffer.length);
-
-    if (!uploadedFile.mimetype.includes('application/vnd.openxmlformats-officedocument.wordprocessingml.document')) {
-      console.error('addCertificate: Invalid file type:', uploadedFile.mimetype);
-      return res.status(400).json({ message: 'Only .docx files allowed' });
-    }
-
     const filename = `event-${event_id}-template.docx`;
     const templatePath = path.join('/app/certificates/templates', filename);
-    console.log('addCertificate: Saving file to path:', templatePath);
 
-    try {
-      fs.writeFileSync(templatePath, uploadedFile.data);
-      console.log('addCertificate: File saved successfully');
-    } catch (writeError) {
-      console.error('addCertificate: Error saving file:', writeError);
-      return res.status(500).json({ message: 'Error saving file', error: writeError.message });
-    }
+    fs.writeFileSync(templatePath, uploadedFile.data);
 
-    await eventModel.AddCertificateTemplate(event_id, filename, user_id);
-    console.log('addCertificate: Database insert successful');
+    await eventModel.AddCertificateTemplate(event_id, filename, uploader);
 
     res.status(201).json({ path: templatePath });
   } catch (error) {
-    console.error('addCertificate: Unexpected error:', error);
     res.status(500).json({ message: 'An unexpected error occurred', error: error.message });
   }
 }
@@ -1127,6 +1123,47 @@ async function getCert(req, res) {
   } catch (error) {
     console.error('getCert: Error:', error);
     res.status(500).json({ message: 'An error occurred while downloading the certificate template.', error: error.message });
+  }
+}
+
+async function deleteCertificate(req, res) {
+  try {
+    const { event_id } = req.params; // expects event_id from URL path
+    console.log('[deleteCertificate] event_id received:', event_id);
+    if (!event_id) {
+      return res.status(400).json({ message: 'event_id is required' });
+    }
+
+    // Call SP to validate & delete DB row, while receiving the filename to remove
+    const filename = await eventModel.DeleteCertificateTemplate(event_id);
+
+    if (!filename) {
+      return res.status(404).json({ message: 'No certificate template to delete for this event' });
+    }
+
+    // Always use the same directory as addCertificate
+    const fullPath = path.join('/app/certificates/templates', filename);
+
+    try {
+      if (fs.existsSync(fullPath)) {
+        fs.unlinkSync(fullPath);
+      } else {
+        console.warn('deleteCertificate: File not found at', fullPath);
+      }
+    } catch (e) {
+      if (e.code !== 'ENOENT') {
+        console.warn('deleteCertificate: File delete warning:', e.message);
+      }
+    }
+
+    return res.status(200).json({
+      message: 'Certificate template deleted',
+      deleted_file: filename
+    });
+  } catch (err) {
+    const msg = err?.sqlMessage || err?.message || 'Unexpected error';
+    const notFound = /No certificate template|Event does not exist/i.test(msg);
+    return res.status(notFound ? 404 : 500).json({ message: msg });
   }
 }
 
@@ -1910,6 +1947,7 @@ module.exports = {
   getEventEvaluationFeedbackPeriod,
   addCertificate,
   getSampleCertificate,
+  deleteCertificate,
   getEventPublicationImage,
   checkEventTitle,
   checkScheduleConflict,

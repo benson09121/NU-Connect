@@ -34,6 +34,7 @@ router.get('/getOrganizationLogo', middleware.validateAzureJWT, organizationsCon
 router.get('/getOrganizationLogoApplication', middleware.validateAzureJWT, organizationsController.getOrganizationLogoApplication);
 router.get('/check-org-name', middleware.validateAzureJWT, organizationsController.checkOrganizationName);
 router.post('/check-org-emails', middleware.validateAzureJWT, organizationsController.checkOrganizationEmails);
+
 router.post('/archive-organization', middleware.validateAzureJWT, middleware.hasPermission("ARCHIVE_ORGANIZATION"), organizationsController.archiveOrganization);
 router.post('/unarchive-organization', middleware.validateAzureJWT, middleware.hasPermission("ARCHIVE_ORGANIZATION"), organizationsController.unarchiveOrganization);
 router.get('/getApplication_Approval_Timeline', middleware.validateAzureJWT, organizationsController.GetApprovalTimeline);
@@ -145,11 +146,24 @@ router.put(
     middleware.hasPermission("UPDATE_COMMITTEE"),
     organizationsController.editOrganizationMember
 );
+router.get(
+    '/archived-organization-members',
+    middleware.validateAzureJWT,
+    middleware.hasPermission("VIEW_ORGANIZATION"),
+    organizationsController.getArchivedOrganizationMembers
+);
 router.post(
     '/archive-organization-member',
     middleware.validateAzureJWT,
     middleware.hasPermission("DELETE_COMMITTEE"),
     organizationsController.archiveOrganizationMember
+);
+
+router.put(
+    '/unarchive-organization-member',
+    middleware.validateAzureJWT,
+    middleware.hasPermission("DELETE_COMMITTEE"), // Adjust permission as needed
+    organizationsController.unarchiveOrganizationMember
 );
 
 router.get('/get-programs', middleware.validateAzureJWT, organizationsController.getProgram);
