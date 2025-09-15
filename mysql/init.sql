@@ -1233,8 +1233,8 @@ a.start_time,
 a.end_time, 
 a.status, 
 a.type, 
-a.start_date,
-a.end_date,
+DATE_FORMAT(a.start_date, '%Y-%m-%d') AS start_date,
+DATE_FORMAT(a.end_date, '%Y-%m-%d') AS end_date,
 a.event_type,
 a.is_open_to,
 a.fee,
@@ -1261,7 +1261,7 @@ CREATE DEFINER='admin'@'%' PROCEDURE GetEventAttendeesWithDetails(
 )
 BEGIN
     SELECT
-        ea.attendance_id,
+        ea.attendance_id as id,
         ea.event_id,
         ea.user_id,
         CONCAT(u.f_name, ' ', u.l_name) AS full_name,
@@ -1288,14 +1288,48 @@ END $$
 DELIMITER ;
 
 DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE GetEventAttendees(
-	IN eventId INT
+CREATE DEFINER='admin'@'%' PROCEDURE GetOneEventAttendeesWithDetails(
+    IN p_event_id INT,
+    IN p_user_id VARCHAR(200)
 )
 BEGIN
-	SELECT a.event_id, b.f_name, b.l_name, a.status
-FROM tbl_event_attendance a 
-LEFT JOIN tbl_user b ON a.user_id = b.user_id
-WHERE a.status = "Registered" AND a.event_id = eventId;
+    SELECT
+        ea.attendance_id as id,
+        ea.event_id,
+        ea.user_id,
+        CONCAT(u.f_name, ' ', u.l_name) AS full_name,
+        u.email,
+        u.profile_picture,
+        ea.status AS attendance_status,
+        te.remarks,
+        ea.time_in,
+        ea.time_out,
+        ea.created_at AS registration_date,
+        t.transaction_id,
+        t.amount,
+        tt.label AS transaction_type,
+        t.status AS transaction_status,
+        t.proof_image,
+        t.created_at AS transaction_created_at
+    FROM tbl_event_attendance ea
+    LEFT JOIN tbl_user u ON ea.user_id = u.user_id
+    LEFT JOIN tbl_transaction_event te ON ea.event_id = te.event_id 
+    LEFT JOIN tbl_transaction t ON te.transaction_id = t.transaction_id AND ea.user_id = t.user_id
+    LEFT JOIN tbl_transaction_type tt ON t.transaction_type_id = tt.transaction_type_id
+    WHERE ea.event_id = p_event_id AND u.user_id = p_user_id;
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetEventAttendees(
+    IN eventId INT
+)
+BEGIN
+    SELECT a.event_id, b.f_name, b.l_name, a.status
+    FROM tbl_event_attendance a 
+    LEFT JOIN tbl_user b ON a.user_id = b.user_id
+    WHERE a.status IN ("Registered", "Evaluated", "Attended") 
+      AND a.event_id = eventId;
 END $$
 DELIMITER ;
 
@@ -1797,6 +1831,7 @@ CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizations(IN p_user_id VARCHAR(200))
 BEGIN
     SELECT 
         o.organization_id,
+        o.current_org_version_id AS organization_version_id,
         o.name AS organization_name,
         o.logo,
         o.description AS organization_description,
@@ -1804,6 +1839,14 @@ BEGIN
         o.status, -- Include status for filtering (Active, Archived, etc.)
         o.is_recruiting,
         o.membership_fee_amount,
+        -- Get the current organization version ID from the latest renewal cycle
+        (
+            SELECT rc.org_version_id
+            FROM tbl_renewal_cycle rc
+            WHERE rc.organization_id = o.organization_id
+            ORDER BY rc.cycle_number DESC
+            LIMIT 1
+        ) AS organization_version_id,
         (
             -- Count only non-executive Active members
             SELECT COUNT(*) 
@@ -1841,7 +1884,7 @@ BEGIN
                 LIMIT 4
             ) AS u
         ) AS member_profile_pictures,
-        -- Return membership status instead of has_joined
+        -- Return membership status instead of user role
         COALESCE(
             (SELECT om.status 
              FROM tbl_organization_members om 
@@ -1856,6 +1899,37 @@ BEGIN
             ),
             'Not Member'
         ) AS membership_status,
+        -- Get 4 random member names per organization
+        (
+            SELECT JSON_ARRAYAGG(
+                JSON_OBJECT(
+                    'first_name', member_data.f_name,
+                    'last_name', member_data.l_name
+                )
+            )
+            FROM (
+                SELECT DISTINCT user_data.f_name, user_data.l_name
+                FROM (
+                    SELECT u.f_name, u.l_name
+                    FROM tbl_organization_members om
+                    JOIN tbl_user u ON om.user_id = u.user_id
+                    WHERE om.organization_id = o.organization_id
+                      AND om.status = 'Active'
+                      AND u.f_name IS NOT NULL 
+                      AND u.l_name IS NOT NULL
+                    UNION
+                    SELECT u.f_name, u.l_name
+                    FROM tbl_committee_members cm
+                    JOIN tbl_user u ON cm.user_id = u.user_id
+                    JOIN tbl_committee c ON cm.committee_id = c.committee_id
+                    WHERE c.organization_id = o.organization_id
+                      AND u.f_name IS NOT NULL 
+                      AND u.l_name IS NOT NULL
+                ) AS user_data
+                ORDER BY RAND()
+                LIMIT 4
+            ) AS member_data
+        ) AS member_names,
         (
             SELECT JSON_ARRAYAGG(JSON_OBJECT(
                 'event_id', e.event_id,
@@ -1865,6 +1939,22 @@ BEGIN
                 'start_time', e.start_time,
                 'end_time', e.end_time,
                 'venue', e.venue,
+                'image', e.image,
+                'attendee_names', (
+                    SELECT JSON_ARRAYAGG(
+                        JSON_OBJECT(
+                            'first_name', u.f_name,
+                            'last_name', u.l_name
+                        )
+                    )
+                    FROM tbl_event_attendance ea
+                    JOIN tbl_user u ON ea.user_id = u.user_id
+                    WHERE ea.event_id = e.event_id
+                    AND ea.status IN ('Registered', 'Evaluated', 'Attended')
+                    AND ea.deleted_at IS NULL
+                    AND u.f_name IS NOT NULL 
+                    AND u.l_name IS NOT NULL
+                ),
                 'attendee_images', (
                     SELECT GROUP_CONCAT(u.profile_picture ORDER BY RAND() SEPARATOR ',')
                     FROM (
@@ -1872,7 +1962,8 @@ BEGIN
                         FROM tbl_event_attendance ea
                         JOIN tbl_user u ON ea.user_id = u.user_id
                         WHERE ea.event_id = e.event_id
-                        AND ea.status = 'Registered'
+                        AND ea.status IN ('Registered', 'Evaluated', 'Attended')
+                        AND ea.deleted_at IS NULL
                         LIMIT 4
                     ) AS u
                 ),
@@ -1880,7 +1971,8 @@ BEGIN
                     SELECT COUNT(*)
                     FROM tbl_event_attendance
                     WHERE event_id = e.event_id
-                    AND status = 'Registered'
+                    AND status IN ('Registered', 'Evaluated', 'Attended')
+                    AND deleted_at IS NULL
                 )
             ))
             FROM tbl_event e
@@ -1906,8 +1998,9 @@ BEGIN
         ) AS officers
     FROM tbl_organization o
     ORDER BY o.category, o.name;
-END $$
+END $$  
 DELIMITER ;
+
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetUpcomingEvents(IN p_orgs JSON)
 BEGIN
@@ -1931,23 +2024,29 @@ BEGIN
         e.organization_id,
         rc.org_version_id AS organization_version_id,
         (
-            SELECT GROUP_CONCAT(profile_picture ORDER BY RAND() SEPARATOR ',')
+            SELECT JSON_ARRAYAGG(
+                JSON_OBJECT(
+                    'first_name', u.f_name,
+                    'last_name', u.l_name
+                )
+            )
             FROM (
-                SELECT u.profile_picture
+                SELECT u.f_name, u.l_name
                 FROM tbl_event_attendance ea
                 JOIN tbl_user u ON ea.user_id = u.user_id
                 WHERE ea.event_id = e.event_id
-                AND ea.status = 'Registered'
-                AND u.profile_picture IS NOT NULL
+                AND ea.status IN ('Registered', 'Evaluated', 'Attended')
+                AND u.f_name IS NOT NULL 
+                AND u.l_name IS NOT NULL
                 ORDER BY RAND()
                 LIMIT 4
             ) AS random_attendees
-        ) AS attendee_profile_pictures,
+        ) AS attendee_names,
         (
             SELECT COUNT(*) 
             FROM tbl_event_attendance 
             WHERE event_id = e.event_id
-            AND status = 'Registered'
+            AND status IN ('Registered', 'Evaluated', 'Attended')
         ) AS total_attendees,
         -- Count total organizations involved (main org + collaborators)
         (
@@ -2177,6 +2276,7 @@ BEGIN
     DECLARE v_user_id VARCHAR(200);
     DECLARE v_user_email VARCHAR(100);
     DECLARE v_event_id INT;
+    DECLARE v_duration_seconds INT;
     DECLARE v_question_count INT;
     DECLARE v_counter INT DEFAULT 0;
     DECLARE v_question_id INT;
@@ -2190,9 +2290,10 @@ BEGIN
 
     START TRANSACTION;
 
-    -- Extract user_email and event_id from JSON
+    -- Extract user_email, event_id, and duration_seconds from JSON
     SET v_user_email = JSON_UNQUOTE(JSON_EXTRACT(p_json_data, '$.user_email'));
     SET v_event_id = CAST(JSON_UNQUOTE(JSON_EXTRACT(p_json_data, '$.event_id')) AS UNSIGNED);
+    SET v_duration_seconds = CAST(JSON_UNQUOTE(JSON_EXTRACT(p_json_data, '$.duration_seconds')) AS UNSIGNED);
 
     -- Resolve user_id from user_email
     SELECT user_id INTO v_user_id FROM tbl_user WHERE email = v_user_email LIMIT 1;
@@ -2200,9 +2301,9 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'User not found for provided email';
     END IF;
 
-    -- Create evaluation record
-    INSERT INTO tbl_evaluation (event_id, user_id)
-    VALUES (v_event_id, v_user_id);
+    -- Create evaluation record with duration
+    INSERT INTO tbl_evaluation (event_id, user_id, duration_seconds)
+    VALUES (v_event_id, v_user_id, v_duration_seconds);
     SET v_evaluation_id = LAST_INSERT_ID();
 
     -- Process Likert Scale Answers
@@ -2241,6 +2342,43 @@ BEGIN
     END WHILE;
 
     COMMIT;
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE UpdateMemberEventStatus(
+    IN p_event_id INT,
+    IN p_user_id VARCHAR(200)
+    )
+BEGIN
+    UPDATE tbl_event_attendance
+    SET status = 'Evaluated', time_out = CURRENT_TIMESTAMP()
+    WHERE event_id = p_event_id AND user_id = p_user_id;
+
+    SELECT
+    ea.attendance_id as id,
+    ea.event_id,
+    ea.user_id,
+    CONCAT(u.f_name, ' ', u.l_name) AS full_name,
+    u.email,
+    u.profile_picture,
+    ea.status AS attendance_status,
+    te.remarks,
+    ea.time_in,
+    ea.time_out,
+    ea.created_at AS registration_date,
+    t.transaction_id,
+    t.amount,
+    tt.label AS transaction_type,
+    t.status AS transaction_status,
+    t.proof_image,
+    t.created_at AS transaction_created_at
+FROM tbl_event_attendance ea
+LEFT JOIN tbl_user u ON ea.user_id = u.user_id
+LEFT JOIN tbl_transaction_event te ON ea.event_id = te.event_id 
+LEFT JOIN tbl_transaction t ON te.transaction_id = t.transaction_id AND ea.user_id = t.user_id
+LEFT JOIN tbl_transaction_type tt ON t.transaction_type_id = tt.transaction_type_id
+WHERE ea.event_id = p_event_id AND ea.user_id = p_user_id;
 END $$
 DELIMITER ;
 
@@ -3793,6 +3931,42 @@ BEGIN
         CONCAT(v_org_name, '/logo/', v_logo_filename) AS logo_path,
         CONCAT(v_org_name, '/requirements/') AS requirements_dir,
         v_cycle_number AS cycle_number;
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetEventTickets(
+    IN p_user_id VARCHAR(200)
+)
+BEGIN
+    SELECT 
+        e.event_id,
+        e.start_date,
+        e.start_time,
+        e.end_date,
+        e.end_time,
+        e.organization_id,
+        rc.org_version_id AS organization_version_id,
+        e.image,
+        u.f_name,
+        u.l_name,
+        e.title AS event_title,
+        o.name AS organization_name,
+        ea.status AS attendance_status,
+        ea.time_in,
+        ea.time_out,
+        ea.created_at AS registration_date
+    FROM tbl_event_attendance ea
+    JOIN tbl_event e ON ea.event_id = e.event_id
+    JOIN tbl_user u ON ea.user_id = u.user_id
+    LEFT JOIN tbl_organization o ON e.organization_id = o.organization_id
+    LEFT JOIN tbl_renewal_cycle rc ON e.organization_id = rc.organization_id 
+        AND e.cycle_number = rc.cycle_number
+    WHERE ea.user_id = p_user_id
+      AND ea.status IN ('Registered', 'Attended', 'Evaluated')
+      AND ea.deleted_at IS NULL  -- Exclude soft-deleted registrations
+      AND e.status = 'Approved'  -- Only show approved events
+    ORDER BY e.start_date DESC, e.start_time DESC;
 END $$
 DELIMITER ;
 
@@ -5930,13 +6104,20 @@ BEGIN
     SELECT 
         ec.*,
         e.title AS event_title,
-        e.certificate AS certificate_type
+        e.certificate AS certificate_type,
+        e.organization_id,
+        e.image,
+        -- Get organization_version_id from the renewal cycle
+        rc.org_version_id AS organization_version_id
     FROM tbl_event_certificate ec
     JOIN tbl_event e ON ec.event_id = e.event_id
+    LEFT JOIN tbl_renewal_cycle rc ON e.organization_id = rc.organization_id 
+        AND e.cycle_number = rc.cycle_number
     WHERE ec.user_id = p_user_id
     ORDER BY ec.issued_at DESC;
 END $$
 DELIMITER ;
+
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationDetails(
     IN p_org_id INT,
@@ -6837,9 +7018,9 @@ CREATE DEFINER='admin'@'%' PROCEDURE GetEventEvaluationFeedbackPeriod(IN p_event
 BEGIN
     SELECT 
     event_id as id,
-    start_date,
+    DATE_FORMAT(start_date, '%Y-%m-%d') AS start_date,
     start_time,
-    end_date,
+    DATE_FORMAT(a.end_date, '%Y-%m-%d') AS end_date,
     end_time,
     is_active
     FROM tbl_event_evaluation_settings
@@ -7565,20 +7746,18 @@ BEGIN
 END $$
 DELIMITER ;
 
+
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE ApplyForMembership(
     IN p_org_id INT,
     IN p_user_id VARCHAR(200),
-    IN p_payment_data JSON,
     IN p_question_id INT,
     IN p_response_value TEXT
 )
 BEGIN
     DECLARE v_cycle_number INT;
-    DECLARE v_fee_type ENUM('Per Term', 'Whole Academic Year', 'Free');
-    DECLARE v_fee_amount DECIMAL(10,2);
     DECLARE v_application_id INT;
-    DECLARE error_msg TEXT;
+    DECLARE v_member_id INT;
     
     -- Get current renewal cycle
     SELECT MAX(cycle_number) INTO v_cycle_number
@@ -7590,25 +7769,15 @@ BEGIN
         SET MESSAGE_TEXT = 'No active renewal cycle found for organization';
     END IF;
 
-    -- Get organization fee details
-    SELECT membership_fee_type, membership_fee_amount
-    INTO v_fee_type, v_fee_amount
-    FROM tbl_organization
-    WHERE organization_id = p_org_id;
-
-    -- Validate payment requirements
-    IF v_fee_type != 'Free' AND v_fee_amount > 0 THEN
-        IF p_payment_data IS NULL THEN
-            SIGNAL SQLSTATE '45000'
-            SET MESSAGE_TEXT = 'Payment is required for this organization';
-        END IF;
-        
-        IF JSON_EXTRACT(p_payment_data, '$.membership_fee') != v_fee_amount THEN
-            -- Fixed CONCAT syntax
-            SET error_msg = CONCAT('Payment amount does not match organization fee. Required: ', v_fee_amount);
-            SIGNAL SQLSTATE '45000'
-            SET MESSAGE_TEXT = error_msg;
-        END IF;
+    -- Check if user is already a member
+    IF EXISTS (
+        SELECT 1 FROM tbl_organization_members 
+        WHERE organization_id = p_org_id 
+        AND cycle_number = v_cycle_number 
+        AND user_id = p_user_id
+    ) THEN
+        SIGNAL SQLSTATE '45000' 
+        SET MESSAGE_TEXT = 'User is already a member of this organization';
     END IF;
 
     -- Start transaction
@@ -7658,39 +7827,51 @@ BEGIN
         'Pending'
     );
     
-    -- Process payment only if required and payment data exists
-    IF p_payment_data IS NOT NULL AND JSON_EXTRACT(p_payment_data, '$.membership_fee') IS NOT NULL THEN
-        -- Create transaction
-        INSERT INTO tbl_transaction (
-            user_id,
-            amount,
-            transaction_type,
-            status,
-            proof_image
-        )
-        VALUES (
-            p_user_id,
-            v_fee_amount,
-            'Membership Fee',
-            'Pending',
-            JSON_UNQUOTE(JSON_EXTRACT(p_payment_data, '$.payment_proof'))
-        );
-        
-        -- Link transaction to membership
-        INSERT INTO tbl_transaction_membership (
-            transaction_id,
-            organization_id,
-            cycle_number
-        )
-        VALUES (
-            LAST_INSERT_ID(),
-            p_org_id,
-            v_cycle_number
-        );
-    END IF;
+    SET v_member_id = LAST_INSERT_ID();
     
     -- Commit transaction
     COMMIT;
+    
+    -- Return detailed application information with LIMIT 1 to ensure single record
+    SELECT
+        om.member_id as id,
+        om.organization_id,
+        om.cycle_number,
+        om.user_id,
+        CONCAT(u.f_name, ' ', u.l_name) AS name,
+        u.email,
+        u.profile_picture,
+        om.member_type,
+        om.status,
+        ma.application_id,
+        ma.status AS application_status,
+        ma.applied_at,
+        ma.reviewed_by,
+        ma.reviewed_at,
+        org.membership_fee_type,
+        org.membership_fee_amount,
+        t.transaction_id,
+        t.amount AS paid_amount,
+        t.status AS payment_status,
+        t.proof_image
+    FROM tbl_organization_members om
+    JOIN tbl_user u ON om.user_id = u.user_id
+    LEFT JOIN tbl_membership_application ma
+        ON om.organization_id = ma.organization_id
+        AND om.cycle_number = ma.cycle_number
+        AND om.user_id = ma.user_id
+    LEFT JOIN tbl_organization org ON om.organization_id = org.organization_id
+    LEFT JOIN tbl_transaction_membership tm
+        ON tm.organization_id = om.organization_id
+        AND tm.cycle_number = om.cycle_number
+    LEFT JOIN tbl_transaction t
+        ON tm.transaction_id = t.transaction_id
+        AND t.user_id = om.user_id
+    LEFT JOIN tbl_transaction_type tt 
+        ON t.transaction_type_id = tt.transaction_type_id
+        AND tt.code = 'INCOME'
+    WHERE om.member_id = v_member_id  -- Use the specific member_id we just created
+    LIMIT 1;  -- Ensure only one record is returned
 END$$
 DELIMITER ;
 
@@ -9110,15 +9291,18 @@ DELIMITER ;
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE ScanTicket(
     IN p_email VARCHAR(100),
-    IN p_event_title VARCHAR(300),
-    IN p_verifier_user_id VARCHAR(200)  -- New parameter for verifier
+    IN p_event_id INT,  -- Changed from event_title to event_id
+    IN p_verifier_user_id VARCHAR(200)
 )
 BEGIN
     DECLARE v_user_id VARCHAR(200);
-    DECLARE v_event_id INT;
     DECLARE v_organization_id INT;
     DECLARE v_attendance_id INT;
     DECLARE v_is_authorized BOOLEAN DEFAULT FALSE;
+    DECLARE v_event_start_date DATE;
+    DECLARE v_event_start_time TIME;
+    DECLARE v_event_title VARCHAR(300);
+    DECLARE v_event_status VARCHAR(20);
     
     -- Get user ID from email
     SELECT user_id INTO v_user_id
@@ -9130,15 +9314,28 @@ BEGIN
         SET MESSAGE_TEXT = 'User not found with the provided email';
     END IF;
     
-    -- Get event ID and organization from title
-    SELECT event_id, organization_id INTO v_event_id, v_organization_id
+    -- Get event details using event_id
+    SELECT organization_id, start_date, start_time, title, status 
+    INTO v_organization_id, v_event_start_date, v_event_start_time, v_event_title, v_event_status
     FROM tbl_event
-    WHERE title = p_event_title
-    AND status = 'Approved';
+    WHERE event_id = p_event_id;
     
-    IF v_event_id IS NULL THEN
+    IF v_organization_id IS NULL THEN
         SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'Active event not found with the provided title';
+        SET MESSAGE_TEXT = 'Event not found with the provided ID';
+    END IF;
+    
+    -- Check if event is approved
+    IF v_event_status != 'Approved' THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Event is not approved for attendance scanning';
+    END IF;
+    
+    -- Check if event has started (current date/time >= event start date/time)
+    IF CURDATE() < v_event_start_date OR 
+       (CURDATE() = v_event_start_date AND CURTIME() < v_event_start_time) THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Event has not started yet. Scanning is not allowed.';
     END IF;
     
     -- Verify scanning user's authority (Executive or Committee Head)
@@ -9154,14 +9351,15 @@ BEGIN
         AND (
             om.member_type = 'Executive'  -- Executive members
             OR (
-                om.member_type = 'Committee'  -- Committee Heads
+                om.member_type = 'Committee'  -- Committee members with Committee Head role
                 AND EXISTS (
                     SELECT 1
                     FROM tbl_committee_members cm
                     JOIN tbl_committee c ON cm.committee_id = c.committee_id
+                    JOIN tbl_committee_role cr ON cm.committee_role_id = cr.committee_role_id
                     WHERE cm.user_id = p_verifier_user_id
                     AND c.organization_id = v_organization_id
-                    AND cm.role = 'Committee Head'
+                    AND cr.role_name = 'Committee Head'
                 )
             )
         )
@@ -9175,7 +9373,7 @@ BEGIN
     -- Find existing attendance record
     SELECT attendance_id INTO v_attendance_id
     FROM tbl_event_attendance
-    WHERE event_id = v_event_id
+    WHERE event_id = p_event_id
     AND user_id = v_user_id
     AND status IN ('Registered')  -- Only allow scan for these statuses
     AND deleted_at IS NULL;  -- Not deleted
@@ -9192,8 +9390,12 @@ BEGIN
         time_in = NOW()
     WHERE attendance_id = v_attendance_id;
     
-    -- Return success message
-    SELECT 'Ticket scanned successfully' AS message;
+    -- Return success message with event details
+    SELECT 
+        'Ticket scanned successfully' AS message,
+        v_event_title AS event_title,
+        p_email AS attendee_email,
+        NOW() AS scanned_at;
 END$$
 DELIMITER ;
 
@@ -9675,7 +9877,7 @@ BEGIN
     WHERE org_version_id = p_org_version_id AND organization_id = p_org_id;
 
     SELECT
-        om.member_id,
+        om.member_id as id,
         om.organization_id,
         om.cycle_number,
         om.user_id,
@@ -9729,6 +9931,7 @@ BEGIN
     DECLARE v_cycle_number INT;
     DECLARE v_user_id VARCHAR(200);
     DECLARE v_reviewer_id VARCHAR(200);
+    DECLARE v_member_id INT;
 
     -- Get application details
     SELECT organization_id, cycle_number, user_id
@@ -9756,7 +9959,7 @@ BEGIN
      WHERE organization_id = v_org_id
        AND cycle_number = v_cycle_number
        AND user_id = v_user_id;
-
+       
     -- Log the approval using LogAction
     CALL LogAction(
         p_reviewer_email,
@@ -9772,7 +9975,47 @@ BEGIN
         NULL,
         NULL
     );
-END $$
+    -- Return detailed membership information after approval
+    SELECT
+        om.member_id as id,
+        om.organization_id,
+        om.cycle_number,
+        om.user_id,
+        CONCAT(u.f_name, ' ', u.l_name) AS name,
+        u.email,
+        u.profile_picture,
+        om.member_type,
+        om.status,
+        ma.application_id,
+        ma.status AS application_status,
+        ma.applied_at,
+        ma.reviewed_by,
+        ma.reviewed_at,
+        org.membership_fee_type,
+        org.membership_fee_amount,
+        t.transaction_id,
+        t.amount AS paid_amount,
+        t.status AS payment_status,
+        t.proof_image
+    FROM tbl_organization_members om
+    JOIN tbl_user u ON om.user_id = u.user_id
+    LEFT JOIN tbl_membership_application ma
+        ON om.organization_id = ma.organization_id
+        AND om.cycle_number = ma.cycle_number
+        AND om.user_id = ma.user_id
+    LEFT JOIN tbl_organization org ON om.organization_id = org.organization_id
+    LEFT JOIN tbl_transaction_membership tm
+        ON tm.organization_id = om.organization_id
+        AND tm.cycle_number = om.cycle_number
+    LEFT JOIN tbl_transaction t
+        ON tm.transaction_id = t.transaction_id
+        AND t.user_id = om.user_id
+    LEFT JOIN tbl_transaction_type tt 
+        ON t.transaction_type_id = tt.transaction_type_id
+        AND tt.code = 'INCOME'
+    WHERE om.member_id = v_member_id  -- Use the specific member_id we found
+    LIMIT 1;
+END$$
 DELIMITER ;
 
 DELIMITER $$
@@ -15719,8 +15962,8 @@ VALUES("CREATE_EVENT","Organization"),
 ("VIEW_TRANSACTIONS","Global"),
 ("MANAGE_TRANSACTIONS","Organization"),
 ("MANAGE_SDAO_EVENT","SDAO"),
-("MANAGE_COLLEGES","SDAO");
-
+("MANAGE_COLLEGES","SDAO"),
+("SCAN_QR", "Organization");
 
 INSERT INTO tbl_role_permission (role_id, permission_id) 
 VALUES
@@ -15891,4 +16134,6 @@ INSERT INTO tbl_rank_permission(rank_id, permission_id) VALUES
 (1,21),
 (1,22),
 (1,29),
-(1,31);
+(1,31),
+(1,34);
+

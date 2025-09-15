@@ -642,6 +642,17 @@ async function deleteEventSDAO(event_id, user_id, reason) {
   }
 }
 
+
+async function getOneEventAttendeesWithDetails(event_id, user_id) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetOneEventAttendeesWithDetails(?, ?);', [event_id, user_id]);
+        return rows[0];
+    } finally {
+        connection.release();
+    }
+}
+
 async function getOrganizationVersionId(organization_id) {
   const connection = await pool.getConnection();
   try {
@@ -653,6 +664,7 @@ async function getOrganizationVersionId(organization_id) {
   } finally {
     connection.release();
   }
+
 }
 
 module.exports = {
@@ -701,5 +713,7 @@ module.exports = {
     unarchiveEvent,
     updateEventSDAO,
     deleteEventSDAO,
+    getOneEventAttendeesWithDetails,
     getOrganizationVersionId
+
 };

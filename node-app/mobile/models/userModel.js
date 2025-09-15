@@ -19,7 +19,7 @@ async function generateToken(email) {
         if (!rows || rows.length === 0) { // Ensure rows is not undefined or empty
             throw new Error('User not found');
         }
-        const result = rows[0]; // Extract the first element which contains user data and permissions
+        const result = rows[0]; 
         console.log(result);
         const token = jwt.sign({ result }, process.env.JWT_SECRET, { expiresIn: '7d' });
         console.log(token);

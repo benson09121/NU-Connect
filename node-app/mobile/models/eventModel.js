@@ -66,7 +66,7 @@ async function getSpecificEvent(eventId, userId) {
 async function getTickets(user_id) {
     const connection = await pool.getConnection();
     try {
-        const [rows] = await connection.query("Call GetUserEventRegistrations(?);", [user_id]);
+        const [rows] = await connection.query("Call GetEventTickets(?);", [user_id]);
         return rows[0];
     } finally {
         connection.release();
@@ -140,12 +140,21 @@ async function getEventAttendees(eventId) {
             'CALL GetEventAttendees(?);',
             [eventId]
         );
-        return rows;
+        return rows[0];
     } finally {
         connection.release();
     }
 }
 
+async function updateMemberEventStatus(user_id, event_id) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL UpdateMemberEventStatus(?, ?);', [event_id, user_id]);
+        return rows[0];
+    } finally {
+        connection.release();
+    }
+}
 
 module.exports = {
     getAllEvents,
@@ -160,5 +169,6 @@ module.exports = {
     getAllEventCertificates,
     scanTicket,
     getEventAttendees,
-    unregisterEvent
+    unregisterEvent,
+    updateMemberEventStatus
 };
