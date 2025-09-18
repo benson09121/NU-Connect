@@ -1125,7 +1125,7 @@ async function approveMembershipApplication(req, res) {
             operation: 'DELETE',
             data: result,
         });
-
+        console.log(result);
         const updateMembers = await organizationsModel.getSingleOrganizationMember(result[0].id, organization_id);
 
         publishToChannel(`organization_members_${organization_id}_${organization_version_id}`, {

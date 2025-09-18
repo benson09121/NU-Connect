@@ -11,12 +11,12 @@ async function getAllEvents(organizations) {
         connection.release();
     }
 }
-async function registerEvent(event_id, user_id) {
+async function registerEvent(event_id, user_id, status, transaction_id) {
     const connection = await pool.getConnection();
     try {
         const [result] = await connection.query(
-            'CALL RegisterEvent(?, ?)',  // Make sure this matches exactly
-            [event_id, user_id]
+            'CALL RegisterEvent(?, ?, ?, ?)',  // Make sure this matches exactly
+            [event_id, user_id, status, transaction_id]
         );
         return result[0];
     } finally {
@@ -156,6 +156,45 @@ async function updateMemberEventStatus(user_id, event_id) {
     }
 }
 
+async function createEventTransaction(userEmail, payerName, amount, paymentMethod, proofImage, eventId, organizationId, organizationVersionId) {
+    const connection = await pool.getConnection();
+    try {
+        const [result] = await connection.query(
+            'CALL CreateEventTransaction(?, ?, ?, ?, ?, ?, ?, ?)',
+            [userEmail, payerName, amount, paymentMethod, proofImage, eventId, organizationId, organizationVersionId]
+        );
+        return result[0];
+    } catch (error) {
+        console.error('Error creating event transaction:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function approveTransaction(params) {
+  const conn = await pool.getConnection();
+  try {
+    const {
+      transaction_id,
+      organization_id,
+      organization_version_id,
+      category,
+      user_email
+    } = params;
+
+    const [rows] = await conn.query(
+      'CALL ApproveTransaction(?, ?, ?, ?, ?);',
+      [transaction_id, organization_id, organization_version_id, category, user_email]
+    );
+    
+    return rows[0];
+  } finally {
+    conn.release();
+  }
+}
+
+
 module.exports = {
     getAllEvents,
     registerEvent,
@@ -170,5 +209,7 @@ module.exports = {
     scanTicket,
     getEventAttendees,
     unregisterEvent,
-    updateMemberEventStatus
+    updateMemberEventStatus,
+    createEventTransaction,
+    approveTransaction
 };

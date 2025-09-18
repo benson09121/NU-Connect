@@ -39,22 +39,105 @@ async function getEvents(req, res) {
 
 async function registerEvent(req, res) {
     try {
+        const abc = req.body;
+        console.log(abc);
         const event_id = parseInt(req.body.event_id, 10);
         const user = await userModel.getUser(req.user.email);
+        let transaction_id = null;
+        let status = 'Registered';
         const checkRegister = await eventModel.checkEventRegistration(event_id, user.user_id);
         if (checkRegister) {
             return res.status(400).json({ message: 'Already registered for this event' });
         }
-        const newAttendee = await eventModel.registerEvent(event_id, user.user_id);
-        if (!newAttendee) {
-            return res.status(404).json({ message: 'Event not found' });
+
+        // Check if this is a paid event with payment data
+        if (req.body.payment_method && req.body.paid_amount) {
+            // Handle paid event with transaction
+            let uploadedFileName = null;
+            
+            // Handle file upload if there's a payment proof
+            if (req.files && req.files.file && req.body.payment_proof) {
+                const uploadedFile = req.files.file;
+                const eventDetails = await eventModel.getSpecificEvent(event_id, user.user_id);
+                
+                // Create directory if it doesn't exist
+                const uploadDir = `/app/organizations/${eventDetails.organization_id}/${eventDetails.organization_version_id}/events/${event_id}/transactions`;
+                if (!fs.existsSync(uploadDir)) {
+                    fs.mkdirSync(uploadDir, { recursive: true });
+                }
+                
+                // Use the filename from payment_proof
+                uploadedFileName = req.body.payment_proof;
+                const uploadPath = path.join(uploadDir, uploadedFileName);
+                
+                // Move the uploaded file
+                await uploadedFile.mv(uploadPath);
+                console.log('File uploaded to:', uploadPath);
+            }
+
+            const payer = user.f_name + ' ' + user.l_name;
+            const eventDetails = await eventModel.getSpecificEvent(event_id, user.user_id);
+            
+            // Create event transaction
+            const transactionResult = await eventModel.createEventTransaction(
+                user.email,
+                payer,
+                parseFloat(req.body.paid_amount),
+                req.body.payment_method,
+                uploadedFileName,
+                event_id,
+                eventDetails.organization_id,
+                eventDetails.organization_version_id
+            );
+            transaction_id = transactionResult[0].transaction_id;
+            
+            publishToChannel('transactions', { 
+                type: 'created', 
+                data: transactionResult 
+            });
+
+            if (transactionResult && transactionResult[0].transaction_id) {
+                publishToChannel(`transactions:organization:${eventDetails.organization_id}`, { 
+                    type: 'created', 
+                    data: transactionResult 
+                });
+            }
+            
+            status = 'Pending';
+
+            const newAttendee = await eventModel.registerEvent(event_id, user.user_id,status, transaction_id);
+            if (!newAttendee) {
+                return res.status(404).json({ message: 'Event not found' });
+            }
+            
+            publishToChannel(`attendees_${event_id}`, {
+                operation: 'CREATE',
+                data: newAttendee
+            });
+
+            res.status(201).json({
+                message: 'Event payment transaction created successfully',
+                transaction: transactionResult
+            });
+        } else {
+            // Handle free event registration (existing logic)
+            const newAttendee = await eventModel.registerEvent(event_id, user.user_id, status, transaction_id);
+            if (!newAttendee) {
+                return res.status(404).json({ message: 'Event not found' });
+            }
+            
+            publishToChannel(`attendees_${event_id}`, {
+                operation: 'CREATE',
+                data: newAttendee
+            });
+            
+            res.status(201).json({
+                message: 'Successfully registered for free event',
+                attendee: newAttendee
+            });
         }
-        publishToChannel(`attendees_${event_id}`, {
-            operation: 'CREATE',
-            data: newAttendee
-        });
-        res.status(201).json(newAttendee);
     } catch (error) {
+        console.error('Register event error:', error);
         res.status(500).json({ message: error.message });
     }
 }

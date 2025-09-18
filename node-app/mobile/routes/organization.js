@@ -11,4 +11,5 @@ router.get('/organization/question', middleware.authMiddleware, organizationCont
 router.post('/organization-application/submit', middleware.authMiddleware, organizationController.submitOrganizationApplication);
 router.get('/organization/leave', middleware.authMiddleware, organizationController.leaveOrganization);
 router.get('/organization/logo', organizationController.getOrganizationLogo);
+router.get('/organization/getTransactions', middleware.authMiddleware, organizationController.getUserTransactions);
 module.exports = router;

@@ -53,24 +53,39 @@ async function submitOrganizationApplication(org_id, user_id, question_id, answe
     }
 }
 
-async function createMembershipTransaction(org_id, user_id, payment_data) {
+async function createMembershipTransaction(userEmail, payerName, amount, paymentType, proofImage, organizationId, organizationVersionId) {
     const connection = await pool.getConnection();
     try {
-        const [rows] = await connection.query(
-            'CALL CreateMembershipTransaction(?, ?, ?);', 
-            [org_id, user_id, payment_data]
+        const [result] = await connection.query(
+            'CALL CreateMembershipTransaction(?, ?, ?, ?, ?, ?, ?)',
+            [userEmail, payerName, amount, paymentType, proofImage, organizationId, organizationVersionId]
         );
+        return result[0];
+    } catch (error) {
+        console.error('Error creating membership transaction:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function getUserTransactions(user_id) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetTransactionsByUser(?);', [user_id]);
         return rows[0];
     } finally {
         connection.release();
     }
 }
+
 module.exports = {
     getOrganizations,
     getUserOrganization,
     getOrganizationQuestion,
     getOrganizationFee,
     submitOrganizationApplication,
-    createMembershipTransaction
+    createMembershipTransaction,
+    getUserTransactions,
 };
 
