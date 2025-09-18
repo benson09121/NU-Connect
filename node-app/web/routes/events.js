@@ -140,6 +140,14 @@ router.get(
   eventController.getBlockedPeriodsByStatus
 );
 
+// Get all blocked periods
+router.get(
+  '/blocked-periods/all',
+  middleware.validateAzureJWT,
+  middleware.hasPermission("VIEW_EVENT"),
+  eventController.getAllBlockedPeriods
+);
+
 router.get(
   '/event-applications/publication-image',
   middleware.validateAzureJWT,

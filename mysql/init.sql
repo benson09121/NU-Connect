@@ -1508,19 +1508,55 @@ BEGIN
     -- Get role and email of user
     SELECT role_id, email INTO v_role_id, v_user_email FROM tbl_user WHERE user_id = p_user_id LIMIT 1;
 
-    -- Blocked period check: Only allow SDAO to create events during blocked periods
-    IF p_event_type != 'SDAO' THEN
+    -- Enhanced blocked period check: Check for unarchived blocked periods
+    IF EXISTS (
+        SELECT 1 FROM tbl_blocked_period
+        WHERE p_start_date BETWEEN start_date AND end_date
+        AND archived_at IS NULL  -- Only check active (unarchived) blocked periods
+    ) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Events cannot be created during blocked periods';
+    END IF;
+    
+    -- SDAO role check
+    IF p_event_type = 'SDAO' AND v_role_id != 4 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Only SDAO can create SDAO events';
+    END IF;
+    
+    -- Venue and time conflict validation for ALL events (not just face-to-face with venues)
+    -- For face-to-face events with venues, check venue conflicts
+    IF p_venue_type = 'Face to face' AND p_venue IS NOT NULL AND TRIM(p_venue) != '' THEN
         IF EXISTS (
-            SELECT 1 FROM tbl_blocked_period
-            WHERE p_start_date <= end_date AND p_end_date >= start_date
+            SELECT 1 FROM tbl_event e
+            WHERE e.venue = p_venue
+            AND e.start_date = p_start_date
+            AND e.status NOT IN ('Rejected', 'Archived')
+            AND (
+                -- Time overlap logic: events conflict if they overlap in time
+                (e.start_time <= p_start_time AND e.end_time > p_start_time) OR  -- Existing event starts before and ends after our start
+                (e.start_time < p_end_time AND e.end_time >= p_end_time) OR      -- Existing event starts before and ends after our end  
+                (e.start_time >= p_start_time AND e.end_time <= p_end_time)      -- Existing event is completely within our time
+            )
         ) THEN
-            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Events cannot be created during blocked periods';
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Schedule conflict: Another event is already scheduled at the same venue during this time';
         END IF;
-    ELSE
-        -- SDAO check
-        IF v_role_id != 4 THEN
-            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Only SDAO can create SDAO events';
-        END IF;
+    END IF;
+    
+    -- Duplicate title check - Apply to both Organization and SDAO events
+    IF p_event_type = 'Organization' AND EXISTS (
+        SELECT 1 FROM tbl_event e
+        WHERE e.title = p_title
+        AND e.organization_id = p_organization_id
+        AND e.cycle_number = p_cycle_number
+        AND e.status NOT IN ('Rejected', 'Archived')
+    ) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'An event with the same title already exists for this organization';
+    ELSEIF p_event_type = 'SDAO' AND EXISTS (
+        SELECT 1 FROM tbl_event e
+        WHERE e.title = p_title
+        AND e.event_type = 'SDAO'
+        AND e.status NOT IN ('Rejected', 'Archived')
+    ) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'An SDAO event with the same title already exists';
     END IF;
 
     -- Only check organization constraints for Organization events
@@ -1655,6 +1691,158 @@ BEGIN
 END $$
 DELIMITER ;
 
+-- Trigger to prevent overlapping blocked periods
+DELIMITER $$
+CREATE TRIGGER tr_blocked_period_before_insert
+BEFORE INSERT ON tbl_blocked_period
+FOR EACH ROW
+BEGIN
+    -- Normalize dates (ensure start <= end)
+    IF NEW.start_date > NEW.end_date THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Start date cannot be after end date';
+    END IF;
+    
+    -- Check for exact duplicates (same dates, unarchived)
+    IF EXISTS (
+        SELECT 1 FROM tbl_blocked_period 
+        WHERE start_date = NEW.start_date 
+        AND end_date = NEW.end_date
+        AND archived_at IS NULL
+    ) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'A blocked period with the same dates already exists';
+    END IF;
+    
+    -- Check for overlapping periods (unarchived only)
+    IF EXISTS (
+        SELECT 1 FROM tbl_blocked_period
+        WHERE NEW.start_date < end_date 
+        AND NEW.end_date > start_date
+        AND archived_at IS NULL
+    ) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Blocked period overlaps with an existing active blocked period';
+    END IF;
+END $$
+
+CREATE TRIGGER tr_blocked_period_before_update
+BEFORE UPDATE ON tbl_blocked_period
+FOR EACH ROW
+BEGIN
+    -- Only check validation if dates are being changed and period is being unarchived
+    IF (NEW.start_date != OLD.start_date OR NEW.end_date != OLD.end_date OR (OLD.archived_at IS NOT NULL AND NEW.archived_at IS NULL)) THEN
+        -- Normalize dates
+        IF NEW.start_date > NEW.end_date THEN
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Start date cannot be after end date';
+        END IF;
+        
+        -- Skip overlap check if this period is being archived
+        IF NEW.archived_at IS NULL THEN
+            -- Check for overlapping periods (excluding self)
+            IF EXISTS (
+                SELECT 1 FROM tbl_blocked_period
+                WHERE blocked_period_id != NEW.blocked_period_id
+                AND NEW.start_date < end_date 
+                AND NEW.end_date > start_date
+                AND archived_at IS NULL
+            ) THEN
+                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Blocked period overlaps with an existing active blocked period';
+            END IF;
+        END IF;
+    END IF;
+END $$
+DELIMITER ;
+
+-- Enhanced CheckScheduleConflict procedure
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE CheckScheduleConflict(
+    IN p_event_title VARCHAR(300),
+    IN p_organization_id INT,
+    IN p_committee_id INT,
+    IN p_venue VARCHAR(200),
+    IN p_start_date DATE,
+    IN p_start_time TIME,
+    IN p_end_time TIME,
+    IN p_event_id INT
+)
+BEGIN
+    -- Check for blocked periods that conflict with the event date
+    SELECT 
+        'blocked_period' as conflict_type,
+        CONCAT('Event date conflicts with blocked period: ', bp.reason) as conflict_message,
+        NULL as conflicting_event_id,
+        bp.blocked_period_id
+    FROM tbl_blocked_period bp
+    WHERE p_start_date BETWEEN bp.start_date AND bp.end_date
+    AND bp.archived_at IS NULL
+    
+    UNION ALL
+    
+    -- Check for venue conflicts (same venue, overlapping times, same date) - only for face-to-face events with venues
+    SELECT 
+        'schedule_conflict' as conflict_type,
+        CONCAT('Venue "', e.venue, '" is already booked from ', e.start_time, ' to ', e.end_time, ' on ', e.start_date) as conflict_message,
+        e.event_id as conflicting_event_id,
+        NULL as blocked_period_id
+    FROM tbl_event e
+    WHERE p_venue IS NOT NULL 
+    AND e.venue = p_venue 
+    AND e.start_date = p_start_date
+    AND e.status NOT IN ('Rejected', 'Archived')
+    AND (p_event_id IS NULL OR e.event_id != p_event_id)
+    AND (
+        -- Time overlap logic: events conflict if they overlap in time
+        (e.start_time <= p_start_time AND e.end_time > p_start_time) OR  -- Existing event starts before and ends after our start
+        (e.start_time < p_end_time AND e.end_time >= p_end_time) OR      -- Existing event starts before and ends after our end  
+        (e.start_time >= p_start_time AND e.end_time <= p_end_time)      -- Existing event is completely within our time
+    )
+    
+    UNION ALL
+    
+    -- Check for duplicate events (same title within organization)
+    SELECT 
+        'duplicate_event' as conflict_type,
+        CONCAT('Event with same title "', e.title, '" already exists for this organization') as conflict_message,
+        e.event_id as conflicting_event_id,
+        NULL as blocked_period_id
+    FROM tbl_event e
+    WHERE p_event_title IS NOT NULL
+    AND e.title = p_event_title
+    AND e.status NOT IN ('Rejected', 'Archived')
+    AND (p_event_id IS NULL OR e.event_id != p_event_id)
+    AND p_organization_id IS NOT NULL 
+    AND e.organization_id = p_organization_id;
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetAllBlockedPeriods()
+BEGIN
+    SELECT 
+        bp.blocked_period_id,
+        bp.start_date,
+        bp.end_date,
+        bp.reason,
+        bp.created_at,
+        bp.archived_at,
+        bp.archived_reason,
+        bp.unarchived_at,
+        bp.unarchived_reason,
+        creator.first_name as creator_first_name,
+        creator.last_name as creator_last_name,
+        creator.email as creator_email,
+        archiver.first_name as archiver_first_name,
+        archiver.last_name as archiver_last_name,
+        archiver.email as archiver_email,
+        unarchiver.first_name as unarchiver_first_name,
+        unarchiver.last_name as unarchiver_last_name,
+        unarchiver.email as unarchiver_email
+    FROM tbl_blocked_period bp
+    LEFT JOIN tbl_user creator ON bp.created_by = creator.user_id
+    LEFT JOIN tbl_user archiver ON bp.archived_by = archiver.user_id
+    LEFT JOIN tbl_user unarchiver ON bp.unarchived_by = unarchiver.user_id
+    ORDER BY bp.start_date DESC;
+END $$
+DELIMITER ;
+
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE ArchiveEvent(
     IN p_event_id INT,
@@ -1753,10 +1941,14 @@ CREATE DEFINER='admin'@'%' PROCEDURE UpdateEvent(
     IN p_fee INT,
     IN p_capacity INT,
     IN p_image TEXT,
-    IN p_user_id VARCHAR(200)
+    IN p_user_id VARCHAR(200),
+    IN p_collaborators JSON
 )
 BEGIN
     DECLARE v_user_email VARCHAR(100);
+    DECLARE i INT DEFAULT 0;
+    DECLARE v_collab_count INT DEFAULT 0;
+    DECLARE v_collab_org_id INT;
 
     IF p_event_id IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'event_id required';
@@ -1785,6 +1977,26 @@ BEGIN
         capacity = p_capacity,
         image = p_image
     WHERE event_id = p_event_id;
+
+    -- Update collaborators if provided
+    IF p_collaborators IS NOT NULL THEN
+        -- Remove existing collaborators
+        DELETE FROM tbl_event_collaborator WHERE event_id = p_event_id;
+        
+        -- Add new collaborators if any
+        IF JSON_LENGTH(p_collaborators) > 0 THEN
+            SET v_collab_count = JSON_LENGTH(p_collaborators);
+            SET i = 0;
+            WHILE i < v_collab_count DO
+                SET v_collab_org_id = CAST(JSON_UNQUOTE(JSON_EXTRACT(p_collaborators, CONCAT('$[', i, ']'))) AS UNSIGNED);
+                IF v_collab_org_id IS NOT NULL THEN
+                    INSERT IGNORE INTO tbl_event_collaborator (event_id, organization_id)
+                    VALUES (p_event_id, v_collab_org_id);
+                END IF;
+                SET i = i + 1;
+            END WHILE;
+        END IF;
+    END IF;
 
     SELECT email INTO v_user_email FROM tbl_user WHERE user_id = p_user_id LIMIT 1;
     IF v_user_email IS NULL THEN SET v_user_email = ''; END IF;
@@ -4732,56 +4944,6 @@ BEGIN
             WHEN v_count > 0 THEN 1
             ELSE 0
         END AS `exists`;
-END $$
-DELIMITER ;
-
-DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE CheckScheduleConflict(
-    IN p_start_date DATE,
-    IN p_end_date DATE,
-    IN p_start_time TIME,
-    IN p_end_time TIME,
-    IN p_venue VARCHAR(200),
-    IN p_event_id INT
-)
-BEGIN
-    -- Validate input
-    IF p_start_date IS NULL OR p_start_time IS NULL OR p_end_time IS NULL THEN
-        SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'start_date, start_time, and end_time are required';
-    END IF;
-    
-    -- Set end_date to start_date if not provided
-    IF p_end_date IS NULL THEN
-        SET p_end_date = p_start_date;
-    END IF;
-    
-    -- Check for time and date conflicts
-    SELECT 
-        e.event_id as id,
-        e.title,
-        e.venue as location,
-        CONCAT(e.start_date, ' ', e.start_time) as start_datetime,
-        CONCAT(e.end_date, ' ', e.end_time) as end_datetime
-    FROM tbl_event e
-    WHERE e.status IN ('Approved', 'Pending') -- Only check active events
-        AND (p_event_id IS NULL OR e.event_id != p_event_id) -- Exclude current event if updating
-        AND (
-            -- Date overlap check
-            (e.start_date <= p_end_date AND e.end_date >= p_start_date)
-        )
-        AND (
-            -- Time overlap check
-            (e.start_time < p_end_time AND e.end_time > p_start_time)
-        )
-        AND (
-            -- Venue conflict check (only for face-to-face events with venue)
-            p_venue IS NULL 
-            OR e.venue IS NULL 
-            OR e.venue_type != 'Face to face'
-            OR LOWER(TRIM(e.venue)) = LOWER(TRIM(p_venue))
-        )
-    ORDER BY e.start_date, e.start_time;
 END $$
 DELIMITER ;
 
