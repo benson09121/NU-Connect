@@ -3,6 +3,7 @@ const { publishToChannel, subscribeToChannel } = require('./sseController');
 const path = require('path');
 const fs = require('fs');
 const pool = require('../../config/db');
+const { off } = require('process');
 
 function unwrapSPResult(row) {
   if (row == null) return null;
@@ -439,7 +440,7 @@ async function list(req,res){
       category_code,
       sessionId
     } = req.query;
-
+    
     // Allow client to subscribe to general transactions channel
     if (sessionId) {
       subscribeToChannel(sessionId, 'transactions');
@@ -545,6 +546,84 @@ async function getTransactionsByOrganization(req, res) {
   }
 }
 
+async function approveTransaction(req, res) {
+  try {
+    const { transaction_id, organization_id, organization_version_id, category } = req.body;
+    
+    // Validate required fields
+    if (!transaction_id || !organization_id || !organization_version_id || !category) {
+      return res.status(400).json({ 
+        message: 'Missing required fields: transaction_id, organization_id, organization_version_id, category' 
+      });
+    }
+    
+    // Validate category
+    if (category !== 'EVENT_FEE' && category !== 'MEMBERSHIP') {
+      return res.status(400).json({ 
+        message: 'Category must be either EVENT_FEE or MEMBERSHIP' 
+      });
+    }
+
+    const raw = await transactionModel.approveTransaction({
+      transaction_id,
+      organization_id,
+      organization_version_id,
+      category,
+      user_email: req.user.email
+    });
+
+    const payload = unwrapSPResult(raw);
+    console.log('[transactions.approve] Approved transaction:', payload);
+    // Publish real-time updates following the same pattern as other functions
+    try {
+      publishToChannel('transactions', {
+        operation: 'updated',
+        data: payload,
+        user: req.user?.email || null,
+        timestamp: new Date()
+      });
+      
+      // Publish to organization-specific channel
+      publishToChannel(`transactions:organization:${organization_id}`, {
+        operation: 'updated',
+        data: payload,
+        user: req.user?.email || null,
+        timestamp: new Date()
+      });
+
+      if (payload?.transaction_id) {
+        publishToChannel(`transactions:${payload.transaction_id}`, {
+          operation: 'updated',
+          data: payload,
+          user: req.user?.email || null,
+          timestamp: new Date()
+        });
+
+        if(category === 'EVENT_FEE') {
+          const result = await transactionModel.updateAttendance(payload.transaction_id);
+          console.log(result);
+          publishToChannel(`attendees_${result[0].event_id}`, {
+            operation: 'UPDATE',
+            data: result,
+          })
+        }
+      }
+    } catch (pubErr) {
+      console.warn('[transactions.approve] publish error:', pubErr.message);
+    }
+
+    res.json({
+      success: true,
+      message: 'Transaction approved successfully',
+      data: payload
+    });
+    
+  } catch (e) {
+    console.error('[transactions.approve]', e);
+    res.status(500).json({ message: e.sqlMessage || e.message });
+  }
+}
+
 module.exports = {
   create,
   update,
@@ -556,5 +635,6 @@ module.exports = {
   getFinancialCategories,
   getTransactionTypes,
   getTransactionFile,
-  getTransactionsByOrganization
+  getTransactionsByOrganization,
+  approveTransaction
 };

@@ -7,6 +7,7 @@ const { subscribeToChannel, publishToChannel } = require('./sseController');
 const { get } = require('http');
 const Docxtemplater = require('docxtemplater');
 const PizZip = require('pizzip');
+const e = require('express');
 
 function parseCollaboratorsField(event) {
   if (event && typeof event.collaborators === 'string') {
@@ -409,6 +410,9 @@ async function createEventApplication(req, res) {
     const event = JSON.parse(req.body.event);
     const requirements = JSON.parse(req.body.requirements);
     const publicationImage = req.files?.publicationImage;
+    console.log(event);
+    console.log(requirements);
+    console.log(publicationImage);
     let collaborators = [];
 
     // Accept collaborators from body if provided
@@ -435,15 +439,40 @@ async function createEventApplication(req, res) {
       }
       applicant_user_id = user.user_id;
     }
+
+    // Use organization_id from event data - don't override it
     let organization_id = event.organization_id;
     let cycle_number = event.cycle_number;
-    if ((!organization_id || !cycle_number) && applicant_user_id) {
-      const orgMember = await eventModel.getOrganizationMembership(applicant_user_id);
-      if (orgMember) {
-        organization_id = orgMember.organization_id;
-        cycle_number = orgMember.cycle_number;
+
+    // Only fetch user's organization membership if NOT provided in event data
+    if (!organization_id || !cycle_number) {
+      if (applicant_user_id) {
+        const orgMember = await eventModel.getOrganizationMembership(applicant_user_id);
+        if (orgMember) {
+          organization_id = organization_id || orgMember.organization_id; // Only use if not provided
+          cycle_number = cycle_number || orgMember.cycle_number; // Only use if not provided
+        }
       }
     }
+
+    // Validate that we have the required organization data
+    if (!organization_id) {
+      return res.status(400).json({ message: "organization_id is required in event data or user must be a member of an organization." });
+    }
+
+    // If cycle_number is still missing, get it for the specified organization
+    if (!cycle_number) {
+      // Get the current cycle for the specified organization
+      const currentCycle = await eventModel.getCurrentCycleForOrganization(organization_id);
+      if (currentCycle) {
+        cycle_number = currentCycle.cycle_number;
+      } else {
+        return res.status(400).json({ message: `No active cycle found for organization ${organization_id}.` });
+      }
+    }
+
+    console.log('Final organization_id:', organization_id);
+    console.log('Final cycle_number:', cycle_number);
 
     const requirementFiles = {};
     requirements.forEach(reqItem => {
@@ -532,6 +561,7 @@ async function createEventApplication(req, res) {
     res.status(500).json({ error: error.message });
   }
 }
+
 
 async function getEventApplicationRequirement(req, res) {
   const requirement_name = req.query.requirement_name;
@@ -1362,7 +1392,7 @@ async function checkEventTitle(req, res) {
 async function checkScheduleConflict(req, res) {
   try {
     const { start_date, end_date, start_time, end_time, venue, venue_type, event_id } = req.body;
-
+    console.log(venue);
     if (!start_date || !start_time || !end_time) {
       return res.status(400).json({
         message: 'start_date, start_time, and end_time are required'
@@ -1593,11 +1623,8 @@ async function getEventsByUserRole(req, res) {
     }
 
     const param = user_id;
-    console.log('[getEventsByUserRole] Using param for SP:', param);
-
     const events = await eventModel.getEventsByUserRole(param);
 
-    console.log('[getEventsByUserRole] Events returned:', Array.isArray(events) ? events.length : events, events);
 
     res.status(200).json(events);
   } catch (error) {

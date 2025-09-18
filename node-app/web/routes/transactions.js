@@ -84,4 +84,11 @@ router.get(
   controller.getTransactionsByOrganization
 );
 
+router.put(
+  '/transactions/approve',
+  middleware.validateAzureJWT,
+  middleware.hasPermission([MANAGE]),
+  controller.approveTransaction
+);
+
 module.exports = router;

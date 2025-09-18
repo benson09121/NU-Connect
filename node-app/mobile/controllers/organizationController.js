@@ -1,3 +1,5 @@
+const fs = require('fs');
+const path = require('path');
 const { publishToChannel } = require('../../web/controllers/sseController');
 const organizationModel = require('../models/organizationModel'); 
 const userModel = require('../models/userModel');
@@ -39,75 +41,137 @@ async function getOrganizationFee(req, res) {
         res.status(500).json({ message: error.message });
     }
 }
-
 async function submitOrganizationApplication(req, res) {
-    let bodyArr = req.body.data;
-    console.log(bodyArr);
-    console.log(req.file);
+    console.log('Request body:', req.body);
+    console.log('Request files:', req.files);
+    
     const user = await userModel.getUser(req.user.email);
     
-    // Parse data if needed
-    if (bodyArr && typeof bodyArr.data === 'string') {
-        bodyArr = JSON.parse(bodyArr.data);
-    } else if (typeof bodyArr === 'string') {
-        bodyArr = JSON.parse(bodyArr);
+    let bodyData;
+    
+    // Handle different data structures based on whether files are uploaded
+    if (req.body.data && typeof req.body.data === 'string') {
+        // When files are uploaded, data comes as a string
+        bodyData = JSON.parse(req.body.data);
+    } else if (req.body.data && Array.isArray(req.body.data)) {
+        // When no files, data comes as array
+        bodyData = req.body.data;
+    } else {
+        // Direct object structure
+        bodyData = req.body;
     }
 
-    const paymentObj = bodyArr.find(obj => obj.paymentData);
-    const orgObj = bodyArr.find(obj => obj.organization_id);
-    const reasonObj = bodyArr.find(obj => obj.application_reason);
+    console.log('Parsed bodyData:', bodyData);
 
-    const org_id = orgObj?.organization_id;
-    const organization_version_id = orgObj?.organization_version_id; // Extract organization_version_id
-    const answers = reasonObj?.application_reason || [];
-    
+    // Extract data based on structure
+    let org_id, organization_version_id, answers, paymentData;
+
+    if (Array.isArray(bodyData)) {
+        // Array structure (original format)
+        const paymentObj = bodyData.find(obj => obj.paymentData);
+        const orgObj = bodyData.find(obj => obj.organization_id);
+        const reasonObj = bodyData.find(obj => obj.application_reason);
+
+        org_id = orgObj?.organization_id;
+        organization_version_id = orgObj?.organization_version_id;
+        answers = reasonObj?.application_reason || [];
+        paymentData = paymentObj?.paymentData;
+    } else {
+        // Direct object structure (when files are uploaded)
+        org_id = bodyData.organization_id;
+        organization_version_id = bodyData.organization_version_id;
+        answers = bodyData.application_reason || [];
+        paymentData = bodyData.paymentData;
+    }
+
     if (!org_id || answers.length === 0) {
         return res.status(400).json({ message: 'Missing required data' });
     }
 
-    // Log the organization_version_id for reference
+    console.log('Organization ID:', org_id);
     console.log('Organization Version ID:', organization_version_id);
+    console.log('Answers:', answers);
+    console.log('Payment Data:', paymentData);
 
     try {
-        // Apply for membership first
-        const membershipResult = await organizationModel.submitOrganizationApplication(
-            org_id, 
-            user.user_id, 
-            answers[0].question_id, 
-            answers[0].answer
-        );
-        console.log('Membership application result:', membershipResult);
-        publishToChannel(`pending_organization_members_${org_id}_${organization_version_id}`,{
+        let transactionResult = null;
+        const payer = user.f_name + ' ' + user.l_name;
+
+        // Handle payment if provided and not free
+        if (paymentData && paymentData !== 'free' && typeof paymentData === 'object') {
+            
+            // Handle file upload if there's a payment proof
+            let uploadedFileName = null;
+            if (req.files && req.files.file && paymentData.payment_proof) {
+                const uploadedFile = req.files.file;
+                
+                // Create directory if it doesn't exist
+                const uploadDir = `/app/organizations/${org_id}/${organization_version_id}/transactions`;
+                if (!fs.existsSync(uploadDir)) {
+                    fs.mkdirSync(uploadDir, { recursive: true });
+                }
+                
+                // Use the filename from payment_proof
+                uploadedFileName = paymentData.payment_proof;
+                const uploadPath = path.join(uploadDir, uploadedFileName);
+                
+                // Move the uploaded file
+                await uploadedFile.mv(uploadPath);
+                console.log('File uploaded to:', uploadPath);
+            }
+
+            // Create membership transaction
+            transactionResult = await organizationModel.createMembershipTransaction(
+                user.email,
+                payer,
+                paymentData.membership_fee,
+                paymentData.payment_type,
+                uploadedFileName,
+                org_id,
+                organization_version_id
+            );
+            
+            publishToChannel('transactions', { type: 'created', data: transactionResult });
+            if (transactionResult && transactionResult.transaction_id) {
+                publishToChannel(`transactions:${transactionResult.transaction_id}`, { type: 'created', data: transactionResult });
+            }
+        }
+
+        // Apply for membership - handle multiple answers
+        let membershipResult;
+        
+        // Process each answer (question/response pair)
+        for (let i = 0; i < answers.length; i++) {
+            const answer = answers[i];
+            membershipResult = await organizationModel.submitOrganizationApplication(
+                org_id, 
+                user.user_id, 
+                answer.question_id, 
+                answer.answer
+            );
+            console.log(`Membership application result for question ${answer.question_id}:`, membershipResult);
+        }
+        
+        publishToChannel(`pending_organization_members_${org_id}_${organization_version_id}`, {
             operation: 'CREATE',
             data: membershipResult,
         });
 
-        let transactionResult = null;
-        
-        // Handle payment if provided and not free
-        if (paymentObj && paymentObj.paymentData !== 'free') {
-            const paymentData = JSON.stringify(paymentObj.paymentData);
-            transactionResult = await organizationModel.createMembershipTransaction(
-                org_id, 
-                user.user_id, 
-                paymentData
-            );
-        }
-
-        console.log('Membership result:', membershipResult);
+        console.log('Final membership result:', membershipResult);
         console.log('Transaction result:', transactionResult);
         
         res.status(200).json({
             message: "Application submitted successfully",
             membership: membershipResult,
             transaction: transactionResult,
-            organization_version_id: organization_version_id // Include in response for reference
+            organization_version_id: organization_version_id
         });
     } catch (error) {
         console.error('Submission error:', error);
         res.status(500).json({ message: error.message });
     }
 }
+
 
 async function leaveOrganization(req, res) {
     try {
@@ -142,6 +206,16 @@ async function getOrganizationLogo(req, res) {
     }
 }
 
+async function getUserTransactions(req, res) {
+    try {
+        const user = await userModel.getUser(req.user.email);
+        const transactions = await organizationModel.getUserTransactions(user.user_id);
+        res.json(transactions);
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+}
+
 module.exports = {
     getOrganizations,
     getUserOrganization,
@@ -149,5 +223,6 @@ module.exports = {
     getOrganizationFee,
     submitOrganizationApplication,
     getOrganizationLogo,
-    leaveOrganization
+    leaveOrganization,
+    getUserTransactions
 };

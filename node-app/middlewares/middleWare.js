@@ -87,12 +87,45 @@ const hasPermission = (requiredPermissions) => async (req, res, next) => {
       const permissions = await userModel.getPermissions(req.user.email);
       const userPermissions = permissions[0]?.user_info?.permissions || [];
       const required = Array.isArray(requiredPermissions) ? requiredPermissions : [requiredPermissions];
-      const hasAny = required.some(p => userPermissions.includes(p));
+      
+      // Parse permissions and check for access
+      const hasAny = required.some(requiredPermission => {
+          // Check each user permission
+          return userPermissions.some(userPerm => {
+              // Handle simple string permissions (global permissions)
+              if (typeof userPerm === 'string' && userPerm === requiredPermission) {
+                  return true;
+              }
+              
+              // Handle JSON string permissions (organization-scoped permissions)
+              if (typeof userPerm === 'string' && userPerm.startsWith('{')) {
+                  try {
+                      const parsedPerm = JSON.parse(userPerm);
+                        
+                      // Check if permission name matches
+                      if (parsedPerm.permission === requiredPermission) {
+                          return true; // User has this permission for some organization
+                      }
+                  } catch (parseError) {
+                      console.error('Error parsing permission:', parseError);
+                      return false;
+                  }
+              }
+              
+              return false;
+          });
+      });
+      
       if (!hasAny) {
-          return res.status(403).json({ error: 'Access denied' });
+          return res.status(403).json({ 
+              error: 'Access denied', 
+              required: required
+          });
       }
+      
       next();
   } catch (error) {
+      console.error('Permission check error:', error);
       res.status(500).json({ error: error.message });
   }
 };

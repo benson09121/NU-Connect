@@ -210,10 +210,47 @@ async function getFinancialCategories(){
   } finally { conn.release(); }
 }
 
+async function approveTransaction(params) {
+  const conn = await pool.getConnection();
+  try {
+    const {
+      transaction_id,
+      organization_id,
+      organization_version_id,
+      category,
+      user_email
+    } = params;
+
+    const [rows] = await conn.query(
+      'CALL ApproveTransaction(?, ?, ?, ?, ?);',
+      [transaction_id, organization_id, organization_version_id, category, user_email]
+    );
+    
+    return firstRowFromSP(rows);
+  } finally {
+    conn.release();
+  }
+}
+
+async function updateAttendance(transaction_id) {
+  const conn = await pool.getConnection();
+  try {
+    const [rows] = await conn.query(
+      'CALL ApproveTransactionPayment(?);',
+      [transaction_id]
+    );
+    return rows[0];
+  } finally {
+    conn.release();
+  }
+}
+
 module.exports = {
   createTransaction,
   updateTransaction,
   archiveTransaction,
+  updateAttendance,
+  approveTransaction,
   unarchiveTransaction,
   getTransaction,
   getTransactions,

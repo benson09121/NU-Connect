@@ -538,19 +538,6 @@ CREATE TABLE tbl_event_course(
     FOREIGN KEY (program_id) REFERENCES tbl_program(program_id)
 );
 
-CREATE TABLE tbl_event_attendance (
-    attendance_id INT AUTO_INCREMENT PRIMARY KEY,
-    event_id INT NOT NULL,
-    user_id VARCHAR(200) NOT NULL,
-    status ENUM('Pending', 'Registered', 'Evaluated', 'Attended', 'Rejected') NOT NULL,
-    time_in DATETIME DEFAULT NULL,
-    time_out DATETIME DEFAULT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    deleted_at DATETIME DEFAULT NULL,
-    FOREIGN KEY (event_id) REFERENCES tbl_event(event_id) ON DELETE CASCADE,
-    FOREIGN KEY (user_id) REFERENCES tbl_user(user_id) ON UPDATE CASCADE
-);
-
 CREATE TABLE tbl_certificate_template (
     template_id INT AUTO_INCREMENT PRIMARY KEY,
     event_id INT NOT NULL UNIQUE, 
@@ -798,6 +785,21 @@ CREATE TABLE tbl_transaction (
     CONSTRAINT fk_txn_type_category
       FOREIGN KEY (transaction_type_id, category_id)
       REFERENCES tbl_transaction_type_category(transaction_type_id, category_id)
+);
+
+CREATE TABLE tbl_event_attendance (
+    attendance_id INT AUTO_INCREMENT PRIMARY KEY,
+    event_id INT NOT NULL,
+    user_id VARCHAR(200) NOT NULL,
+    transaction_id INT NULL,
+    status ENUM('Pending', 'Registered', 'Evaluated', 'Attended', 'Rejected') NOT NULL,
+    time_in DATETIME DEFAULT NULL,
+    time_out DATETIME DEFAULT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted_at DATETIME DEFAULT NULL,
+    FOREIGN KEY (transaction_id) REFERENCES tbl_transaction(transaction_id) ON DELETE SET NULL,  -- Fixed: changed from tbl_event_transaction to tbl_transaction
+    FOREIGN KEY (event_id) REFERENCES tbl_event(event_id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES tbl_user(user_id) ON UPDATE CASCADE
 );
 
 
@@ -1213,7 +1215,6 @@ BEGIN
     SELECT * FROM tbl_user WHERE email = p_email;
 END $$
 DELIMITER ;
-
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetSpecificEvent(
 IN eventId INT, 
@@ -1244,46 +1245,185 @@ a.image,
 a.created_at,
 ees.start_time as evaluation_start_time,
 ees.end_time as evaluation_end_time,
-COALESCE(b.status, "Not Registered") as student_status
+COALESCE(b.status, "Not Registered") as student_status,
+-- Transaction information for paid events
+b.transaction_id,
+t.amount as paid_amount,
+t.status as payment_status,
+t.receipt_no,
+t.proof_image,
+t.created_at as payment_date,
+te.payer_name_override,
+te.remarks as payment_remarks
 FROM tbl_event a
-LEFT JOIN tbl_event_attendance b ON a.event_id = b.event_id AND b.user_id = userId
+LEFT JOIN tbl_event_attendance b ON a.event_id = b.event_id AND b.user_id = userId AND b.deleted_at IS NULL
 LEFT JOIN tbl_organization c ON a.organization_id = c.organization_id
 LEFT JOIN tbl_renewal_cycle rc ON a.organization_id = rc.organization_id 
     AND a.cycle_number = rc.cycle_number
 LEFT JOIN tbl_event_evaluation_settings ees ON a.event_id = ees.event_id
+-- Join transaction directly from event_attendance.transaction_id
+LEFT JOIN tbl_transaction t ON b.transaction_id = t.transaction_id
+-- Get additional transaction event details
+LEFT JOIN tbl_transaction_event te ON t.transaction_id = te.transaction_id
 WHERE a.event_id = eventId;
 END $$
 DELIMITER ;
 
 DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE GetEventAttendeesWithDetails(
-    IN p_event_id INT
+CREATE DEFINER='admin'@'%' PROCEDURE CreateEventTransaction(
+    IN p_user_email VARCHAR(200),
+    IN p_payer_name VARCHAR(200),
+    IN p_amount DECIMAL(10,2),
+    IN p_payment_type_code VARCHAR(50),
+    IN p_proof_image VARCHAR(255),
+    IN p_event_id INT,
+    IN p_organization_id INT,
+    IN p_organization_version_id INT
 )
 BEGIN
-    SELECT
-        ea.attendance_id as id,
-        ea.event_id,
-        ea.user_id,
-        CONCAT(u.f_name, ' ', u.l_name) AS full_name,
-        u.email,
-        u.profile_picture,
-        ea.status AS attendance_status,
-        te.remarks,
-        ea.time_in,
-        ea.time_out,
-        ea.created_at AS registration_date,
-        t.transaction_id,
-        t.amount,
-        tt.label AS transaction_type,
-        t.status AS transaction_status,
-        t.proof_image,
-        t.created_at AS transaction_created_at
-    FROM tbl_event_attendance ea
-    LEFT JOIN tbl_user u ON ea.user_id = u.user_id
-    LEFT JOIN tbl_transaction_event te ON ea.event_id = te.event_id 
-    LEFT JOIN tbl_transaction t ON te.transaction_id = t.transaction_id AND ea.user_id = t.user_id
-    LEFT JOIN tbl_transaction_type tt ON t.transaction_type_id = tt.transaction_type_id
-    WHERE ea.event_id = p_event_id;
+    DECLARE v_transaction_id INT;
+    DECLARE v_user_id VARCHAR(200);
+    DECLARE v_transaction_type_id INT;
+    DECLARE v_payment_type_id INT;
+    DECLARE v_category_id INT;
+    DECLARE v_receipt_no VARCHAR(100);
+    DECLARE v_series_key VARCHAR(100);
+    DECLARE v_prefix VARCHAR(50);
+    DECLARE v_pad_len TINYINT DEFAULT 6;
+    DECLARE v_type_char CHAR(1);
+    DECLARE v_org_token VARCHAR(16);
+    DECLARE v_yyyymm CHAR(6);
+    DECLARE v_organization_name VARCHAR(255);
+
+    -- Get user_id from email
+    SELECT user_id INTO v_user_id
+    FROM tbl_user 
+    WHERE email = p_user_email;
+    
+    IF v_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'User not found';
+    END IF;
+
+    SELECT name into v_organization_name
+    FROM tbl_organization
+    WHERE organization_id = p_organization_id;
+    
+    -- Get transaction type ID for INCOME (event payments are income)
+    SELECT transaction_type_id INTO v_transaction_type_id 
+    FROM tbl_transaction_type 
+    WHERE code = 'INCOME' LIMIT 1;
+    IF v_transaction_type_id IS NULL THEN 
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Income transaction type not found'; 
+    END IF;
+    
+    -- Get payment type ID
+    SELECT payment_type_id INTO v_payment_type_id 
+    FROM tbl_payment_type 
+    WHERE code = p_payment_type_code LIMIT 1;
+    IF v_payment_type_id IS NULL THEN 
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Payment type not found'; 
+    END IF;
+    
+    -- Get category ID for Event Fees - first try to find existing category
+    SELECT category_id INTO v_category_id 
+    FROM tbl_financial_category 
+    WHERE code = 'EVENT_FEE' 
+      AND active = TRUE 
+    LIMIT 1;
+    
+    -- If specific event category not found, try any income category
+    IF v_category_id IS NULL THEN
+        SELECT category_id INTO v_category_id 
+        FROM tbl_financial_category 
+        WHERE kind = 'INCOME' 
+          AND active = TRUE 
+        LIMIT 1;
+    END IF;
+    
+    -- If still no category found, create the event fees category
+    IF v_category_id IS NULL THEN
+        INSERT INTO tbl_financial_category (code, label, kind, active) 
+        VALUES ('EVENT_FEE', 'Event Fee', 'INCOME', TRUE);
+        
+        SET v_category_id = LAST_INSERT_ID();
+        
+        -- Link the new category to the INCOME transaction type
+        INSERT IGNORE INTO tbl_transaction_type_category (transaction_type_id, category_id)
+        VALUES (v_transaction_type_id, v_category_id);
+    END IF;
+    
+    -- Generate receipt number
+    SET v_type_char = 'I'; -- Income
+    SET v_yyyymm = DATE_FORMAT(NOW(), '%Y%m');
+    SET v_org_token = CONCAT('EVT', LPAD(p_event_id, 4, '0'));
+    SET v_prefix = CONCAT(v_type_char, '-', v_yyyymm, '-', v_org_token, '-');
+    SET v_series_key = v_prefix;
+    CALL NextReceiptNo(v_series_key, v_prefix, v_pad_len, v_receipt_no);
+    
+    -- Insert transaction record
+    INSERT INTO tbl_transaction (
+        user_id,
+        payer_name,
+        payee_name,
+        payment_description,
+        amount,
+        transaction_type_id,
+        payment_type_id,
+        category_id,
+        status,
+        transaction_date,
+        receipt_no,
+        proof_image
+    ) VALUES (
+        v_user_id,
+        p_payer_name,
+        v_organization_name,
+        'Event Registration Fee',
+        p_amount,
+        v_transaction_type_id,
+        v_payment_type_id,
+        v_category_id,
+        'Pending',
+        NOW(),
+        v_receipt_no,
+        p_proof_image
+    );
+    
+    SET v_transaction_id = LAST_INSERT_ID();
+    
+    -- Insert event transaction link (REMOVED created_at column)
+    INSERT INTO tbl_transaction_event (
+        transaction_id,
+        event_id,
+        payer_name_override,
+        remarks
+    ) VALUES (
+        v_transaction_id,
+        p_event_id,
+        p_payer_name,
+        'Event payment transaction'
+    );
+    
+    -- Log the action
+    CALL LogAction(
+        p_user_email,
+        CONCAT('Created event transaction for event ', p_event_id),
+        'EVENT_TRANSACTION_CREATE',
+        JSON_OBJECT(
+            'transaction_id', v_transaction_id,
+            'amount', p_amount,
+            'event_id', p_event_id,
+            'organization_id', p_organization_id,
+            'organization_version_id', p_organization_version_id,
+            'receipt_no', v_receipt_no
+        ),
+        NULL,
+        p_proof_image
+    );
+    
+    -- Return the created transaction using existing GetTransaction procedure
+    CALL GetTransaction(v_transaction_id);
+    
 END $$
 DELIMITER ;
 
@@ -1699,38 +1839,68 @@ END$$
 DELIMITER ;
 
 DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE RegisterEvent(IN
-    event_id INT,   
-    user_id VARCHAR(200)
+CREATE DEFINER='admin'@'%' PROCEDURE RegisterEvent(
+    IN p_event_id INT,
+    IN p_user_id VARCHAR(200),
+    IN p_status ENUM('Pending','Registered','Evaluated','Attended','Rejected'),
+    IN p_transaction_id INT  -- can be NULL
 )
 BEGIN
-INSERT INTO tbl_event_attendance (event_id, user_id, status) 
-VALUES (event_id, user_id, "Registered");
+    DECLARE v_status ENUM('Pending','Registered','Evaluated','Attended','Rejected');
 
-SELECT
-    ea.attendance_id as id,
-    ea.event_id,
-    ea.user_id,
-    CONCAT(u.f_name, ' ', u.l_name) AS full_name,
-    u.email,
-    u.profile_picture,
-    ea.status AS attendance_status,
-    te.remarks,
-    ea.time_in,
-    ea.time_out,
-    ea.created_at AS registration_date,
-    t.transaction_id,
-    t.amount,
-    tt.label AS transaction_type,
-    t.status AS transaction_status,
-    t.proof_image,
-    t.created_at AS transaction_created_at
-FROM tbl_event_attendance ea
-LEFT JOIN tbl_user u ON ea.user_id = u.user_id
-LEFT JOIN tbl_transaction_event te ON ea.event_id = te.event_id 
-LEFT JOIN tbl_transaction t ON te.transaction_id = t.transaction_id AND ea.user_id = t.user_id
-LEFT JOIN tbl_transaction_type tt ON t.transaction_type_id = tt.transaction_type_id
-WHERE ea.event_id = event_id AND ea.user_id = user_id;
+    SET v_status = COALESCE(p_status, 'Registered');
+
+    -- Insert new attendance (prevent duplicate active rows)
+    IF NOT EXISTS (
+        SELECT 1
+        FROM tbl_event_attendance
+        WHERE event_id = p_event_id
+          AND user_id  = p_user_id
+          AND deleted_at IS NULL
+    ) THEN
+        INSERT INTO tbl_event_attendance (event_id, user_id, status, transaction_id)
+        VALUES (p_event_id, p_user_id, v_status, p_transaction_id);
+    ELSE
+        -- Update existing (only overwrite transaction_id if provided)
+        UPDATE tbl_event_attendance
+        SET status = v_status,
+            transaction_id = CASE 
+                WHEN p_transaction_id IS NOT NULL THEN p_transaction_id 
+                ELSE transaction_id 
+            END
+        WHERE event_id = p_event_id
+          AND user_id  = p_user_id
+          AND deleted_at IS NULL;
+    END IF;
+
+    -- Return the attendance row centered on tbl_event_attendance
+    SELECT
+        ea.attendance_id AS id,
+        ea.event_id,
+        ea.user_id,
+        CONCAT(u.f_name, ' ', u.l_name) AS full_name,
+        u.email,
+        u.profile_picture,
+        ea.status AS attendance_status,
+        te.remarks,
+        ea.time_in,
+        ea.time_out,
+        ea.created_at AS registration_date,
+        t.transaction_id,
+        t.amount,
+        tt.label AS transaction_type,
+        t.status AS transaction_status,
+        t.proof_image,
+        t.created_at AS transaction_created_at
+    FROM tbl_event_attendance ea
+    LEFT JOIN tbl_user u               ON ea.user_id = u.user_id
+    LEFT JOIN tbl_transaction t        ON ea.transaction_id = t.transaction_id
+    LEFT JOIN tbl_transaction_type tt  ON t.transaction_type_id = tt.transaction_type_id
+    LEFT JOIN tbl_transaction_event te ON te.transaction_id = t.transaction_id
+    WHERE ea.event_id = p_event_id
+      AND ea.user_id  = p_user_id
+      AND ea.deleted_at IS NULL
+    LIMIT 1;
 END $$
 DELIMITER ;
 
@@ -1802,6 +1972,69 @@ BEGIN
     INNER JOIN tbl_organization o ON e.organization_id = o.organization_id
     WHERE (ea.user_id = p_user_id) AND (ea.status = "Registered" OR ea.status = "Attended")
     ORDER BY e.start_date DESC, e.start_time DESC;
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE ApproveTransactionPayment(
+    IN p_transaction_id INT
+)
+BEGIN
+    DECLARE v_event_id INT;
+    DECLARE v_user_id VARCHAR(200);
+    
+    -- Get event_id and user_id from the transaction
+    SELECT te.event_id, t.user_id
+    INTO v_event_id, v_user_id
+    FROM tbl_transaction t
+    JOIN tbl_transaction_event te ON t.transaction_id = te.transaction_id
+    WHERE t.transaction_id = p_transaction_id
+    LIMIT 1;
+    
+    -- Validate that we found the transaction and it's an event transaction
+    IF v_event_id IS NULL OR v_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' 
+        SET MESSAGE_TEXT = 'Transaction not found or is not an event transaction';
+    END IF;
+    
+    -- Update the event attendance status to 'Registered'
+    UPDATE tbl_event_attendance 
+    SET status = 'Registered'
+    WHERE transaction_id = p_transaction_id
+      AND deleted_at IS NULL;
+    
+    -- Update the transaction status to 'Completed'
+    UPDATE tbl_transaction
+    SET status = 'Completed'
+    WHERE transaction_id = p_transaction_id;
+    
+    -- Return the attendance details
+    SELECT
+        ea.attendance_id AS id,
+        ea.event_id,
+        ea.user_id,
+        CONCAT(u.f_name, ' ', u.l_name) AS full_name,
+        u.email,
+        u.profile_picture,
+        ea.status AS attendance_status,
+        te.remarks,
+        ea.time_in,
+        ea.time_out,
+        ea.created_at AS registration_date,
+        t.transaction_id,
+        t.amount,
+        tt.label AS transaction_type,
+        t.status AS transaction_status,
+        t.proof_image,
+        t.created_at AS transaction_created_at
+    FROM tbl_event_attendance ea
+    LEFT JOIN tbl_user u               ON ea.user_id = u.user_id
+    LEFT JOIN tbl_transaction t        ON ea.transaction_id = t.transaction_id
+    LEFT JOIN tbl_transaction_type tt  ON t.transaction_type_id = tt.transaction_type_id
+    LEFT JOIN tbl_transaction_event te ON te.transaction_id = t.transaction_id
+    WHERE t.transaction_id = p_transaction_id
+      AND ea.deleted_at IS NULL
+    LIMIT 1;
 END $$
 DELIMITER ;
 
@@ -2026,18 +2259,18 @@ BEGIN
         (
             SELECT JSON_ARRAYAGG(
                 JSON_OBJECT(
-                    'first_name', u.f_name,
-                    'last_name', u.l_name
+                    'first_name', attendee_user.f_name,
+                    'last_name', attendee_user.l_name
                 )
             )
             FROM (
-                SELECT u.f_name, u.l_name
+                SELECT attendee_user.f_name, attendee_user.l_name
                 FROM tbl_event_attendance ea
-                JOIN tbl_user u ON ea.user_id = u.user_id
+                JOIN tbl_user attendee_user ON ea.user_id = attendee_user.user_id
                 WHERE ea.event_id = e.event_id
                 AND ea.status IN ('Registered', 'Evaluated', 'Attended')
-                AND u.f_name IS NOT NULL 
-                AND u.l_name IS NOT NULL
+                AND attendee_user.f_name IS NOT NULL 
+                AND attendee_user.l_name IS NOT NULL
                 ORDER BY RAND()
                 LIMIT 4
             ) AS random_attendees
@@ -2238,6 +2471,140 @@ BEGIN
 END $$
 DELIMITER ;
 
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE CreateMembershipTransaction(
+    IN p_user_email VARCHAR(100),
+    IN p_payer_name VARCHAR(255),
+    IN p_amount DECIMAL(10,2),
+    IN p_payment_type_code VARCHAR(50),
+    IN p_proof_image VARCHAR(500),
+    IN p_organization_id INT,
+    IN p_organization_version_id INT
+)
+BEGIN
+    DECLARE v_user_id VARCHAR(200);
+    DECLARE v_transaction_type_id INT;
+    DECLARE v_payment_type_id INT;
+    DECLARE v_category_id INT;
+    DECLARE v_transaction_id INT;
+    DECLARE v_cycle_number INT;
+
+    DECLARE v_receipt_no VARCHAR(100);
+    DECLARE v_series_key VARCHAR(100);
+    DECLARE v_prefix VARCHAR(50);
+    DECLARE v_pad_len TINYINT DEFAULT 6;
+    DECLARE v_type_char CHAR(1);
+    DECLARE v_org_token VARCHAR(16);
+    DECLARE v_yyyymm CHAR(6);
+
+    -- Get user ID from email
+    SELECT user_id INTO v_user_id FROM tbl_user WHERE email = p_user_email LIMIT 1;
+    IF v_user_id IS NULL THEN 
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='User not found'; 
+    END IF;
+
+    -- Get cycle_number from organization_version_id
+    SELECT cycle_number INTO v_cycle_number 
+    FROM tbl_renewal_cycle 
+    WHERE organization_id = p_organization_id 
+      AND org_version_id = p_organization_version_id 
+    LIMIT 1;
+    IF v_cycle_number IS NULL THEN 
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Cycle number not found for the given organization version'; 
+    END IF;
+
+    -- Get transaction type ID for INCOME
+    SELECT transaction_type_id INTO v_transaction_type_id 
+    FROM tbl_transaction_type 
+    WHERE code = 'INCOME' LIMIT 1;
+    IF v_transaction_type_id IS NULL THEN 
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Income transaction type not found'; 
+    END IF;
+
+    -- Get payment type ID
+    SELECT payment_type_id INTO v_payment_type_id 
+    FROM tbl_payment_type 
+    WHERE code = p_payment_type_code LIMIT 1;
+    IF v_payment_type_id IS NULL THEN 
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Payment type not found'; 
+    END IF;
+
+    -- Get category ID for Membership Fees - first try to find the existing category
+    SELECT category_id INTO v_category_id 
+    FROM tbl_financial_category 
+    WHERE code = 'MEMBERSHIP_FEES' 
+      AND active = TRUE 
+    LIMIT 1;
+    
+    -- If specific membership category not found, try any income category
+    IF v_category_id IS NULL THEN
+        SELECT category_id INTO v_category_id 
+        FROM tbl_financial_category 
+        WHERE kind = 'INCOME' 
+          AND active = TRUE 
+        LIMIT 1;
+    END IF;
+    
+    -- If still no category found, create the membership fees category
+    IF v_category_id IS NULL THEN
+        INSERT INTO tbl_financial_category (code, label, kind, active) 
+        VALUES ('MEMBERSHIP_FEES', 'Membership Fees', 'INCOME', TRUE);
+        
+        SET v_category_id = LAST_INSERT_ID();
+        
+        -- Link the new category to the INCOME transaction type
+        INSERT IGNORE INTO tbl_transaction_type_category (transaction_type_id, category_id)
+        VALUES (v_transaction_type_id, v_category_id);
+    END IF;
+
+    -- Generate receipt number
+    SET v_type_char = 'I'; -- Income
+    SET v_yyyymm = DATE_FORMAT(NOW(), '%Y%m');
+    SET v_org_token = CONCAT('ORG', LPAD(p_organization_id, 3, '0'));
+    SET v_prefix = CONCAT(v_type_char, '-', v_yyyymm, '-', v_org_token, '-');
+    SET v_series_key = v_prefix;
+    CALL NextReceiptNo(v_series_key, v_prefix, v_pad_len, v_receipt_no);
+
+    -- Create main transaction record
+    INSERT INTO tbl_transaction (
+        user_id, payer_name, payee_name, payment_description, amount,
+        transaction_type_id, payment_type_id, category_id, status, 
+        transaction_date, receipt_no, proof_image
+    ) VALUES (
+        v_user_id, p_payer_name, 'NU Connect', 'Membership Fee', p_amount,
+        v_transaction_type_id, v_payment_type_id, v_category_id, 'Pending', 
+        NOW(), v_receipt_no, p_proof_image
+    );
+
+    SET v_transaction_id = LAST_INSERT_ID();
+
+    -- Link to organization (membership transaction) using the retrieved cycle_number
+    INSERT INTO tbl_transaction_membership (transaction_id, organization_id, cycle_number)
+    VALUES (v_transaction_id, p_organization_id, v_cycle_number);
+
+    -- Log the action
+    CALL LogAction(
+        p_user_email,
+        CONCAT('Created membership transaction for organization ', p_organization_id),
+        'MEMBERSHIP_TRANSACTION_CREATE',
+        JSON_OBJECT(
+            'transaction_id', v_transaction_id,
+            'amount', p_amount,
+            'organization_id', p_organization_id,
+            'organization_version_id', p_organization_version_id,
+            'cycle_number', v_cycle_number,
+            'receipt_no', v_receipt_no
+        ),
+        NULL,
+        p_proof_image
+    );
+
+    -- Return the created transaction
+    CALL GetTransaction(v_transaction_id);
+END $$
+DELIMITER ;
+
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetEvaluationQuestions(IN p_event_id INT)
 BEGIN
@@ -2382,6 +2749,8 @@ WHERE ea.event_id = p_event_id AND ea.user_id = p_user_id;
 END $$
 DELIMITER ;
 
+
+
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetUserPermissions(IN p_user_email VARCHAR(200))
 BEGIN
@@ -2394,38 +2763,156 @@ BEGIN
         'program_name', p.name,
         'permissions', COALESCE(
             (
-                SELECT JSON_ARRAYAGG(permission_name)
+                SELECT JSON_ARRAYAGG(
+                    CASE 
+                        WHEN perm_data.organization_ids IS NOT NULL AND JSON_LENGTH(perm_data.organization_ids) > 0 THEN
+                            JSON_OBJECT(
+                                'permission', perm_data.permission_name,
+                                'organization_ids', perm_data.organization_ids
+                            )
+                        ELSE
+                            perm_data.permission_name
+                    END
+                )
                 FROM (
-                    SELECT DISTINCT permission_name
+                    SELECT DISTINCT 
+                        permission_name,
+                        CASE 
+                            WHEN permission_scope = 'Organization' AND organization_ids IS NOT NULL THEN organization_ids
+                            ELSE NULL
+                        END AS organization_ids
                     FROM (
-                        -- Base role permissions
-                        SELECT p.permission_name
+                        -- Base role permissions (global scope)
+                        SELECT 
+                            p.permission_name,
+                            p.scope as permission_scope,
+                            NULL as organization_ids
                         FROM tbl_role_permission rp
                         JOIN tbl_permission p ON rp.permission_id = p.permission_id
                         WHERE rp.role_id = u.role_id
 
                         UNION ALL
 
-                        -- Executive role permissions through ranks
-                        SELECT p.permission_name
+                        -- Executive role permissions through ranks (organization-scoped)
+                        SELECT 
+                            p.permission_name,
+                            p.scope as permission_scope,
+                            CASE 
+                                WHEN COUNT(DISTINCT om.organization_id) > 0 THEN
+                                    CONCAT('[', GROUP_CONCAT(DISTINCT om.organization_id SEPARATOR ','), ']')
+                                ELSE NULL
+                            END as organization_ids
                         FROM tbl_organization_members om
                         JOIN tbl_executive_role er ON om.executive_role_id = er.executive_role_id
                         JOIN tbl_rank_permission rp ON er.rank_id = rp.rank_id
                         JOIN tbl_permission p ON rp.permission_id = p.permission_id
                         WHERE om.user_id = u.user_id
+                          AND om.status = 'Active'
+                          AND om.member_type = 'Executive'
+                        GROUP BY p.permission_name, p.scope
+                        HAVING COUNT(DISTINCT om.organization_id) > 0
 
                         UNION ALL
 
-                        -- Committee role permissions
-                        SELECT p.permission_name
+                        -- Committee role permissions (organization-scoped)
+                        SELECT 
+                            p.permission_name,
+                            p.scope as permission_scope,
+                            CASE 
+                                WHEN COUNT(DISTINCT c.organization_id) > 0 THEN
+                                    CONCAT('[', GROUP_CONCAT(DISTINCT c.organization_id SEPARATOR ','), ']')
+                                ELSE NULL
+                            END as organization_ids
                         FROM tbl_committee_members cm
                         JOIN tbl_committee c ON cm.committee_id = c.committee_id
-                        JOIN tbl_committee_role cr ON c.committee_id = cr.committee_id
+                        JOIN tbl_committee_role cr ON cm.committee_role_id = cr.committee_role_id
                         JOIN tbl_committee_role_permission crp ON cr.committee_role_id = crp.committee_role_id
                         JOIN tbl_permission p ON crp.permission_id = p.permission_id
                         WHERE cm.user_id = u.user_id
+                        GROUP BY p.permission_name, p.scope
+                        HAVING COUNT(DISTINCT c.organization_id) > 0
+
+                        UNION ALL
+
+                        -- Organization adviser permissions (organization-scoped)
+                        SELECT 
+                            p.permission_name,
+                            p.scope as permission_scope,
+                            CASE 
+                                WHEN COUNT(DISTINCT o.organization_id) > 0 THEN
+                                    CONCAT('[', GROUP_CONCAT(DISTINCT o.organization_id SEPARATOR ','), ']')
+                                ELSE NULL
+                            END as organization_ids
+                        FROM tbl_organization o
+                        JOIN tbl_role_permission rp ON rp.role_id = u.role_id
+                        JOIN tbl_permission p ON rp.permission_id = p.permission_id
+                        WHERE o.adviser_id = u.user_id
+                          AND p.scope = 'Organization'
+                        GROUP BY p.permission_name, p.scope
+                        HAVING COUNT(DISTINCT o.organization_id) > 0
+
+                        UNION ALL
+
+                        -- Member permission overrides (organization-scoped)
+                        SELECT 
+                            p.permission_name,
+                            p.scope as permission_scope,
+                            CASE 
+                                WHEN COUNT(DISTINCT om.organization_id) > 0 THEN
+                                    CONCAT('[', GROUP_CONCAT(DISTINCT om.organization_id SEPARATOR ','), ']')
+                                ELSE NULL
+                            END as organization_ids
+                        FROM tbl_member_permission_override mpo
+                        JOIN tbl_organization_members om ON mpo.member_id = om.member_id
+                        JOIN tbl_permission p ON mpo.permission_id = p.permission_id
+                        WHERE om.user_id = u.user_id
+                          AND mpo.is_allowed = TRUE
+                          AND om.status = 'Active'
+                        GROUP BY p.permission_name, p.scope
+                        HAVING COUNT(DISTINCT om.organization_id) > 0
+
+                        UNION ALL
+
+                        -- Organization-scoped permissions for users who may not currently have organizations
+                        SELECT 
+                            p.permission_name,
+                            p.scope as permission_scope,
+                            '[]' as organization_ids  -- Empty array indicates permission exists but no orgs
+                        FROM tbl_role_permission rp
+                        JOIN tbl_permission p ON rp.permission_id = p.permission_id
+                        WHERE rp.role_id = u.role_id
+                          AND p.scope = 'Organization'
+                          AND NOT EXISTS (
+                              -- Only include if user doesn't have this permission through any organization
+                              SELECT 1 FROM tbl_organization_members om
+                              JOIN tbl_executive_role er ON om.executive_role_id = er.executive_role_id
+                              JOIN tbl_rank_permission rp2 ON er.rank_id = rp2.rank_id
+                              WHERE om.user_id = u.user_id
+                                AND rp2.permission_id = p.permission_id
+                                AND om.status = 'Active'
+                                AND om.member_type = 'Executive'
+                              
+                              UNION ALL
+                              
+                              SELECT 1 FROM tbl_committee_members cm
+                              JOIN tbl_committee c ON cm.committee_id = c.committee_id
+                              JOIN tbl_committee_role cr ON cm.committee_role_id = cr.committee_role_id
+                              JOIN tbl_committee_role_permission crp ON cr.committee_role_id = crp.committee_role_id
+                              WHERE cm.user_id = u.user_id
+                                AND crp.permission_id = p.permission_id
+                                
+                              UNION ALL
+                              
+                              SELECT 1 FROM tbl_organization o
+                              WHERE o.adviser_id = u.user_id
+                                AND EXISTS (
+                                    SELECT 1 FROM tbl_role_permission rp3
+                                    WHERE rp3.role_id = u.role_id
+                                      AND rp3.permission_id = p.permission_id
+                                )
+                          )
                     ) AS all_permissions
-                ) AS distinct_permissions
+                ) AS perm_data
             ),
             JSON_ARRAY()
         ),
@@ -4071,9 +4558,12 @@ proc_main: BEGIN
     IF v_user_id IS NULL THEN
         SELECT e.*,
                o.name AS organization_name,
+               rc.org_version_id AS organization_version_id,
                GetEventCollaborators(e.event_id) AS collaborators
           FROM tbl_event e
      LEFT JOIN tbl_organization o ON o.organization_id = e.organization_id
+     LEFT JOIN tbl_renewal_cycle rc ON e.organization_id = rc.organization_id 
+               AND e.cycle_number = rc.cycle_number
          WHERE e.event_type IN ('SDAO','System')
       ORDER BY e.start_date DESC, e.created_at DESC;
         LEAVE proc_main;
@@ -4083,9 +4573,12 @@ proc_main: BEGIN
     IF v_role_name IN ('SDAO','Academic Director') THEN
         SELECT e.*,
                o.name AS organization_name,
+               rc.org_version_id AS organization_version_id,
                GetEventCollaborators(e.event_id) AS collaborators
           FROM tbl_event e
      LEFT JOIN tbl_organization o ON o.organization_id = e.organization_id
+     LEFT JOIN tbl_renewal_cycle rc ON e.organization_id = rc.organization_id 
+               AND e.cycle_number = rc.cycle_number
       ORDER BY e.start_date DESC, e.created_at DESC;
         LEAVE proc_main;
     END IF;
@@ -4094,9 +4587,12 @@ proc_main: BEGIN
     SELECT DISTINCT
            e.*,
            o.name AS organization_name,
+           rc.org_version_id AS organization_version_id,
            GetEventCollaborators(e.event_id) AS collaborators
       FROM tbl_event e
  LEFT JOIN tbl_organization o ON o.organization_id = e.organization_id
+ LEFT JOIN tbl_renewal_cycle rc ON e.organization_id = rc.organization_id 
+           AND e.cycle_number = rc.cycle_number
      WHERE
            /* Global */
            e.event_type IN ('SDAO','System')
@@ -4173,7 +4669,7 @@ proc_main: BEGIN
                  AND dp2.college_id = v_college_id
           ))
 
-        /* Proposed events: by the user OR by an org they’re related to */
+        /* Proposed events: by the user OR by an org they're related to */
         OR EXISTS (
               SELECT 1
                 FROM tbl_event_application ea
@@ -7746,7 +8242,6 @@ BEGIN
 END $$
 DELIMITER ;
 
-
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE ApplyForMembership(
     IN p_org_id INT,
@@ -7769,21 +8264,10 @@ BEGIN
         SET MESSAGE_TEXT = 'No active renewal cycle found for organization';
     END IF;
 
-    -- Check if user is already a member
-    IF EXISTS (
-        SELECT 1 FROM tbl_organization_members 
-        WHERE organization_id = p_org_id 
-        AND cycle_number = v_cycle_number 
-        AND user_id = p_user_id
-    ) THEN
-        SIGNAL SQLSTATE '45000' 
-        SET MESSAGE_TEXT = 'User is already a member of this organization';
-    END IF;
-
     -- Start transaction
     START TRANSACTION;
     
-    -- Create membership application
+    -- Create membership application (upsert)
     INSERT INTO tbl_membership_application (
         organization_id, 
         cycle_number, 
@@ -7795,11 +8279,14 @@ BEGIN
         v_cycle_number,
         p_user_id,
         'Pending'
-    );
+    )
+    ON DUPLICATE KEY UPDATE
+        status = 'Pending',
+        applied_at = CURRENT_TIMESTAMP;
     
     SET v_application_id = LAST_INSERT_ID();
     
-    -- Store custom question response
+    -- Store custom question response (upsert)
     INSERT INTO tbl_membership_response (
         application_id,
         question_id,
@@ -7809,30 +8296,44 @@ BEGIN
         v_application_id,
         p_question_id,
         p_response_value
-    );
+    )
+    ON DUPLICATE KEY UPDATE
+        response_value = p_response_value;
     
-    -- Create organization member record
+    -- Create organization member record (UPSERT)
     INSERT INTO tbl_organization_members (
         organization_id,
         cycle_number,
         user_id,
         member_type,
-        status
+        status,
+        joined_at
     )
     VALUES (
         p_org_id,
         v_cycle_number,
         p_user_id,
         'Member',
-        'Pending'
-    );
+        'Pending',
+        CURRENT_TIMESTAMP
+    )
+    ON DUPLICATE KEY UPDATE
+        member_type = 'Member',
+        status = 'Pending',
+        joined_at = CURRENT_TIMESTAMP;
     
-    SET v_member_id = LAST_INSERT_ID();
+    -- Get the member_id (works for both INSERT and UPDATE)
+    SELECT member_id INTO v_member_id
+    FROM tbl_organization_members
+    WHERE organization_id = p_org_id
+      AND cycle_number = v_cycle_number
+      AND user_id = p_user_id
+    LIMIT 1;
     
     -- Commit transaction
     COMMIT;
     
-    -- Return detailed application information with LIMIT 1 to ensure single record
+    -- Return detailed application information using the same logic as GetPendingOrganizationMembers
     SELECT
         om.member_id as id,
         om.organization_id,
@@ -7850,10 +8351,10 @@ BEGIN
         ma.reviewed_at,
         org.membership_fee_type,
         org.membership_fee_amount,
-        t.transaction_id,
-        t.amount AS paid_amount,
-        t.status AS payment_status,
-        t.proof_image
+        latest_transaction.transaction_id,
+        latest_transaction.amount AS paid_amount,
+        latest_transaction.status AS payment_status,
+        latest_transaction.proof_image
     FROM tbl_organization_members om
     JOIN tbl_user u ON om.user_id = u.user_id
     LEFT JOIN tbl_membership_application ma
@@ -7861,17 +8362,40 @@ BEGIN
         AND om.cycle_number = ma.cycle_number
         AND om.user_id = ma.user_id
     LEFT JOIN tbl_organization org ON om.organization_id = org.organization_id
-    LEFT JOIN tbl_transaction_membership tm
-        ON tm.organization_id = om.organization_id
-        AND tm.cycle_number = om.cycle_number
-    LEFT JOIN tbl_transaction t
-        ON tm.transaction_id = t.transaction_id
-        AND t.user_id = om.user_id
-    LEFT JOIN tbl_transaction_type tt 
-        ON t.transaction_type_id = tt.transaction_type_id
-        AND tt.code = 'INCOME'
-    WHERE om.member_id = v_member_id  -- Use the specific member_id we just created
-    LIMIT 1;  -- Ensure only one record is returned
+    LEFT JOIN (
+        -- Subquery to get the latest transaction per user for this organization/cycle
+        SELECT 
+            tm.organization_id,
+            tm.cycle_number,
+            t.user_id,
+            t.transaction_id,
+            t.amount,
+            t.status,
+            t.proof_image,
+            ROW_NUMBER() OVER (
+                PARTITION BY tm.organization_id, tm.cycle_number, t.user_id 
+                ORDER BY 
+                    CASE t.status 
+                        WHEN 'Completed' THEN 1 
+                        WHEN 'Pending' THEN 2 
+                        ELSE 3 
+                    END,
+                    t.created_at DESC
+            ) as rn
+        FROM tbl_transaction_membership tm
+        JOIN tbl_transaction t ON tm.transaction_id = t.transaction_id
+        JOIN tbl_transaction_type tt ON t.transaction_type_id = tt.transaction_type_id
+        WHERE tt.code = 'INCOME'
+          AND t.status IN ('Pending', 'Completed')
+          AND tm.organization_id = p_org_id
+          AND tm.cycle_number = v_cycle_number
+    ) latest_transaction 
+        ON latest_transaction.organization_id = om.organization_id
+        AND latest_transaction.cycle_number = om.cycle_number
+        AND latest_transaction.user_id = om.user_id
+        AND latest_transaction.rn = 1
+    WHERE om.member_id = v_member_id  -- Use the specific member_id we found
+    LIMIT 1;
 END$$
 DELIMITER ;
 
@@ -8067,6 +8591,7 @@ BEGIN
     DECLARE v_program_id INT;
     DECLARE v_member_id INT;
     DECLARE v_current_cycle INT;
+    DECLARE v_executive_in_other_org INT;
 
     -- Get current cycle number for the organization
     SELECT MAX(cycle_number) INTO v_current_cycle
@@ -8126,6 +8651,19 @@ BEGIN
     IF v_user_id IS NULL THEN
         SIGNAL SQLSTATE '45000' 
         SET MESSAGE_TEXT = 'User not found. User must be registered first before becoming an executive.';
+    END IF;
+
+    -- Check if user is already an active executive in a different organization
+    SELECT COUNT(*) INTO v_executive_in_other_org
+    FROM tbl_organization_members om
+    WHERE om.user_id = v_user_id
+    AND om.member_type = 'Executive'
+    AND om.status = 'Active'
+    AND om.organization_id != p_organization_id;
+
+    IF v_executive_in_other_org > 0 THEN
+        SIGNAL SQLSTATE '45000' 
+        SET MESSAGE_TEXT = 'User is already an active executive member in another organization';
     END IF;
 
     -- Check if user is already a member in this organization and cycle
@@ -8247,7 +8785,6 @@ BEGIN
         AND om.user_id = v_user_id;
 END$$
 DELIMITER ;
-
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE UpdateExecutiveMember(
@@ -9893,10 +10430,10 @@ BEGIN
         ma.reviewed_at,
         org.membership_fee_type,
         org.membership_fee_amount,
-        t.transaction_id,
-        t.amount AS paid_amount,
-        t.status AS payment_status,
-        t.proof_image
+        latest_transaction.transaction_id,
+        latest_transaction.amount AS paid_amount,
+        latest_transaction.status AS payment_status,
+        latest_transaction.proof_image
     FROM tbl_organization_members om
     JOIN tbl_user u ON om.user_id = u.user_id
     LEFT JOIN tbl_membership_application ma
@@ -9904,15 +10441,38 @@ BEGIN
         AND om.cycle_number = ma.cycle_number
         AND om.user_id = ma.user_id
     LEFT JOIN tbl_organization org ON om.organization_id = org.organization_id
-    LEFT JOIN tbl_transaction_membership tm
-        ON tm.organization_id = om.organization_id
-        AND tm.cycle_number = om.cycle_number
-    LEFT JOIN tbl_transaction t
-        ON tm.transaction_id = t.transaction_id
-        AND t.user_id = om.user_id
-    LEFT JOIN tbl_transaction_type tt
-        ON t.transaction_type_id = tt.transaction_type_id
-        AND tt.code = 'INCOME'  -- Assuming 'INCOME' is the code for membership fees
+    LEFT JOIN (
+        -- Subquery to get the latest transaction per user for this organization/cycle
+        SELECT 
+            tm.organization_id,
+            tm.cycle_number,
+            t.user_id,
+            t.transaction_id,
+            t.amount,
+            t.status,
+            t.proof_image,
+            ROW_NUMBER() OVER (
+                PARTITION BY tm.organization_id, tm.cycle_number, t.user_id 
+                ORDER BY 
+                    CASE t.status 
+                        WHEN 'Completed' THEN 1 
+                        WHEN 'Pending' THEN 2 
+                        ELSE 3 
+                    END,
+                    t.created_at DESC
+            ) as rn
+        FROM tbl_transaction_membership tm
+        JOIN tbl_transaction t ON tm.transaction_id = t.transaction_id
+        JOIN tbl_transaction_type tt ON t.transaction_type_id = tt.transaction_type_id
+        WHERE tt.code = 'INCOME'
+          AND t.status IN ('Pending', 'Completed')
+          AND tm.organization_id = p_org_id
+          AND tm.cycle_number = v_cycle_number
+    ) latest_transaction 
+        ON latest_transaction.organization_id = om.organization_id
+        AND latest_transaction.cycle_number = om.cycle_number
+        AND latest_transaction.user_id = om.user_id
+        AND latest_transaction.rn = 1
     WHERE om.organization_id = p_org_id
       AND om.cycle_number = v_cycle_number
       AND om.status = 'Pending'
@@ -9945,6 +10505,14 @@ BEGIN
      WHERE email = p_reviewer_email
      LIMIT 1;
 
+    -- Get the member_id for this user in this organization/cycle
+    SELECT member_id INTO v_member_id
+    FROM tbl_organization_members
+    WHERE organization_id = v_org_id
+      AND cycle_number = v_cycle_number
+      AND user_id = v_user_id
+    LIMIT 1;
+
     -- Approve application
     UPDATE tbl_membership_application
        SET status = 'Approved',
@@ -9975,7 +10543,8 @@ BEGIN
         NULL,
         NULL
     );
-    -- Return detailed membership information after approval
+    
+    -- Return detailed membership information after approval (using same logic as GetPendingOrganizationMembers)
     SELECT
         om.member_id as id,
         om.organization_id,
@@ -9993,10 +10562,10 @@ BEGIN
         ma.reviewed_at,
         org.membership_fee_type,
         org.membership_fee_amount,
-        t.transaction_id,
-        t.amount AS paid_amount,
-        t.status AS payment_status,
-        t.proof_image
+        latest_transaction.transaction_id,
+        latest_transaction.amount AS paid_amount,
+        latest_transaction.status AS payment_status,
+        latest_transaction.proof_image
     FROM tbl_organization_members om
     JOIN tbl_user u ON om.user_id = u.user_id
     LEFT JOIN tbl_membership_application ma
@@ -10004,15 +10573,38 @@ BEGIN
         AND om.cycle_number = ma.cycle_number
         AND om.user_id = ma.user_id
     LEFT JOIN tbl_organization org ON om.organization_id = org.organization_id
-    LEFT JOIN tbl_transaction_membership tm
-        ON tm.organization_id = om.organization_id
-        AND tm.cycle_number = om.cycle_number
-    LEFT JOIN tbl_transaction t
-        ON tm.transaction_id = t.transaction_id
-        AND t.user_id = om.user_id
-    LEFT JOIN tbl_transaction_type tt 
-        ON t.transaction_type_id = tt.transaction_type_id
-        AND tt.code = 'INCOME'
+    LEFT JOIN (
+        -- Subquery to get the latest transaction per user for this organization/cycle
+        SELECT 
+            tm.organization_id,
+            tm.cycle_number,
+            t.user_id,
+            t.transaction_id,
+            t.amount,
+            t.status,
+            t.proof_image,
+            ROW_NUMBER() OVER (
+                PARTITION BY tm.organization_id, tm.cycle_number, t.user_id 
+                ORDER BY 
+                    CASE t.status 
+                        WHEN 'Completed' THEN 1 
+                        WHEN 'Pending' THEN 2 
+                        ELSE 3 
+                    END,
+                    t.created_at DESC
+            ) as rn
+        FROM tbl_transaction_membership tm
+        JOIN tbl_transaction t ON tm.transaction_id = t.transaction_id
+        JOIN tbl_transaction_type tt ON t.transaction_type_id = tt.transaction_type_id
+        WHERE tt.code = 'INCOME'
+          AND t.status IN ('Pending', 'Completed')
+          AND tm.organization_id = v_org_id
+          AND tm.cycle_number = v_cycle_number
+    ) latest_transaction 
+        ON latest_transaction.organization_id = om.organization_id
+        AND latest_transaction.cycle_number = om.cycle_number
+        AND latest_transaction.user_id = om.user_id
+        AND latest_transaction.rn = 1
     WHERE om.member_id = v_member_id  -- Use the specific member_id we found
     LIMIT 1;
 END$$
@@ -11778,9 +12370,10 @@ BEGIN
            te.event_id,
            te.payer_name_override,
            te.remarks,
-           tm.organization_id,
-           tm.cycle_number,
-           rc.org_version_id AS organization_version_id,
+           -- Use COALESCE to get organization_id from either membership or event
+           COALESCE(tm.organization_id, e.organization_id) AS organization_id,
+           COALESCE(tm.cycle_number, e.cycle_number) AS cycle_number,
+           COALESCE(rc1.org_version_id, rc2.org_version_id) AS organization_version_id,
            u.f_name AS user_first_name,
            u.l_name AS user_last_name,
            u.email AS user_email
@@ -11790,9 +12383,54 @@ BEGIN
     LEFT JOIN tbl_financial_category fc ON t.category_id = fc.category_id
     LEFT JOIN tbl_transaction_event te ON t.transaction_id = te.transaction_id
     LEFT JOIN tbl_transaction_membership tm ON t.transaction_id = tm.transaction_id
-    LEFT JOIN tbl_renewal_cycle rc ON tm.organization_id = rc.organization_id AND tm.cycle_number = rc.cycle_number
+    -- Join event details for event transactions
+    LEFT JOIN tbl_event e ON te.event_id = e.event_id
+    -- Join renewal cycles for both membership and event transactions
+    LEFT JOIN tbl_renewal_cycle rc1 ON tm.organization_id = rc1.organization_id AND tm.cycle_number = rc1.cycle_number
+    LEFT JOIN tbl_renewal_cycle rc2 ON e.organization_id = rc2.organization_id AND e.cycle_number = rc2.cycle_number
     LEFT JOIN tbl_user u ON t.user_id = u.user_id
-    WHERE tm.organization_id = p_organization_id
+    WHERE (tm.organization_id = p_organization_id OR e.organization_id = p_organization_id)
+    ORDER BY t.created_at DESC;
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetTransactionsByUser(
+    IN p_user_id VARCHAR(200)
+)
+BEGIN
+    SELECT t.*,
+           pt.code AS payment_type_code,
+           pt.label AS payment_type_label,
+           pt.method_group AS payment_method_group,
+           tt.code AS transaction_type_code,
+           tt.label AS transaction_type_label,
+           fc.code AS category_code,
+           fc.label AS category_label,
+           fc.kind AS category_kind,
+           te.event_id,
+           te.payer_name_override,
+           te.remarks,
+           -- Use COALESCE to get organization_id from either membership or event
+           COALESCE(tm.organization_id, e.organization_id) AS organization_id,
+           COALESCE(tm.cycle_number, e.cycle_number) AS cycle_number,
+           COALESCE(rc1.org_version_id, rc2.org_version_id) AS organization_version_id,
+           u.f_name AS user_first_name,
+           u.l_name AS user_last_name,
+           u.email AS user_email
+    FROM tbl_transaction t
+    JOIN tbl_payment_type pt ON t.payment_type_id = pt.payment_type_id
+    JOIN tbl_transaction_type tt ON t.transaction_type_id = tt.transaction_type_id
+    LEFT JOIN tbl_financial_category fc ON t.category_id = fc.category_id
+    LEFT JOIN tbl_transaction_event te ON t.transaction_id = te.transaction_id
+    LEFT JOIN tbl_transaction_membership tm ON t.transaction_id = tm.transaction_id
+    -- Join event details for event transactions
+    LEFT JOIN tbl_event e ON te.event_id = e.event_id
+    -- Join renewal cycles for both membership and event transactions
+    LEFT JOIN tbl_renewal_cycle rc1 ON tm.organization_id = rc1.organization_id AND tm.cycle_number = rc1.cycle_number
+    LEFT JOIN tbl_renewal_cycle rc2 ON e.organization_id = rc2.organization_id AND e.cycle_number = rc2.cycle_number
+    LEFT JOIN tbl_user u ON t.user_id = u.user_id
+    WHERE t.user_id = p_user_id
     ORDER BY t.created_at DESC;
 END $$
 DELIMITER ;
@@ -15866,6 +16504,99 @@ BEGIN
   GROUP BY c.owner_id
   ORDER BY multi_org_messages DESC;
 END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE ApproveTransaction(
+    IN p_transaction_id INT,
+    IN p_organization_id INT,
+    IN p_organization_version_id INT,
+    IN p_category VARCHAR(50),
+    IN p_approved_by_email VARCHAR(100)
+)
+BEGIN
+    DECLARE v_approved_by_user_id VARCHAR(200);
+    DECLARE v_payer_email VARCHAR(255);
+    DECLARE v_user_id VARCHAR(200);
+    DECLARE v_event_id INT DEFAULT NULL;
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        RESIGNAL;
+    END;
+    
+    START TRANSACTION;
+    
+    -- Get approver user_id
+    SELECT user_id INTO v_approved_by_user_id 
+    FROM tbl_user 
+    WHERE email = p_approved_by_email;
+    
+    -- Get transaction details
+    SELECT t.payer_name, te.event_id, t.user_id
+    INTO v_payer_email, v_event_id, v_user_id
+    FROM tbl_transaction t
+    LEFT JOIN tbl_transaction_event te ON t.transaction_id = te.transaction_id
+    WHERE t.transaction_id = p_transaction_id;
+    
+    -- Update transaction status to 'Completed'
+    UPDATE tbl_transaction 
+    SET status = 'Completed',
+        updated_at = NOW()
+    WHERE transaction_id = p_transaction_id;
+    
+    -- Log the approval action
+    CALL LogAction(
+        p_approved_by_email,
+        CONCAT('Approved transaction ', p_transaction_id, ' for category ', p_category),
+        'TRANSACTION_APPROVE',
+        JSON_OBJECT(
+            'transaction_id', p_transaction_id,
+            'organization_id', p_organization_id,
+            'organization_version_id', p_organization_version_id,
+            'category', p_category
+        ),
+        NULL,
+        NULL
+    );
+    
+    COMMIT;
+    
+    -- Return updated transaction
+    CALL GetTransaction(p_transaction_id);
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetEventAttendeesWithDetails(
+    IN p_event_id INT
+)
+BEGIN
+    SELECT
+        ea.attendance_id as id,
+        ea.event_id,
+        ea.user_id,
+        CONCAT(u.f_name, ' ', u.l_name) AS full_name,
+        u.email,
+        u.profile_picture,
+        ea.status AS attendance_status,
+        te.remarks,
+        ea.time_in,
+        ea.time_out,
+        ea.created_at AS registration_date,
+        t.transaction_id,
+        t.amount,
+        tt.label AS transaction_type,
+        t.status AS transaction_status,
+        t.proof_image,
+        t.created_at AS transaction_created_at
+    FROM tbl_event_attendance ea
+    LEFT JOIN tbl_user u ON ea.user_id = u.user_id
+    LEFT JOIN tbl_transaction_event te ON ea.event_id = te.event_id 
+    LEFT JOIN tbl_transaction t ON te.transaction_id = t.transaction_id AND ea.user_id = t.user_id
+    LEFT JOIN tbl_transaction_type tt ON t.transaction_type_id = tt.transaction_type_id
+    WHERE ea.event_id = p_event_id;
+END $$
 DELIMITER ;
 
 
