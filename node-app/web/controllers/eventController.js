@@ -1026,10 +1026,86 @@ async function createEvent(req, res) {
   } catch (error) {
     console.error("[createEvent] Error creating event:", error);
     
+    // Handle specific validation errors from the CreateEvent stored procedure
+    if (error.code === 'ER_SIGNAL_EXCEPTION' && error.sqlState === '45000') {
+      if (error.sqlMessage?.includes('blocked period') || error.sqlMessage?.includes('Events cannot be created during blocked periods')) {
+        return res.status(409).json({
+          success: false,
+          error: 'BLOCKED_PERIOD_CONFLICT',
+          message: 'Event Creation Blocked',
+          userMessage: 'This event cannot be scheduled during a blocked period. Please choose a different date.',
+          details: error.sqlMessage,
+          conflictType: 'blocked_period'
+        });
+      } else if (error.sqlMessage?.includes('Schedule conflict') || error.sqlMessage?.includes('venue during this time')) {
+        return res.status(409).json({
+          success: false,
+          error: 'SCHEDULE_CONFLICT',
+          message: 'Venue Conflict Detected',
+          userMessage: 'Another event is already scheduled at the same venue during this time. Please choose a different venue or time.',
+          details: error.sqlMessage,
+          conflictType: 'schedule_conflict'
+        });
+      } else if (error.sqlMessage?.includes('same title') || error.sqlMessage?.includes('already exists')) {
+        return res.status(409).json({
+          success: false,
+          error: 'DUPLICATE_EVENT',
+          message: 'Duplicate Event Title',
+          userMessage: 'An event with the same title already exists for this organization. Please choose a different title.',
+          details: error.sqlMessage,
+          conflictType: 'duplicate_event'
+        });
+      } else if (error.sqlMessage?.includes('Only SDAO can create SDAO events')) {
+        return res.status(403).json({
+          success: false,
+          error: 'PERMISSION_DENIED',
+          message: 'Insufficient Permissions',
+          userMessage: 'Only SDAO users can create SDAO events. Please contact an administrator if you need this permission.',
+          details: error.sqlMessage
+        });
+      } else if (error.sqlMessage?.includes('Invalid organization_id and cycle_number')) {
+        return res.status(400).json({
+          success: false,
+          error: 'INVALID_ORGANIZATION',
+          message: 'Invalid Organization Configuration',
+          userMessage: 'The specified organization and cycle combination is not valid. Please verify your organization details.',
+          details: error.sqlMessage
+        });
+      } else if (error.sqlMessage?.includes('Cannot create restricted event')) {
+        return res.status(400).json({
+          success: false,
+          error: 'INVALID_EVENT_RESTRICTION',
+          message: 'Invalid Event Configuration',
+          userMessage: 'Cannot create a members-only event for an open organization. Please change the event access level.',
+          details: error.sqlMessage
+        });
+      } else if (error.sqlMessage?.includes('user not found')) {
+        return res.status(404).json({
+          success: false,
+          error: 'USER_NOT_FOUND',
+          message: 'User Not Found',
+          userMessage: 'The specified user was not found in the system. Please verify the user credentials.',
+          details: error.sqlMessage
+        });
+      } else {
+        // Other validation errors from stored procedure
+        return res.status(400).json({
+          success: false,
+          error: 'VALIDATION_ERROR',
+          message: 'Event Validation Failed',
+          userMessage: 'There was an issue with the event information provided. Please check your input and try again.',
+          details: process.env.NODE_ENV === 'development' ? error.sqlMessage : 'Validation error occurred'
+        });
+      }
+    }
+    
+    // Generic error for other types of errors
     res.status(500).json({
       success: false,
-      error: error.message || "An error occurred while creating the event.",
-      message: error.message || "Failed to create event. Please try again."
+      error: 'INTERNAL_ERROR',
+      message: 'Failed to create event',
+      userMessage: 'An unexpected error occurred while creating the event. Please check your information and try again.',
+      details: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
     });
   }
 }
@@ -1391,8 +1467,21 @@ async function checkEventTitle(req, res) {
 
 async function checkScheduleConflict(req, res) {
   try {
-    const { start_date, end_date, start_time, end_time, venue, venue_type, event_id } = req.body;
-    console.log(venue);
+    const { 
+      event_title,
+      organization_id, 
+      committee_id,
+      venue, 
+      venue_type, 
+      start_date, 
+      end_date, 
+      start_time, 
+      end_time, 
+      event_id 
+    } = req.body;
+    
+    console.log('Schedule conflict check request:', req.body);
+    
     if (!start_date || !start_time || !end_time) {
       return res.status(400).json({
         message: 'start_date, start_time, and end_time are required'
@@ -1402,11 +1491,14 @@ async function checkScheduleConflict(req, res) {
     const checkVenueConflict = venue_type === 'Face to face' && venue && venue.trim().length > 0;
 
     const conflicts = await eventModel.checkScheduleConflict({
+      event_title: event_title || null,
+      organization_id: organization_id || null,
+      committee_id: committee_id || null,
+      venue: checkVenueConflict ? venue.trim() : null,
       start_date,
       end_date: end_date || start_date,
       start_time,
       end_time,
-      venue: checkVenueConflict ? venue.trim() : null,
       event_id: event_id || null
     });
 
@@ -1414,9 +1506,13 @@ async function checkScheduleConflict(req, res) {
 
     res.status(200).json({
       conflict: hasConflict,
-      conflicts: hasConflict ? conflicts : []
+      conflicts: hasConflict ? conflicts : [],
+      blockedPeriods: conflicts ? conflicts.filter(c => c.conflict_type === 'blocked_period') : [],
+      scheduleConflicts: conflicts ? conflicts.filter(c => c.conflict_type === 'schedule_conflict') : [],
+      duplicateEvents: conflicts ? conflicts.filter(c => c.conflict_type === 'duplicate_event') : []
     });
   } catch (error) {
+    console.error('Error in checkScheduleConflict:', error);
     res.status(500).json({
       error: error.message || "An error occurred while checking schedule conflicts.",
     });
@@ -1430,13 +1526,43 @@ async function createBlockedPeriod(req, res) {
     if (!user_id && user_email) {
       const user = await eventModel.getUserByEmail(user_email);
       if (!user) {
-        return res.status(404).json({ message: "User not found for the provided email." });
+        return res.status(404).json({ 
+          success: false,
+          error: 'USER_NOT_FOUND',
+          message: 'User not found',
+          userMessage: 'The specified user was not found in the system. Please verify the email address and try again.'
+        });
       }
       user_id = user.user_id;
     }
 
     if (!user_id) {
-      return res.status(400).json({ message: "user_id (or user_email) is required." });
+      return res.status(400).json({ 
+        success: false,
+        error: 'MISSING_USER_ID',
+        message: 'User identification required',
+        userMessage: 'User ID or email is required to create a blocked period.'
+      });
+    }
+
+    // Validate required fields
+    if (!start_date || !end_date || !reason) {
+      return res.status(400).json({
+        success: false,
+        error: 'MISSING_REQUIRED_FIELDS',
+        message: 'Missing required fields',
+        userMessage: 'Start date, end date, and reason are all required fields.'
+      });
+    }
+
+    // Validate dates
+    if (new Date(start_date) > new Date(end_date)) {
+      return res.status(400).json({
+        success: false,
+        error: 'INVALID_DATE_RANGE',
+        message: 'Invalid date range',
+        userMessage: 'The start date cannot be later than the end date. Please check your dates and try again.'
+      });
     }
 
     await eventModel.createBlockedPeriod({ start_date, end_date, reason, created_by: user_id });
@@ -1448,9 +1574,57 @@ async function createBlockedPeriod(req, res) {
       data: Array.isArray(periods) ? periods : []
     });
 
-    res.status(201).json({ message: 'Blocked period created.' });
+    res.status(201).json({ 
+      success: true,
+      message: 'Blocked period created successfully',
+      userMessage: 'The blocked period has been created and will prevent event scheduling during the specified dates.'
+    });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('Error in createBlockedPeriod controller:', error);
+    
+    // Handle specific database errors with user-friendly messages
+    if (error.code === 'ER_SIGNAL_EXCEPTION' && error.sqlState === '45000') {
+      if (error.message?.includes('overlaps with existing blocked period')) {
+        return res.status(409).json({
+          success: false,
+          error: 'OVERLAP_ERROR',
+          message: 'Blocked Period Overlap Detected',
+          details: error.message,
+          userMessage: 'The selected date range overlaps with existing blocked periods. Please choose different dates or modify the existing blocked periods first.',
+          conflictingPeriods: error.conflictingPeriods || []
+        });
+      } else if (error.sqlMessage?.includes('overlaps with an existing active blocked period')) {
+        return res.status(409).json({
+          success: false,
+          error: 'OVERLAP_ERROR',
+          message: 'The selected date range overlaps with an existing blocked period. Please choose different dates or modify the existing blocked period first.',
+          details: 'Blocked periods cannot overlap with each other. Check the calendar for existing blocked periods.'
+        });
+      } else if (error.sqlMessage?.includes('Start date must be less than or equal to end date')) {
+        return res.status(400).json({
+          success: false,
+          error: 'INVALID_DATE_RANGE',
+          message: 'Start date must be on or before the end date.',
+          details: 'Please ensure the start date is not later than the end date.'
+        });
+      } else if (error.sqlMessage?.includes('user not found')) {
+        return res.status(404).json({
+          success: false,
+          error: 'USER_NOT_FOUND',
+          message: 'The specified user was not found in the system.',
+          details: 'Please verify the user credentials and try again.'
+        });
+      }
+    }
+
+    // Generic error response for other errors
+    res.status(500).json({ 
+      success: false,
+      error: 'INTERNAL_ERROR',
+      message: 'Failed to create blocked period',
+      userMessage: 'An error occurred while creating the blocked period. Please check your input and try again.',
+      details: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+    });
   }
 }
 
@@ -1462,12 +1636,42 @@ async function updateBlockedPeriod(req, res) {
     if (!user_id && user_email) {
       const user = await eventModel.getUserByEmail(user_email);
       if (!user) {
-        return res.status(404).json({ message: "User not found for the provided email." });
+        return res.status(404).json({ 
+          success: false,
+          error: 'USER_NOT_FOUND',
+          message: 'User not found',
+          userMessage: 'The specified user was not found in the system. Please verify the email address and try again.'
+        });
       }
       user_id = user.user_id;
     }
+    
     if (!user_id) {
-      return res.status(400).json({ message: "user_id (or user_email) is required." });
+      return res.status(400).json({ 
+        success: false,
+        error: 'MISSING_USER_ID',
+        message: 'User identification required',
+        userMessage: 'User ID or email is required to update a blocked period.'
+      });
+    }
+
+    if (!blocked_period_id) {
+      return res.status(400).json({
+        success: false,
+        error: 'MISSING_BLOCKED_PERIOD_ID',
+        message: 'Blocked period ID required',
+        userMessage: 'The blocked period ID is required to perform this update.'
+      });
+    }
+
+    // Validate dates if provided
+    if (start_date && end_date && new Date(start_date) > new Date(end_date)) {
+      return res.status(400).json({
+        success: false,
+        error: 'INVALID_DATE_RANGE',
+        message: 'Invalid date range',
+        userMessage: 'The start date cannot be later than the end date. Please check your dates and try again.'
+      });
     }
 
     await eventModel.updateBlockedPeriod({ blocked_period_id, start_date, end_date, reason, updated_by: user_id });
@@ -1479,9 +1683,54 @@ async function updateBlockedPeriod(req, res) {
       data: Array.isArray(periods) ? periods : []
     });
 
-    res.status(200).json({ message: 'Blocked period updated.' });
+    res.status(200).json({ 
+      success: true,
+      message: 'Blocked period updated successfully',
+      userMessage: 'The blocked period has been updated with the new information.'
+    });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('Error in updateBlockedPeriod controller:', error);
+    
+    // Handle specific database errors
+    if (error.code === 'ER_SIGNAL_EXCEPTION' && error.sqlState === '45000') {
+      if (error.message?.includes('overlaps with existing blocked period')) {
+        return res.status(409).json({
+          success: false,
+          error: 'OVERLAP_ERROR',
+          message: 'Blocked Period Overlap Detected',
+          details: error.message,
+          userMessage: 'The updated date range overlaps with existing blocked periods. Please choose different dates or modify the existing blocked periods first.',
+          conflictingPeriods: error.conflictingPeriods || []
+        });
+      } else if (error.sqlMessage?.includes('overlaps with an existing active blocked period')) {
+        return res.status(409).json({
+          success: false,
+          error: 'OVERLAP_ERROR',
+          message: 'The updated date range overlaps with another existing blocked period. Please choose different dates.',
+          details: 'Blocked periods cannot overlap with each other. Check the calendar for existing blocked periods.'
+        });
+      } else if (error.sqlMessage?.includes('user not found')) {
+        return res.status(404).json({
+          success: false,
+          error: 'USER_NOT_FOUND',
+          message: 'The specified user was not found in the system.'
+        });
+      } else if (error.sqlMessage?.includes('not found')) {
+        return res.status(404).json({
+          success: false,
+          error: 'BLOCKED_PERIOD_NOT_FOUND',
+          message: 'The blocked period you are trying to update was not found.'
+        });
+      }
+    }
+
+    res.status(500).json({ 
+      success: false,
+      error: 'INTERNAL_ERROR',
+      message: 'Failed to update blocked period',
+      userMessage: 'An error occurred while updating the blocked period. Please check your input and try again.',
+      details: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+    });
   }
 }
 
@@ -1489,17 +1738,37 @@ async function archiveBlockedPeriod(req, res) {
   try {
     const blocked_period_id = req.params.id || req.body.blocked_period_id;
     let { user_id, user_email, archived_reason } = req.body;
-    if (!archived_reason) return res.status(400).json({ message: 'Archive reason required.' });
+    
+    if (!archived_reason) {
+      return res.status(400).json({ 
+        success: false,
+        message: 'Archive reason is required.' 
+      });
+    }
 
     if (!user_id && user_email) {
       const user = await eventModel.getUserByEmail(user_email);
       if (!user) {
-        return res.status(404).json({ message: "User not found for the provided email." });
+        return res.status(404).json({ 
+          success: false,
+          message: "User not found for the provided email." 
+        });
       }
       user_id = user.user_id;
     }
+    
     if (!user_id) {
-      return res.status(400).json({ message: "user_id (or user_email) is required." });
+      return res.status(400).json({ 
+        success: false,
+        message: "user_id (or user_email) is required." 
+      });
+    }
+
+    if (!blocked_period_id) {
+      return res.status(400).json({
+        success: false,
+        message: "blocked_period_id is required."
+      });
     }
 
     await eventModel.archiveBlockedPeriod({ blocked_period_id, archived_by: user_id, archived_reason });
@@ -1511,9 +1780,35 @@ async function archiveBlockedPeriod(req, res) {
       data: Array.isArray(periods) ? periods : []
     });
 
-    res.status(200).json({ message: 'Blocked period archived.' });
+    res.status(200).json({ 
+      success: true,
+      message: 'Blocked period archived successfully.' 
+    });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('Error in archiveBlockedPeriod controller:', error);
+    
+    if (error.code === 'ER_SIGNAL_EXCEPTION' && error.sqlState === '45000') {
+      if (error.sqlMessage?.includes('not found')) {
+        return res.status(404).json({
+          success: false,
+          error: 'BLOCKED_PERIOD_NOT_FOUND',
+          message: 'The blocked period you are trying to archive was not found or is already archived.'
+        });
+      } else if (error.sqlMessage?.includes('user not found')) {
+        return res.status(404).json({
+          success: false,
+          error: 'USER_NOT_FOUND',
+          message: 'The specified user was not found in the system.'
+        });
+      }
+    }
+
+    res.status(500).json({ 
+      success: false,
+      error: 'INTERNAL_ERROR',
+      message: 'An error occurred while archiving the blocked period. Please try again.',
+      details: error.message
+    });
   }
 }
 
@@ -1596,6 +1891,28 @@ async function getBlockedPeriodsByStatus(req, res) {
 
     res.status(200).json(periods);
   } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+}
+
+async function getAllBlockedPeriods(req, res) {
+  try {
+    const { sessionId } = req.query;
+
+    const periods = await eventModel.getAllBlockedPeriods();
+
+    if (sessionId) {
+      subscribeToChannel(sessionId, 'blocked_periods');
+      publishToChannel('blocked_periods', {
+        channel: 'blocked_periods',
+        operation: 'SNAPSHOT',
+        data: Array.isArray(periods) ? periods : []
+      });
+    }
+
+    res.status(200).json(periods);
+  } catch (error) {
+    console.error('Error in getAllBlockedPeriods:', error);
     res.status(500).json({ error: error.message });
   }
 }
@@ -1984,6 +2301,7 @@ module.exports = {
   unarchiveBlockedPeriod,
   deleteBlockedPeriod,
   getBlockedPeriodsByStatus,
+  getAllBlockedPeriods,
   getEventApplicationPublicationImage,
   getCert,
   getEventsByUserRole,

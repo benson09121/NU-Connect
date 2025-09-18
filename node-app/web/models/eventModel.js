@@ -482,77 +482,202 @@ async function checkEventTitle(title) {
 async function checkScheduleConflict(params) {
     const connection = await pool.getConnection();
     try {
-        const [rows] = await connection.query('CALL CheckScheduleConflict(?, ?, ?, ?, ?, ?);', [
-            params.start_date,
-            params.end_date,
-            params.start_time,
-            params.end_time,
-            params.venue,
-            params.event_id
-        ]);
-        return rows[0]; // Return the first result set
+        console.log('Checking schedule conflict with enhanced validation...', params);
+        
+        const {
+            event_title,
+            organization_id,
+            committee_id,
+            venue,
+            start_date,
+            end_date,
+            start_time,
+            end_time,
+            event_id
+        } = params;
+        
+        const [rows] = await connection.query(
+            'CALL CheckScheduleConflict(?, ?, ?, ?, ?, ?, ?, ?);', 
+            [
+                event_title || null,
+                organization_id || null,
+                committee_id || null,
+                venue || null,
+                start_date,
+                start_time,
+                end_time,
+                event_id || null
+            ]
+        );
+        
+        // The stored procedure returns conflict information if any
+        return rows[0] || []; // Return the first result set (array of conflicts)
     } finally {
         connection.release();
     }
 }
 
 async function createBlockedPeriod({ start_date, end_date, reason, created_by }) {
+    const connection = await pool.getConnection();
     try {
-        const [rows] = await pool.query('CALL CreateBlockedPeriod(?, ?, ?, ?)', [start_date, end_date, reason, created_by]);
+        // First check for overlapping periods to provide specific error information
+        const [existingPeriods] = await connection.query(`
+            SELECT blocked_period_id, start_date, end_date, reason 
+            FROM tbl_blocked_period 
+            WHERE archived_at IS NULL 
+            AND (
+                (start_date <= ? AND end_date >= ?) OR
+                (start_date <= ? AND end_date >= ?) OR
+                (start_date >= ? AND end_date <= ?)
+            )
+        `, [start_date, start_date, end_date, end_date, start_date, end_date]);
+        
+        if (existingPeriods.length > 0) {
+            const conflictDetails = existingPeriods.map(p => {
+                const startDate = new Date(p.start_date).toLocaleDateString('en-US', { 
+                    weekday: 'short', 
+                    year: 'numeric', 
+                    month: 'short', 
+                    day: 'numeric' 
+                });
+                const endDate = new Date(p.end_date).toLocaleDateString('en-US', { 
+                    weekday: 'short', 
+                    year: 'numeric', 
+                    month: 'short', 
+                    day: 'numeric' 
+                });
+                return `"${p.reason}" (${startDate} to ${endDate})`;
+            }).join(', ');
+            
+            const error = new Error(`Blocked period overlaps with existing blocked period(s): ${conflictDetails}`);
+            error.code = 'ER_SIGNAL_EXCEPTION';
+            error.sqlState = '45000';
+            error.conflictingPeriods = existingPeriods;
+            throw error;
+        }
+        
+        const [rows] = await connection.query('CALL CreateBlockedPeriod(?, ?, ?, ?)', [start_date, end_date, reason, created_by]);
         return rows;
     } catch (error) {
         console.error('Error in createBlockedPeriod:', error);
         throw error;
+    } finally {
+        connection.release();
     }
 }
 
 async function updateBlockedPeriod({ blocked_period_id, start_date, end_date, reason, updated_by }) {
+    const connection = await pool.getConnection();
     try {
-        const [rows] = await pool.query('CALL UpdateBlockedPeriod(?, ?, ?, ?, ?)', [blocked_period_id, start_date, end_date, reason, updated_by]);
+        // Check for overlapping periods (excluding the current one being updated)
+        const [existingPeriods] = await connection.query(`
+            SELECT blocked_period_id, start_date, end_date, reason 
+            FROM tbl_blocked_period 
+            WHERE archived_at IS NULL 
+            AND blocked_period_id != ?
+            AND (
+                (start_date <= ? AND end_date >= ?) OR
+                (start_date <= ? AND end_date >= ?) OR
+                (start_date >= ? AND end_date <= ?)
+            )
+        `, [blocked_period_id, start_date, start_date, end_date, end_date, start_date, end_date]);
+        
+        if (existingPeriods.length > 0) {
+            const conflictDetails = existingPeriods.map(p => {
+                const startDate = new Date(p.start_date).toLocaleDateString('en-US', { 
+                    weekday: 'short', 
+                    year: 'numeric', 
+                    month: 'short', 
+                    day: 'numeric' 
+                });
+                const endDate = new Date(p.end_date).toLocaleDateString('en-US', { 
+                    weekday: 'short', 
+                    year: 'numeric', 
+                    month: 'short', 
+                    day: 'numeric' 
+                });
+                return `"${p.reason}" (${startDate} to ${endDate})`;
+            }).join(', ');
+            
+            const error = new Error(`Updated date range overlaps with existing blocked period(s): ${conflictDetails}`);
+            error.code = 'ER_SIGNAL_EXCEPTION';
+            error.sqlState = '45000';
+            error.conflictingPeriods = existingPeriods;
+            throw error;
+        }
+        
+        const [rows] = await connection.query('CALL UpdateBlockedPeriod(?, ?, ?, ?, ?)', [blocked_period_id, start_date, end_date, reason, updated_by]);
         return rows;
     } catch (error) {
         console.error('Error in updateBlockedPeriod:', error);
         throw error;
+    } finally {
+        connection.release();
     }
 }
 
 async function archiveBlockedPeriod({ blocked_period_id, archived_by, archived_reason }) {
+    const connection = await pool.getConnection();
     try {
-        const [rows] = await pool.query('CALL ArchiveBlockedPeriod(?, ?, ?)', [blocked_period_id, archived_by, archived_reason]);
+        const [rows] = await connection.query('CALL ArchiveBlockedPeriod(?, ?, ?)', [blocked_period_id, archived_by, archived_reason]);
         return rows;
     } catch (error) {
         console.error('Error in archiveBlockedPeriod:', error);
         throw error;
+    } finally {
+        connection.release();
     }
 }
 
 async function unarchiveBlockedPeriod({ blocked_period_id, unarchived_by, unarchived_reason }) {
+    const connection = await pool.getConnection();
     try {
-        const [rows] = await pool.query('CALL UnarchiveBlockedPeriod(?, ?, ?)', [blocked_period_id, unarchived_by, unarchived_reason || null]);
+        const [rows] = await connection.query('CALL UnarchiveBlockedPeriod(?, ?, ?)', [blocked_period_id, unarchived_by, unarchived_reason || null]);
         return rows;
     } catch (error) {
         console.error('Error in unarchiveBlockedPeriod:', error);
         throw error;
+    } finally {
+        connection.release();
     }
 }
 
 async function deleteBlockedPeriod({ blocked_period_id, deleted_by }) {
+    const connection = await pool.getConnection();
     try {
-        const [rows] = await pool.query('CALL DeleteBlockedPeriod(?, ?)', [blocked_period_id, deleted_by]);
+        const [rows] = await connection.query('CALL DeleteBlockedPeriod(?, ?)', [blocked_period_id, deleted_by]);
         return rows;
     } catch (error) {
         console.error('Error in deleteBlockedPeriod:', error);
         throw error;
+    } finally {
+        connection.release();
     }
 }
 
 async function getBlockedPeriodsByStatus(status) {
+    const connection = await pool.getConnection();
     try {
-        const [rows] = await pool.query('CALL GetBlockedPeriodsByStatus(?)', [status]);
+        const [rows] = await connection.query('CALL GetBlockedPeriodsByStatus(?)', [status]);
         return rows[0];
     } catch (error) {
         console.error('Error in getBlockedPeriodsByStatus:', error);
         throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function getAllBlockedPeriods() {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetAllBlockedPeriods()');
+        return rows[0] || [];
+    } catch (error) {
+        console.error('Error in getAllBlockedPeriods:', error);
+        throw error;
+    } finally {
+        connection.release();
     }
 }
 
@@ -707,6 +832,7 @@ module.exports = {
     unarchiveBlockedPeriod,
     deleteBlockedPeriod,
     getBlockedPeriodsByStatus,
+    getAllBlockedPeriods,
     getEventsByUserRole,
     archiveEvent,
     unarchiveEvent,
@@ -714,5 +840,4 @@ module.exports = {
     deleteEventSDAO,
     getOneEventAttendeesWithDetails,
     getOrganizationVersionId
-
 };
