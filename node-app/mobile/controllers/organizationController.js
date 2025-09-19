@@ -112,8 +112,12 @@ async function submitOrganizationApplication(req, res) {
                     fs.mkdirSync(uploadDir, { recursive: true });
                 }
                 
-                // Use the filename from payment_proof
-                uploadedFileName = paymentData.payment_proof;
+                // Generate unique filename for both database and file storage
+                const timestamp = Date.now();
+                const randomString = Math.random().toString(36).substring(2, 8);
+                const fileExtension = path.extname(uploadedFile.name);
+                uploadedFileName = `payment-proof-${timestamp}-${randomString}${fileExtension}`;
+                
                 const uploadPath = path.join(uploadDir, uploadedFileName);
                 
                 // Move the uploaded file
@@ -127,7 +131,7 @@ async function submitOrganizationApplication(req, res) {
                 payer,
                 paymentData.membership_fee,
                 paymentData.payment_type,
-                uploadedFileName,
+                uploadedFileName,  // Use the same unique filename for database
                 org_id,
                 organization_version_id
             );
