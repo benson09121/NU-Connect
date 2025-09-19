@@ -5789,6 +5789,29 @@ BEGIN
         SET s.status = 'Approved'
         WHERE s.application_id = p_application_id;
 
+        -- **NEW: Insert default membership questions for the approved organization**
+        -- Only create default questions if none exist for this organization and cycle
+        IF NOT EXISTS (
+            SELECT 1 FROM tbl_membership_question 
+            WHERE organization_id = v_new_org_id 
+              AND cycle_number = v_effective_cycle_number
+        ) THEN
+            -- Insert default membership questions
+            INSERT INTO tbl_membership_question (
+                organization_id, 
+                cycle_number, 
+                question_text, 
+                question_type, 
+                is_required, 
+                options
+            ) VALUES 
+            (v_new_org_id, v_effective_cycle_number, 'Why do you want to join this organization?', 'text', TRUE, NULL),
+            (v_new_org_id, v_effective_cycle_number, 'What skills or experiences can you contribute to the organization?', 'text', TRUE, NULL),
+            (v_new_org_id, v_effective_cycle_number, 'Are you currently a member of other organizations?', 'multiple_choice', TRUE, JSON_ARRAY('Yes', 'No')),
+            (v_new_org_id, v_effective_cycle_number, 'How did you hear about this organization?', 'multiple_choice', FALSE, JSON_ARRAY('Friend/Colleague', 'Social Media', 'Website', 'Event/Presentation', 'Other')),
+            (v_new_org_id, v_effective_cycle_number, 'What are your expectations from this organization?', 'text', FALSE, NULL);
+        END IF;
+
         -- Update application status
         UPDATE tbl_application
         SET status = 'Approved',

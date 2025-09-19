@@ -1161,6 +1161,116 @@ async function getLeaveApplications(org_id, org_version_id) {
     }
 }
 
+// Membership Questions functions
+async function getMembershipQuestions(organization_id, cycle_number) {
+    const connection = await pool.getConnection();
+    try {
+        const [questions] = await connection.execute(`
+            SELECT question_id, organization_id, cycle_number, question_text, 
+                   question_type, is_required, options
+            FROM tbl_membership_question 
+            WHERE organization_id = ? AND cycle_number = ?
+            ORDER BY question_id ASC
+        `, [organization_id, cycle_number]);
+        
+        return questions;
+    } catch (error) {
+        console.error('Error fetching membership questions:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function createMembershipQuestion(organization_id, cycle_number, question_text, question_type = 'text', is_required = true, options = null) {
+    const connection = await pool.getConnection();
+    try {
+        const [result] = await connection.execute(`
+            INSERT INTO tbl_membership_question (organization_id, cycle_number, question_text, question_type, is_required, options)
+            VALUES (?, ?, ?, ?, ?, ?)
+        `, [organization_id, cycle_number, question_text, question_type, is_required, options ? JSON.stringify(options) : null]);
+        
+        return { question_id: result.insertId, success: true };
+    } catch (error) {
+        console.error('Error creating membership question:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function updateMembershipQuestion(question_id, question_text, question_type, is_required, options = null) {
+    const connection = await pool.getConnection();
+    try {
+        const [result] = await connection.execute(`
+            UPDATE tbl_membership_question 
+            SET question_text = ?, question_type = ?, is_required = ?, options = ?
+            WHERE question_id = ?
+        `, [question_text, question_type, is_required, options ? JSON.stringify(options) : null, question_id]);
+        
+        return { affected_rows: result.affectedRows, success: result.affectedRows > 0 };
+    } catch (error) {
+        console.error('Error updating membership question:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function deleteMembershipQuestion(question_id) {
+    const connection = await pool.getConnection();
+    try {
+        const [result] = await connection.execute(`
+            DELETE FROM tbl_membership_question WHERE question_id = ?
+        `, [question_id]);
+        
+        return { affected_rows: result.affectedRows, success: result.affectedRows > 0 };
+    } catch (error) {
+        console.error('Error deleting membership question:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function getMembershipResponses(application_id) {
+    const connection = await pool.getConnection();
+    try {
+        const [responses] = await connection.execute(`
+            SELECT mr.response_id, mr.application_id, mr.question_id, mr.response_value,
+                   mq.question_text, mq.question_type, mq.is_required
+            FROM tbl_membership_response mr
+            JOIN tbl_membership_question mq ON mr.question_id = mq.question_id
+            WHERE mr.application_id = ?
+            ORDER BY mq.question_id ASC
+        `, [application_id]);
+        
+        return responses;
+    } catch (error) {
+        console.error('Error fetching membership responses:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function createMembershipResponse(application_id, question_id, response_value) {
+    const connection = await pool.getConnection();
+    try {
+        const [result] = await connection.execute(`
+            INSERT INTO tbl_membership_response (application_id, question_id, response_value)
+            VALUES (?, ?, ?)
+        `, [application_id, question_id, response_value]);
+        
+        return { response_id: result.insertId, success: true };
+    } catch (error) {
+        console.error('Error creating membership response:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
 module.exports = {
     createOrganizationApplication,
     getSpecificApplication,
@@ -1233,5 +1343,12 @@ module.exports = {
     removeMemberPermissionOverride,
     getArchivedOrganizationMembers,
     unarchiveOrganizationMember,
-    getLeaveApplications
+    getLeaveApplications,
+    // Membership Questions functions
+    getMembershipQuestions,
+    createMembershipQuestion,
+    updateMembershipQuestion,
+    deleteMembershipQuestion,
+    getMembershipResponses,
+    createMembershipResponse
 };
