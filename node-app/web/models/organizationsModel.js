@@ -684,13 +684,13 @@ async function getOrganizationByProgram(program_id){
     }
 }
 
-async function getOrganizationByName(org_name){
+async function getOrganizationById(org_id, org_version_id){
     const connection = await pool.getConnection();
     try {
-        const [rows] = await connection.query('CALL GetOrganizationByName(?);', [org_name]);
+        const [rows] = await connection.query('CALL GetOrganizationById(?, ?);', [org_id, org_version_id]);
         return rows[0];
     } catch (error) {
-        console.error('Error fetching organization by name:', error);
+        console.error('Error fetching organization by ID:', error);
         throw error;
     } finally {
         connection.release();
@@ -1148,7 +1148,18 @@ async function removeMemberPermissionOverride(member_id, organization_id, organi
     }
 }
 
-
+async function getLeaveApplications(org_id, org_version_id) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetPendingLeaveApplications(?, ?);', [org_id, org_version_id]);
+        return rows[0];
+    } catch (error) {
+        console.error('Error fetching leave applications:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
 
 module.exports = {
     createOrganizationApplication,
@@ -1188,7 +1199,7 @@ module.exports = {
     getUpdateApplication,
     getOrganizationByRole,
     getOrganizationByProgram,
-    getOrganizationByName,
+    getOrganizationById,
     getOrganizationOfficers,
     getOrganizationMembers,
     getOrganizationUsers,
@@ -1221,5 +1232,6 @@ module.exports = {
     updateMemberPermissionOverride,
     removeMemberPermissionOverride,
     getArchivedOrganizationMembers,
-    unarchiveOrganizationMember
+    unarchiveOrganizationMember,
+    getLeaveApplications
 };

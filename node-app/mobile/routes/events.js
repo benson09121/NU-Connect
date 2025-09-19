@@ -18,4 +18,5 @@ router.post('/events/register', middleware.authMiddleware, eventsController.regi
 router.post('/events/unregister', middleware.authMiddleware, eventsController.unregisterEvent);
 router.post('/events/generateCertificate', middleware.authMiddleware, eventsController.addGeneratedCertificate);
 router.get('/events/publication-image', eventsController.getEventPublicationImage);
+router.get('/events/qrpermission', middleware.authMiddleware, eventsController.getQRPermission);
 module.exports = router;

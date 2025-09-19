@@ -882,6 +882,24 @@ CREATE TABLE tbl_member_permission_override (
 );
 
 
+CREATE TABLE tbl_membership_leave_application (
+    leave_application_id INT AUTO_INCREMENT PRIMARY KEY,
+    organization_id INT NOT NULL,
+    cycle_number INT NOT NULL,
+    user_id VARCHAR(200) NOT NULL,
+    leave_reason TEXT NOT NULL,
+    effective_date DATE NULL, -- When they want to leave
+    status ENUM('Pending', 'Approved', 'Rejected') DEFAULT 'Pending',
+    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    reviewed_by VARCHAR(200) NULL,
+    reviewed_at TIMESTAMP NULL,
+    remarks TEXT NULL,
+    FOREIGN KEY (organization_id, cycle_number) 
+        REFERENCES tbl_renewal_cycle(organization_id, cycle_number),
+    FOREIGN KEY (user_id) REFERENCES tbl_user(user_id),
+    FOREIGN KEY (reviewed_by) REFERENCES tbl_user(user_id)
+);
+
 -- TRIGGERS
 
 
@@ -1127,6 +1145,7 @@ BEGIN
     SELECT v_notification_id AS notification_id;
 END$$
 DELIMITER ;
+
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetAllEventsByOrganizations(
     IN p_orgs JSON
@@ -1215,6 +1234,7 @@ BEGIN
     SELECT * FROM tbl_user WHERE email = p_email;
 END $$
 DELIMITER ;
+
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetSpecificEvent(
 IN eventId INT, 
@@ -1240,9 +1260,10 @@ a.event_type,
 a.is_open_to,
 a.fee,
 a.capacity,
-a.certificate,
 a.image,
 a.created_at,
+ees.start_date as evaluation_start_date,
+ees.end_date as evaluation_end_date,
 ees.start_time as evaluation_start_time,
 ees.end_time as evaluation_end_time,
 COALESCE(b.status, "Not Registered") as student_status,
@@ -1254,7 +1275,9 @@ t.receipt_no,
 t.proof_image,
 t.created_at as payment_date,
 te.payer_name_override,
-te.remarks as payment_remarks
+te.remarks as payment_remarks,
+-- Certificate template information
+ct.template_path as certificate
 FROM tbl_event a
 LEFT JOIN tbl_event_attendance b ON a.event_id = b.event_id AND b.user_id = userId AND b.deleted_at IS NULL
 LEFT JOIN tbl_organization c ON a.organization_id = c.organization_id
@@ -1265,6 +1288,8 @@ LEFT JOIN tbl_event_evaluation_settings ees ON a.event_id = ees.event_id
 LEFT JOIN tbl_transaction t ON b.transaction_id = t.transaction_id
 -- Get additional transaction event details
 LEFT JOIN tbl_transaction_event te ON t.transaction_id = te.transaction_id
+-- Join certificate template information
+LEFT JOIN tbl_certificate_template ct ON a.event_id = ct.event_id
 WHERE a.event_id = eventId;
 END $$
 DELIMITER ;
@@ -3184,17 +3209,22 @@ BEGIN
             JSON_ARRAY()
         ),
         'pending_application', (
-            SELECT JSON_OBJECT(
-                'application_id', a.application_id,
-                'organization_name', v.name,
-                'status', a.status
-            )
-            FROM tbl_application a
-            JOIN tbl_organization_version v ON a.org_version_id = v.org_version_id
-            WHERE a.applicant_user_id = u.user_id AND (a.status = 'Pending' OR a.status = 'Rejected') 
-            ORDER BY a.created_at DESC
-            LIMIT 1
-        )
+    SELECT 
+        CASE 
+            WHEN a.status IN ('Pending','Rejected') THEN 
+                JSON_OBJECT(
+                    'application_id', a.application_id,
+                    'organization_name', v.name,
+                    'status', a.status
+                )
+            ELSE NULL
+        END
+    FROM tbl_application a
+    JOIN tbl_organization_version v ON a.org_version_id = v.org_version_id
+    WHERE a.applicant_user_id = u.user_id
+    ORDER BY a.created_at DESC
+    LIMIT 1
+)
     ) AS user_info
     FROM tbl_user u
     JOIN tbl_role r ON u.role_id = r.role_id
@@ -5512,6 +5542,24 @@ BEGIN
             WHERE org_version_id = v_org_version_id;
         END IF;
 
+        -- **NEW: Archive all other organization versions for this organization_id and approve the current one**
+        UPDATE tbl_organization_version 
+        SET status = 'Archived',
+            archived_at = CURRENT_TIMESTAMP,
+            archived_by = (SELECT approver_id FROM tbl_approval_process WHERE approval_id = p_approval_id),
+            archived_reason = 'Superseded by approved application'
+        WHERE organization_id = v_new_org_id 
+          AND org_version_id != v_org_version_id;  -- Don't archive the current version
+        
+        -- **NEW: Set the current organization version to Approved**
+        UPDATE tbl_organization_version 
+        SET status = 'Approved',
+            valid_from = CURRENT_DATE,
+            archived_at = NULL,
+            archived_by = NULL,
+            archived_reason = NULL
+        WHERE org_version_id = v_org_version_id;
+
         -- Defensive check
         IF v_new_org_id IS NULL THEN
             SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Organization ID is NULL before renewal cycle insert.';
@@ -6475,8 +6523,9 @@ END $$
 DELIMITER ;
 
 DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationByName(
-    IN p_organization_name VARCHAR(100)
+CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationById(
+    IN p_organization_id INT,
+    IN p_organization_version_id INT
 )
 BEGIN
     SELECT 
@@ -6484,16 +6533,17 @@ BEGIN
         o.name AS organization_name,
         o.logo AS organization_logo,
         o.status AS organization_status,
-        MAX(c.cycle_number) AS cycle_number,
+        rc.cycle_number,
         o.category,
         p.name AS program_name,
-        o.created_at
+        o.created_at,
+        rc.org_version_id AS organization_version_id
     FROM tbl_organization o
     LEFT JOIN tbl_program p ON o.base_program_id = p.program_id
-    LEFT JOIN tbl_renewal_cycle c ON o.organization_id = c.organization_id
-    WHERE o.name = p_organization_name
-      AND o.status = 'Approved'
-      GROUP BY o.organization_id;
+    LEFT JOIN tbl_renewal_cycle rc ON o.organization_id = rc.organization_id 
+        AND rc.org_version_id = p_organization_version_id
+    WHERE o.organization_id = p_organization_id
+      AND o.status = 'Approved';
 END $$
 DELIMITER ;
 
@@ -16761,6 +16811,168 @@ BEGIN
 END $$
 DELIMITER ;
 
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetAllNotification(
+    In p_email VARCHAR(100)
+)
+BEGIN
+    SELECT
+        n.notification_id,
+        n.title,
+        n.message,
+        n.entity_type,
+        n.entity_id,
+        n.sender_id,
+        n.action,
+        n.url,
+        n.created_at,
+        nr.is_read,
+        sender.f_name AS sender_first_name,
+        sender.l_name AS sender_last_name
+    FROM tbl_notification n
+    JOIN tbl_notification_recipient nr ON n.notification_id = nr.notification_id
+    LEFT JOIN tbl_user sender ON n.sender_id = sender.user_id
+    WHERE nr.recipient_email = p_email
+    ORDER BY n.created_at DESC;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE MarkAllNotificationsAsRead(
+    IN p_email VARCHAR(100)
+)
+BEGIN
+    DECLARE v_updated_count INT DEFAULT 0;
+    
+    -- Validate email parameter
+    IF p_email IS NULL OR TRIM(p_email) = '' THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Email parameter is required';
+    END IF;
+    
+    -- Update all unread notifications for the user
+    UPDATE tbl_notification_recipient 
+    SET is_read = 1
+    WHERE recipient_email = p_email 
+      AND is_read = 0;
+    
+    -- Get the number of updated rows
+    SET v_updated_count = ROW_COUNT();
+    
+    -- Return success message with count
+    SELECT 
+        v_updated_count AS notifications_marked_read,
+        CONCAT(v_updated_count, ' notification(s) marked as read') AS message;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetNewNotificationCount(
+    IN p_email VARCHAR(100)
+)
+BEGIN
+    -- Validate email parameter
+    IF p_email IS NULL OR TRIM(p_email) = '' THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Email parameter is required';
+    END IF;
+    
+    -- Return count of unread notifications
+    SELECT COUNT(*) AS unread_count
+    FROM tbl_notification n
+    JOIN tbl_notification_recipient nr ON n.notification_id = nr.notification_id
+    WHERE nr.recipient_email = p_email 
+      AND nr.is_read = 0;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetPendingLeaveApplications(
+    IN p_organization_id INT,
+    IN p_organization_version_id INT
+)
+BEGIN
+    DECLARE v_cycle_number INT;
+    
+    -- Get the cycle number using the organization_version_id
+    SELECT cycle_number INTO v_cycle_number
+    FROM tbl_renewal_cycle
+    WHERE organization_id = p_organization_id 
+    AND org_version_id = p_organization_version_id;
+    
+    IF v_cycle_number IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'No renewal cycle found for this organization version';
+    END IF;
+    
+    -- Get all pending leave applications for this organization and cycle
+    -- Use DISTINCT and GROUP BY to eliminate duplicates
+    SELECT DISTINCT
+        la.leave_application_id,
+        la.organization_id,
+        la.cycle_number,
+        la.user_id,
+        la.leave_reason,
+        la.effective_date,
+        la.status,
+        la.applied_at,
+        la.reviewed_by,
+        la.reviewed_at,
+        la.remarks,
+        -- User details
+        u.f_name,
+        u.l_name,
+        CONCAT(u.f_name, ' ', u.l_name) AS full_name,
+        u.email,
+        u.profile_picture,
+        u.program_id,
+        -- Program details
+        p.name AS program_name,
+        p.abbreviation AS program_abbreviation,
+        -- College details
+        c.name AS college_name,
+        c.abbreviation AS college_abbreviation,
+        -- Organization member details (get the most recent active membership)
+        (SELECT member_type 
+         FROM tbl_organization_members om_sub 
+         WHERE om_sub.organization_id = la.organization_id 
+         AND om_sub.cycle_number = la.cycle_number 
+         AND om_sub.user_id = la.user_id
+         AND om_sub.status = 'Active'
+         ORDER BY om_sub.joined_at DESC 
+         LIMIT 1) AS member_type,
+        (SELECT joined_at 
+         FROM tbl_organization_members om_sub 
+         WHERE om_sub.organization_id = la.organization_id 
+         AND om_sub.cycle_number = la.cycle_number 
+         AND om_sub.user_id = la.user_id
+         AND om_sub.status = 'Active'
+         ORDER BY om_sub.joined_at DESC 
+         LIMIT 1) AS member_since,
+        -- Executive role details (if applicable)
+        (SELECT er.role_title 
+         FROM tbl_organization_members om_sub 
+         LEFT JOIN tbl_executive_role er ON om_sub.executive_role_id = er.executive_role_id
+         WHERE om_sub.organization_id = la.organization_id 
+         AND om_sub.cycle_number = la.cycle_number 
+         AND om_sub.user_id = la.user_id
+         AND om_sub.status = 'Active'
+         AND om_sub.executive_role_id IS NOT NULL
+         ORDER BY om_sub.joined_at DESC 
+         LIMIT 1) AS executive_role,
+        -- Organization details
+        o.name AS organization_name,
+        o.logo AS organization_logo
+    FROM tbl_membership_leave_application la
+    JOIN tbl_user u ON la.user_id = u.user_id
+    LEFT JOIN tbl_program p ON u.program_id = p.program_id
+    LEFT JOIN tbl_college c ON p.college_id = c.college_id
+    JOIN tbl_organization o ON la.organization_id = o.organization_id
+    WHERE la.organization_id = p_organization_id
+      AND la.cycle_number = v_cycle_number
+      AND la.status = 'Pending'
+    ORDER BY la.applied_at DESC;
+END$$
+DELIMITER ;
 
 
 CREATE INDEX idx_conversation_global ON tbl_ai_conversation(owner_id, is_global, updated_at DESC);

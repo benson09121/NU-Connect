@@ -12,6 +12,16 @@ async function getUser(mail) {
     }
 }
 
+async function getPermissions(mail) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetUserPermissions(?)', [mail]);
+        return rows[0][0];
+    } finally {
+        connection.release();
+    }
+}
+
 async function generateToken(email) {
     const connection = await pool.getConnection();
     try {
@@ -30,4 +40,4 @@ async function generateToken(email) {
 }
 
 
-module.exports = { getUser, generateToken };
+module.exports = { getUser, generateToken, getPermissions };
