@@ -1271,6 +1271,105 @@ async function createMembershipResponse(application_id, question_id, response_va
     }
 }
 
+async function processMembershipApproval(application_id, reviewer_email, remarks) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query(
+            'CALL ProcessMembershipApproval(?, ?, ?);',
+            [application_id, reviewer_email, remarks]
+        );
+
+        console.log(rows);
+        
+        // The procedure returns multiple result sets:
+        // [0] = approved application details
+        // [1] = transaction details (if exists)
+        // [2] = new member details
+        // [3] = archived members (for SSE publishing)
+        return {
+            approvedApplication: rows[0] ?? null,
+            completedTransaction: rows[1] ?? null,
+            newMember: rows[2] ?? null,
+            archivedMembers: rows[3] ?? null
+        };
+    } catch (error) {
+        console.error('Error processing membership approval:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function processMembershipRejection(application_id, reviewer_email, remarks) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query(
+            'CALL ProcessMembershipRejection(?, ?, ?);',
+            [application_id, reviewer_email, remarks]
+        );
+
+        console.log(rows);
+        
+        // The procedure returns multiple result sets:
+        // [0] = rejected application details
+        // [1] = transaction details (if exists) - status updated to Failed
+        return {
+            rejectedApplication: rows[0] ?? null,
+            failedTransaction: rows[1] ?? null
+        };
+    } catch (error) {
+        console.error('Error processing membership rejection:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function approveLeaveApplication(leave_application_id, organization_id, organization_version_id, reviewer_email, remarks) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query(
+            'CALL ApproveLeaveApplication(?, ?, ?, ?, ?);',
+            [leave_application_id, organization_id, organization_version_id, reviewer_email, remarks]
+        );
+
+        console.log(rows);
+        
+        // The procedure returns multiple result sets:
+        // [0] = approved application details
+        // [1] = archived members (for SSE publishing)
+        return {
+            approvedApplication: rows[0] ?? null,
+            archivedMembers: rows[1] ?? null
+        };
+    } catch (error) {
+        console.error('Error approving leave application:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function rejectLeaveApplication(leave_application_id, organization_id, organization_version_id, reviewer_email, remarks) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query(
+            'CALL RejectLeaveApplication(?, ?, ?, ?, ?);',
+            [leave_application_id, organization_id, organization_version_id, reviewer_email, remarks]
+        );
+
+        console.log(rows);
+        
+        // The procedure returns the rejected application details
+        return rows[0] ?? null;
+    } catch (error) {
+        console.error('Error rejecting leave application:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
 module.exports = {
     createOrganizationApplication,
     getSpecificApplication,
@@ -1350,5 +1449,9 @@ module.exports = {
     updateMembershipQuestion,
     deleteMembershipQuestion,
     getMembershipResponses,
-    createMembershipResponse
+    createMembershipResponse,
+    processMembershipApproval,
+    processMembershipRejection,
+    approveLeaveApplication,
+    rejectLeaveApplication
 };

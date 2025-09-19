@@ -1117,23 +1117,64 @@ async function approveMembershipApplication(req, res) {
     try {
         const { application_id, remarks, organization_id, organization_version_id } = req.body;
         const reviewer_email = req.user.email;
+        
         if (!application_id) {
             return res.status(400).json({ error: "application_id is required." });
         }
-        const result = await organizationsModel.approveMembershipApplication(application_id, reviewer_email, remarks || null);
-        publishToChannel(`pending_organization_members_${organization_id}_${organization_version_id}`,{
-            operation: 'DELETE',
-            data: result,
-        });
-        console.log(result);
-        const updateMembers = await organizationsModel.getSingleOrganizationMember(result[0].id, organization_id);
 
-        publishToChannel(`organization_members_${organization_id}_${organization_version_id}`, {
-            operation: 'CREATE',
-            data: updateMembers,
-        });
+        // Process the entire approval workflow using the comprehensive procedure
+        const result = await organizationsModel.processMembershipApproval(application_id, reviewer_email, remarks || null);
+        
+        // The procedure returns result sets - each is already an array
+        const approvedApplication = result.approvedApplication?.[0] || null;
+        const completedTransaction = result.completedTransaction?.[0] || null;
+        const newMember = result.newMember?.[0] || null;
+        const archivedMembers = result.archivedMembers || null;
+        console.log('Approved Application:', approvedApplication);
+        console.log('Completed Transaction:', completedTransaction);
+        console.log('New Member:', newMember);
+        console.log('Archived Members:', archivedMembers);
+        
+        // Publish removal from pending applications
+        if (approvedApplication) {
+            publishToChannel(`pending_organization_members_${organization_id}_${organization_version_id}`, {
+                operation: 'DELETE',
+                data: [approvedApplication],
+            });
+        }
 
-        res.json({ message: 'Membership application approved successfully.' });
+        if(completedTransaction) {
+            publishToChannel('transactions', { type: 'updated', data: completedTransaction });
+            if (completedTransaction && completedTransaction.transaction_id) {
+                publishToChannel(`transactions:${completedTransaction.transaction_id}`, { type: 'updated', data: completedTransaction });
+            }
+        }
+
+        // Always publish new member creation since approval always creates a member
+        if (newMember) {
+            publishToChannel(`organization_members_${organization_id}_${organization_version_id}`, {
+                operation: 'CREATE',
+                data: [newMember],
+            });
+        } else {
+            console.error('No new member data returned from procedure');
+        }
+
+        // Publish archived members for the channel (for reactivated members)
+        if (archivedMembers && archivedMembers.length > 0) {
+            publishToChannel(`archived_organization_members_${organization_id}_${organization_version_id}`, {
+                operation: 'DELETE',
+                data: archivedMembers,
+            });
+        }
+
+        res.json({ 
+            message: 'Membership application approved successfully.',
+            approval: approvedApplication ? [approvedApplication] : [],
+            transaction: completedTransaction ? [completedTransaction] : [],
+            member: newMember ? [newMember] : [],
+            archivedMembers: archivedMembers || []
+        });
     } catch (error) {
         res.status(500).json({
             error: error.message || "An error occurred while approving the membership application.",
@@ -1143,19 +1184,157 @@ async function approveMembershipApplication(req, res) {
 
 async function rejectMembershipApplication(req, res) {
     try {
-        const { application_id, remarks } = req.body;
+        const { application_id, remarks, organization_id, organization_version_id } = req.body;
         const reviewer_email = req.user.email;
+        
         if (!application_id) {
             return res.status(400).json({ error: "application_id is required." });
         }
-        await organizationsModel.rejectMembershipApplication(application_id, reviewer_email, remarks || null);
-        res.json({ message: 'Membership application rejected successfully.' });
+        
+        if (!organization_id || !organization_version_id) {
+            return res.status(400).json({ error: "organization_id and organization_version_id are required." });
+        }
+
+        // Process the entire rejection workflow using the comprehensive procedure
+        const result = await organizationsModel.processMembershipRejection(application_id, reviewer_email, remarks || null);
+        
+        // The procedure returns result sets - each is already an array
+        const rejectedApplication = result.rejectedApplication?.[0] || null;
+        const failedTransaction = result.failedTransaction?.[0] || null;
+        
+        console.log('Rejected Application:', rejectedApplication);
+        console.log('Failed Transaction:', failedTransaction);
+        
+        // Publish removal from pending applications
+        if (rejectedApplication) {
+            publishToChannel(`pending_organization_members_${organization_id}_${organization_version_id}`, {
+                operation: 'DELETE',
+                data: [rejectedApplication],
+            });
+        }
+
+        // Publish transaction status update if exists
+        if (failedTransaction) {
+            publishToChannel('transactions', { type: 'updated', data: failedTransaction });
+            if (failedTransaction && failedTransaction.transaction_id) {
+                publishToChannel(`transaction_${failedTransaction.transaction_id}`, { type: 'updated', data: failedTransaction });
+            }
+        }
+
+        res.json({ 
+            message: 'Membership application rejected successfully.',
+            rejection: rejectedApplication ? [rejectedApplication] : [],
+            transaction: failedTransaction ? [failedTransaction] : []
+        });
     } catch (error) {
         res.status(500).json({
             error: error.message || "An error occurred while rejecting the membership application.",
         });
     }
 }
+
+async function approveLeaveApplication(req, res) {
+    try {
+        const { leave_application_id, organization_id, organization_version_id, remarks } = req.body;
+        const reviewer_email = req.user.email;
+        
+        if (!leave_application_id || !organization_id || !organization_version_id) {
+            return res.status(400).json({ 
+                error: "leave_application_id, organization_id, and organization_version_id are required." 
+            });
+        }
+
+        // Process the leave application approval
+        const result = await organizationsModel.approveLeaveApplication(
+            leave_application_id, 
+            organization_id, 
+            organization_version_id, 
+            reviewer_email, 
+            remarks || null
+        );
+        
+        // Extract the result sets
+        const approvedApplication = result.approvedApplication?.[0] || null;
+        const archivedMembers = result.archivedMembers || null;
+        
+        console.log('Approved Leave Application:', approvedApplication);
+        console.log('Archived Members:', archivedMembers);
+        
+        // Publish removal from pending leave applications
+        if (approvedApplication) {
+            publishToChannel(`leave_organization_${organization_id}_${organization_version_id}`, {
+                operation: 'DELETE',
+                data: [approvedApplication],
+            });
+            
+            // Also publish removal from organization members (member archived)
+            publishToChannel(`organization_members_${organization_id}_${organization_version_id}`, {
+                operation: 'DELETE',
+                data: [approvedApplication],
+            });
+        }
+
+        // Publish archived members for the channel (when member was archived)
+        if (archivedMembers && archivedMembers.length > 0) {
+            publishToChannel(`archived_organization_members_${organization_id}_${organization_version_id}`, {
+                operation: 'CREATE',
+                data: archivedMembers,
+            });
+        }
+
+        res.json({ 
+            message: 'Leave application approved successfully.',
+            approvedApplication: approvedApplication ? [approvedApplication] : [],
+            archivedMembers: archivedMembers || []
+        });
+    } catch (error) {
+        res.status(500).json({
+            error: error.message || "An error occurred while approving the leave application.",
+        });
+    }
+}
+
+async function rejectLeaveApplication(req, res) {
+    try {
+        const { leave_application_id, organization_id, organization_version_id, remarks } = req.body;
+        const reviewer_email = req.user.email;
+        
+        if (!leave_application_id || !organization_id || !organization_version_id) {
+            return res.status(400).json({ 
+                error: "leave_application_id, organization_id, and organization_version_id are required." 
+            });
+        }
+
+        // Process the leave application rejection
+        const rejectedApplication = await organizationsModel.rejectLeaveApplication(
+            leave_application_id, 
+            organization_id, 
+            organization_version_id, 
+            reviewer_email, 
+            remarks || null
+        );
+        
+        console.log('Rejected Leave Application:', rejectedApplication);
+        
+        // Publish removal from pending leave applications
+        if (rejectedApplication && rejectedApplication.length > 0) {
+            publishToChannel(`leave_organization_${organization_id}_${organization_version_id}`, {
+                operation: 'DELETE',
+                data: rejectedApplication,
+            });
+        }
+
+        res.json({ 
+            message: 'Leave application rejected successfully.',
+            rejectedApplication: rejectedApplication || []
+        });
+    } catch (error) {
+        res.status(500).json({
+            error: error.message || "An error occurred while rejecting the leave application.",
+        });
+    }
+}
+
 async function addOrganizationMember(req, res) {
     try {
         const { orgName, email, program_name, orgId, orgVersionId } = req.body;
@@ -1914,8 +2093,10 @@ async function getLeaveApplications(req, res) {
     res.status(500).json({
         error: error.message || "An error occurred while fetching leave applications.",
     });
-        }
 }
+}
+
+
 
 // Membership Questions controller functions
 async function getMembershipQuestions(req, res) {
@@ -2184,5 +2365,8 @@ module.exports = {
     updateMembershipQuestion,
     deleteMembershipQuestion,
     getMembershipResponses,
-    createMembershipResponse
+    createMembershipResponse,
+    // Leave Application functions
+    approveLeaveApplication,
+    rejectLeaveApplication
 };

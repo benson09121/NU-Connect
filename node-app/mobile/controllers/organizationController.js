@@ -112,8 +112,12 @@ async function submitOrganizationApplication(req, res) {
                     fs.mkdirSync(uploadDir, { recursive: true });
                 }
                 
-                // Use the filename from payment_proof
-                uploadedFileName = paymentData.payment_proof;
+                // Generate unique filename for both database and file storage
+                const timestamp = Date.now();
+                const randomString = Math.random().toString(36).substring(2, 8);
+                const fileExtension = path.extname(uploadedFile.name);
+                uploadedFileName = `payment-proof-${timestamp}-${randomString}${fileExtension}`;
+                
                 const uploadPath = path.join(uploadDir, uploadedFileName);
                 
                 // Move the uploaded file
@@ -127,7 +131,7 @@ async function submitOrganizationApplication(req, res) {
                 payer,
                 paymentData.membership_fee,
                 paymentData.payment_type,
-                uploadedFileName,
+                uploadedFileName,  // Use the same unique filename for database
                 org_id,
                 organization_version_id
             );
@@ -174,6 +178,12 @@ async function leaveOrganization(req, res) {
         const user = await userModel.getUser(req.user.email);
         const { organization_id, organization_version_id, leave_reason } = req.query;
         const result = await organizationModel.leaveOrganization(organization_id, organization_version_id, user.user_id, leave_reason);
+        publishToChannel(`leave_organization_${organization_id}_${organization_version_id}`,
+            {
+                operation: 'CREATE',
+                data: result,
+            }
+        );
         res.status(200).json({ message: "Leave application submitted successfully"});
     } catch (error) {
         console.error('Error leaving organization:', error);

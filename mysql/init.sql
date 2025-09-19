@@ -2383,19 +2383,30 @@ BEGIN
                 LIMIT 4
             ) AS u
         ) AS member_profile_pictures,
-        -- Return membership status instead of user role
+        -- Return membership status (prioritize pending applications)
         COALESCE(
+            -- First priority: Check for pending membership applications
+            (SELECT 'Pending'
+             FROM tbl_membership_application ma
+             WHERE ma.organization_id = o.organization_id
+               AND ma.user_id = p_user_id
+               AND ma.status = 'Pending'
+             LIMIT 1),
+            -- Second priority: Check active organization members (excluding archived)
             (SELECT om.status 
              FROM tbl_organization_members om 
              WHERE om.organization_id = o.organization_id 
                AND om.user_id = p_user_id
+               AND om.status = 'Active'
              LIMIT 1),
+            -- Third priority: Check committee members
             (SELECT IF(COUNT(*) > 0, 'Active', NULL)
              FROM tbl_committee c
              JOIN tbl_committee_members cm ON c.committee_id = cm.committee_id
              WHERE c.organization_id = o.organization_id
                AND cm.user_id = p_user_id
             ),
+            -- Default: Not Member (including archived members)
             'Not Member'
         ) AS membership_status,
         -- Get 4 random member names per organization
@@ -2525,8 +2536,8 @@ BEGIN
         (
             SELECT JSON_ARRAYAGG(
                 JSON_OBJECT(
-                    'first_name', attendee_user.f_name,
-                    'last_name', attendee_user.l_name
+                    'first_name', random_attendees.f_name,
+                    'last_name', random_attendees.l_name
                 )
             )
             FROM (
@@ -8572,6 +8583,7 @@ BEGIN
     SELECT membership_fee_amount AS membership_fee FROM tbl_organization WHERE organization_id = p_organization_id;  
 END $$
 DELIMITER ;
+
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE ApplyForMembership(
     IN p_org_id INT,
@@ -8651,53 +8663,20 @@ BEGIN
         );
     END WHILE;
     
-    -- Create organization member record (single member record)
-    INSERT INTO tbl_organization_members (
-        organization_id,
-        cycle_number,
-        user_id,
-        org_version_id,
-        member_type,
-        status,
-        joined_at
-    )
-    VALUES (
-        p_org_id,
-        v_cycle_number,
-        p_user_id,
-        p_organization_version_id,
-        'Member',
-        'Pending',
-        CURRENT_TIMESTAMP
-    )
-    ON DUPLICATE KEY UPDATE
-        member_type = 'Member',
-        status = 'Pending',
-        joined_at = CURRENT_TIMESTAMP,
-        org_version_id = p_organization_version_id;
-    
-    -- Get the member_id (works for both INSERT and UPDATE)
-    SELECT member_id INTO v_member_id
-    FROM tbl_organization_members
-    WHERE organization_id = p_org_id
-      AND cycle_number = v_cycle_number
-      AND user_id = p_user_id
-    LIMIT 1;
-    
     -- Commit transaction
     COMMIT;
     
-    -- Return detailed application information using the same logic as GetPendingOrganizationMembers
+    -- Return application information
     SELECT
-        om.member_id as id,
-        om.organization_id,
-        om.cycle_number,
-        om.user_id,
+        ma.application_id as id,
+        ma.organization_id,
+        ma.cycle_number,
+        ma.user_id,
         CONCAT(u.f_name, ' ', u.l_name) AS name,
         u.email,
         u.profile_picture,
-        om.member_type,
-        om.status,
+        'Member' AS member_type, -- Default member type since it's a membership application
+        ma.status AS status,
         ma.application_id,
         ma.status AS application_status,
         ma.applied_at,
@@ -8708,16 +8687,28 @@ BEGIN
         latest_transaction.transaction_id,
         latest_transaction.amount AS paid_amount,
         latest_transaction.status AS payment_status,
-        latest_transaction.proof_image
-    FROM tbl_organization_members om
-    JOIN tbl_user u ON om.user_id = u.user_id
-    LEFT JOIN tbl_membership_application ma
-        ON om.organization_id = ma.organization_id
-        AND om.cycle_number = ma.cycle_number
-        AND om.user_id = ma.user_id
-    LEFT JOIN tbl_organization org ON om.organization_id = org.organization_id
+        latest_transaction.proof_image,
+        -- Application responses as JSON array
+        (
+            SELECT JSON_ARRAYAGG(
+                JSON_OBJECT(
+                    'response_id', mr.response_id,
+                    'question_id', mr.question_id,
+                    'question_text', mq.question_text,
+                    'question_type', mq.question_type,
+                    'response_value', mr.response_value,
+                    'is_required', mq.is_required
+                )
+            )
+            FROM tbl_membership_response mr
+            JOIN tbl_membership_question mq ON mr.question_id = mq.question_id
+            WHERE mr.application_id = ma.application_id
+        ) AS application_responses
+    FROM tbl_membership_application ma
+    JOIN tbl_user u ON ma.user_id = u.user_id
+    LEFT JOIN tbl_organization org ON ma.organization_id = org.organization_id
     LEFT JOIN (
-        -- Subquery to get the latest transaction per user for this organization/cycle
+        -- Subquery to get the latest MEMBERSHIP transaction per user for this organization/cycle
         SELECT 
             tm.organization_id,
             tm.cycle_number,
@@ -8739,17 +8730,18 @@ BEGIN
         FROM tbl_transaction_membership tm
         JOIN tbl_transaction t ON tm.transaction_id = t.transaction_id
         JOIN tbl_transaction_type tt ON t.transaction_type_id = tt.transaction_type_id
+        JOIN tbl_financial_category fc ON t.category_id = fc.category_id
         WHERE tt.code = 'INCOME'
+          AND fc.code = 'MEMBERSHIP'  -- Only get transactions with MEMBERSHIP category
           AND t.status IN ('Pending', 'Completed')
           AND tm.organization_id = p_org_id
           AND tm.cycle_number = v_cycle_number
     ) latest_transaction 
-        ON latest_transaction.organization_id = om.organization_id
-        AND latest_transaction.cycle_number = om.cycle_number
-        AND latest_transaction.user_id = om.user_id
+        ON latest_transaction.organization_id = ma.organization_id
+        AND latest_transaction.cycle_number = ma.cycle_number
+        AND latest_transaction.user_id = ma.user_id
         AND latest_transaction.rn = 1
-    WHERE om.member_id = v_member_id  -- Use the specific member_id we found
-    LIMIT 1;
+    WHERE ma.application_id = v_application_id;
 END$$
 DELIMITER ;
 
@@ -10768,15 +10760,15 @@ BEGIN
     WHERE org_version_id = p_org_version_id AND organization_id = p_org_id;
 
     SELECT
-        om.member_id as id,
-        om.organization_id,
-        om.cycle_number,
-        om.user_id,
+        ma.application_id as id,
+        ma.organization_id,
+        ma.cycle_number,
+        ma.user_id,
         CONCAT(u.f_name, ' ', u.l_name) AS name,
         u.email,
         u.profile_picture,
-        om.member_type,
-        om.status,
+        'Member' AS member_type, -- Default member type for applications
+        ma.status,
         ma.application_id,
         ma.status AS application_status,
         ma.applied_at,
@@ -10788,13 +10780,9 @@ BEGIN
         latest_transaction.amount AS paid_amount,
         latest_transaction.status AS payment_status,
         latest_transaction.proof_image
-    FROM tbl_organization_members om
-    JOIN tbl_user u ON om.user_id = u.user_id
-    LEFT JOIN tbl_membership_application ma
-        ON om.organization_id = ma.organization_id
-        AND om.cycle_number = ma.cycle_number
-        AND om.user_id = ma.user_id
-    LEFT JOIN tbl_organization org ON om.organization_id = org.organization_id
+    FROM tbl_membership_application ma
+    JOIN tbl_user u ON ma.user_id = u.user_id
+    LEFT JOIN tbl_organization org ON ma.organization_id = org.organization_id
     LEFT JOIN (
         -- Subquery to get the latest transaction per user for this organization/cycle
         SELECT 
@@ -10818,19 +10806,21 @@ BEGIN
         FROM tbl_transaction_membership tm
         JOIN tbl_transaction t ON tm.transaction_id = t.transaction_id
         JOIN tbl_transaction_type tt ON t.transaction_type_id = tt.transaction_type_id
+        JOIN tbl_financial_category fc ON t.category_id = fc.category_id
         WHERE tt.code = 'INCOME'
+          AND fc.code = 'MEMBERSHIP'  -- Only get transactions with MEMBERSHIP category
           AND t.status IN ('Pending', 'Completed')
           AND tm.organization_id = p_org_id
           AND tm.cycle_number = v_cycle_number
     ) latest_transaction 
-        ON latest_transaction.organization_id = om.organization_id
-        AND latest_transaction.cycle_number = om.cycle_number
-        AND latest_transaction.user_id = om.user_id
+        ON latest_transaction.organization_id = ma.organization_id
+        AND latest_transaction.cycle_number = ma.cycle_number
+        AND latest_transaction.user_id = ma.user_id
         AND latest_transaction.rn = 1
-    WHERE om.organization_id = p_org_id
-      AND om.cycle_number = v_cycle_number
-      AND om.status = 'Pending'
-    ORDER BY om.joined_at DESC;
+    WHERE ma.organization_id = p_org_id
+      AND ma.cycle_number = v_cycle_number
+      AND ma.status = 'Pending'
+    ORDER BY ma.applied_at DESC;
 END $$
 DELIMITER ;
 
@@ -17049,7 +17039,7 @@ BEGIN
     -- Get all pending leave applications for this organization and cycle
     -- Use DISTINCT and GROUP BY to eliminate duplicates
     SELECT DISTINCT
-        la.leave_application_id,
+        la.leave_application_id as id,
         la.organization_id,
         la.cycle_number,
         la.user_id,
@@ -17114,6 +17104,1147 @@ BEGIN
       AND la.status = 'Pending'
     ORDER BY la.applied_at DESC;
 END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE CreateLeaveApplication(
+    IN p_organization_id INT,
+    IN p_organization_version_id INT,
+    IN p_user_id VARCHAR(200),
+    IN p_leave_reason TEXT
+)
+BEGIN
+    DECLARE v_cycle_number INT;
+    DECLARE v_pending_count INT;
+    DECLARE v_is_member INT;
+    DECLARE v_application_id INT;
+    
+    -- Get the cycle number using the organization_version_id
+    SELECT cycle_number INTO v_cycle_number
+    FROM tbl_renewal_cycle
+    WHERE organization_id = p_organization_id 
+    AND org_version_id = p_organization_version_id;
+    
+    IF v_cycle_number IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'No renewal cycle found for this organization version';
+    END IF;
+    
+    -- Check if user is an active member
+    SELECT COUNT(*) INTO v_is_member
+    FROM tbl_organization_members
+    WHERE organization_id = p_organization_id
+      AND cycle_number = v_cycle_number
+      AND user_id = p_user_id
+      AND status = 'Active';
+    
+    IF v_is_member = 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'User is not an active member of this organization';
+    END IF;
+    
+    -- Check for existing pending applications
+    SELECT COUNT(*) INTO v_pending_count
+    FROM tbl_membership_leave_application
+    WHERE organization_id = p_organization_id
+      AND cycle_number = v_cycle_number
+      AND user_id = p_user_id
+      AND status = 'Pending';
+    
+    IF v_pending_count > 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'User already has a pending leave application for this organization';
+    END IF;
+    
+    -- Create the leave application
+    INSERT INTO tbl_membership_leave_application (
+        organization_id,
+        cycle_number,
+        user_id,
+        leave_reason,
+        status,
+        applied_at
+    ) VALUES (
+        p_organization_id,
+        v_cycle_number,
+        p_user_id,
+        p_leave_reason,
+        'Pending',
+        CURRENT_TIMESTAMP
+    );
+    
+    SET v_application_id = LAST_INSERT_ID();
+    
+    -- Return the created application
+    SELECT 
+        la.leave_application_id as id,
+        la.organization_id,
+        la.cycle_number,
+        la.user_id,
+        la.leave_reason,
+        la.effective_date,
+        la.status,
+        la.applied_at,
+        la.reviewed_by,
+        la.reviewed_at,
+        la.remarks,
+        -- User details
+        u.f_name,
+        u.l_name,
+        CONCAT(u.f_name, ' ', u.l_name) AS full_name,
+        u.email,
+        u.profile_picture,
+        u.program_id,
+        -- Program details
+        p.name AS program_name,
+        p.abbreviation AS program_abbreviation,
+        -- College details
+        c.name AS college_name,
+        c.abbreviation AS college_abbreviation,
+        -- Organization member details (get the most recent active membership)
+        (SELECT member_type 
+         FROM tbl_organization_members om_sub 
+         WHERE om_sub.organization_id = la.organization_id 
+         AND om_sub.cycle_number = la.cycle_number 
+         AND om_sub.user_id = la.user_id
+         AND om_sub.status = 'Active'
+         ORDER BY om_sub.joined_at DESC 
+         LIMIT 1) AS member_type,
+        (SELECT joined_at 
+         FROM tbl_organization_members om_sub 
+         WHERE om_sub.organization_id = la.organization_id 
+         AND om_sub.cycle_number = la.cycle_number 
+         AND om_sub.user_id = la.user_id
+         AND om_sub.status = 'Active'
+         ORDER BY om_sub.joined_at DESC 
+         LIMIT 1) AS member_since,
+        -- Executive role details (if applicable)
+        (SELECT er.role_title 
+         FROM tbl_organization_members om_sub 
+         LEFT JOIN tbl_executive_role er ON om_sub.executive_role_id = er.executive_role_id
+         WHERE om_sub.organization_id = la.organization_id 
+         AND om_sub.cycle_number = la.cycle_number 
+         AND om_sub.user_id = la.user_id
+         AND om_sub.status = 'Active'
+         AND om_sub.executive_role_id IS NOT NULL
+         ORDER BY om_sub.joined_at DESC 
+         LIMIT 1) AS executive_role,
+        -- Organization details
+        o.name AS organization_name,
+        o.logo AS organization_logo
+    FROM tbl_membership_leave_application la
+    JOIN tbl_user u ON la.user_id = u.user_id
+    LEFT JOIN tbl_program p ON u.program_id = p.program_id
+    LEFT JOIN tbl_college c ON p.college_id = c.college_id
+    JOIN tbl_organization o ON la.organization_id = o.organization_id
+    WHERE la.leave_application_id = v_application_id;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE CheckPendingLeaveStatus(
+    IN p_organization_id INT,
+    IN p_organization_version_id INT,
+    IN p_user_id VARCHAR(200)
+)
+BEGIN
+    DECLARE v_cycle_number INT;
+    
+    -- Get the cycle number using the organization_version_id
+    SELECT cycle_number INTO v_cycle_number
+    FROM tbl_renewal_cycle
+    WHERE organization_id = p_organization_id 
+    AND org_version_id = p_organization_version_id;
+    
+    IF v_cycle_number IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'No renewal cycle found for this organization version';
+    END IF;
+    
+    -- Check for pending leave applications
+    SELECT 
+        la.leave_application_id,
+        la.organization_id,
+        la.cycle_number,
+        la.user_id,
+        la.leave_reason,
+        la.effective_date,
+        la.status,
+        la.applied_at,
+        la.reviewed_by,
+        la.reviewed_at,
+        la.remarks,
+        CASE 
+            WHEN la.leave_application_id IS NOT NULL THEN TRUE 
+            ELSE FALSE 
+        END AS has_pending_application
+    FROM tbl_membership_leave_application la
+    WHERE la.organization_id = p_organization_id
+      AND la.cycle_number = v_cycle_number
+      AND la.user_id = p_user_id
+      AND la.status = 'Pending'
+    LIMIT 1;
+    
+    -- If no pending application found, return a default response
+    IF ROW_COUNT() = 0 THEN
+        SELECT 
+            NULL AS leave_application_id,
+            p_organization_id AS organization_id,
+            v_cycle_number AS cycle_number,
+            p_user_id AS user_id,
+            NULL AS leave_reason,
+            NULL AS effective_date,
+            NULL AS status,
+            NULL AS applied_at,
+            NULL AS reviewed_by,
+            NULL AS reviewed_at,
+            NULL AS remarks,
+            FALSE AS has_pending_application;
+    END IF;
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE ApproveLeaveApplication(
+    IN p_leave_application_id INT,
+    IN p_organization_id INT,
+    IN p_organization_version_id INT,
+    IN p_reviewer_email VARCHAR(255),
+    IN p_remarks TEXT
+)
+BEGIN
+    DECLARE v_cycle_number INT;
+    DECLARE v_user_id VARCHAR(200);
+    DECLARE v_reviewer_user_id VARCHAR(200);
+    DECLARE v_application_status VARCHAR(50);
+    DECLARE v_member_id INT;
+    
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        RESIGNAL;
+    END;
+    
+    START TRANSACTION;
+    
+    -- Get the cycle number using the organization_version_id
+    SELECT cycle_number INTO v_cycle_number
+    FROM tbl_renewal_cycle
+    WHERE organization_id = p_organization_id 
+    AND org_version_id = p_organization_version_id;
+    
+    IF v_cycle_number IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'No renewal cycle found for this organization version';
+    END IF;
+    
+    -- Get application details and validate
+    SELECT user_id, status INTO v_user_id, v_application_status
+    FROM tbl_membership_leave_application
+    WHERE leave_application_id = p_leave_application_id
+    AND organization_id = p_organization_id
+    AND cycle_number = v_cycle_number;
+    
+    IF v_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Leave application not found';
+    END IF;
+    
+    IF v_application_status != 'Pending' THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Leave application is not pending';
+    END IF;
+    
+    -- Get reviewer user_id from email
+    SELECT user_id INTO v_reviewer_user_id
+    FROM tbl_user 
+    WHERE email = p_reviewer_email
+    LIMIT 1;
+    
+    IF v_reviewer_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Reviewer not found';
+    END IF;
+    
+    -- Get member_id for archiving
+    SELECT member_id INTO v_member_id
+    FROM tbl_organization_members
+    WHERE organization_id = p_organization_id
+    AND cycle_number = v_cycle_number
+    AND user_id = v_user_id
+    AND status = 'Active'
+    LIMIT 1;
+    
+    -- Update leave application status
+    UPDATE tbl_membership_leave_application 
+    SET 
+        status = 'Approved',
+        reviewed_at = NOW(),
+        reviewed_by = v_reviewer_user_id,
+        remarks = p_remarks,
+        effective_date = NOW()
+    WHERE leave_application_id = p_leave_application_id;
+    
+    -- Archive the member (remove from organization)
+    IF v_member_id IS NOT NULL THEN
+        -- First, copy to archived table
+        INSERT INTO tbl_archived_organization_members (
+            member_id,
+            organization_id,
+            cycle_number,
+            user_id,
+            member_type,
+            executive_role_id,
+            committee_id,
+            committee_role,
+            archived_at,
+            archived_by
+        )
+        SELECT 
+            om.member_id,
+            om.organization_id,
+            om.cycle_number,
+            om.user_id,
+            om.member_type,
+            om.executive_role_id,
+            NULL, -- committee_id
+            NULL, -- committee_role
+            NOW(),
+            v_reviewer_user_id
+        FROM tbl_organization_members om
+        WHERE om.member_id = v_member_id;
+        
+        -- Then update status to Archived
+        UPDATE tbl_organization_members
+        SET status = 'Archived'
+        WHERE member_id = v_member_id;
+    END IF;
+    
+    COMMIT;
+    
+    -- Return the approved application with all details
+    SELECT 
+        la.leave_application_id as id,
+        la.organization_id,
+        la.cycle_number,
+        la.user_id,
+        la.leave_reason,
+        la.effective_date,
+        la.status,
+        la.applied_at,
+        la.reviewed_by,
+        la.reviewed_at,
+        la.remarks,
+        -- User details
+        u.f_name,
+        u.l_name,
+        CONCAT(u.f_name, ' ', u.l_name) AS full_name,
+        u.email,
+        u.profile_picture,
+        u.program_id,
+        -- Program details
+        p.name AS program_name,
+        p.abbreviation AS program_abbreviation,
+        -- College details
+        c.name AS college_name,
+        c.abbreviation AS college_abbreviation,
+        -- Organization member details (get the archived membership)
+        (SELECT member_type 
+         FROM tbl_archived_organization_members aom_sub 
+         WHERE aom_sub.organization_id = la.organization_id 
+         AND aom_sub.cycle_number = la.cycle_number 
+         AND aom_sub.user_id = la.user_id
+         ORDER BY aom_sub.archived_at DESC 
+         LIMIT 1) AS member_type,
+        (SELECT joined_at 
+         FROM tbl_organization_members om_sub 
+         WHERE om_sub.organization_id = la.organization_id 
+         AND om_sub.cycle_number = la.cycle_number 
+         AND om_sub.user_id = la.user_id
+         ORDER BY om_sub.joined_at DESC 
+         LIMIT 1) AS member_since,
+        -- Executive role details (if applicable)
+        (SELECT er.role_title 
+         FROM tbl_archived_organization_members aom_sub 
+         LEFT JOIN tbl_executive_role er ON aom_sub.executive_role_id = er.executive_role_id
+         WHERE aom_sub.organization_id = la.organization_id 
+         AND aom_sub.cycle_number = la.cycle_number 
+         AND aom_sub.user_id = la.user_id
+         AND aom_sub.executive_role_id IS NOT NULL
+         ORDER BY aom_sub.archived_at DESC 
+         LIMIT 1) AS executive_role,
+        -- Organization details
+        o.name AS organization_name,
+        o.logo AS organization_logo,
+        -- Reviewer details
+        reviewer.f_name AS reviewer_first_name,
+        reviewer.l_name AS reviewer_last_name,
+        CONCAT(reviewer.f_name, ' ', reviewer.l_name) AS reviewer_full_name
+    FROM tbl_membership_leave_application la
+    JOIN tbl_user u ON la.user_id = u.user_id
+    LEFT JOIN tbl_program p ON u.program_id = p.program_id
+    LEFT JOIN tbl_college c ON p.college_id = c.college_id
+    JOIN tbl_organization o ON la.organization_id = o.organization_id
+    LEFT JOIN tbl_user reviewer ON la.reviewed_by = reviewer.user_id
+    WHERE la.leave_application_id = p_leave_application_id;
+    
+    -- Return archived members for SSE publishing (when member was archived)
+    SELECT 
+        aom.archived_id as id,
+        u.f_name as first_name,
+        u.l_name as last_name,
+        u.email,
+        aom.member_type,
+        aom.archived_at,
+        aom.archived_by,
+        aom.committee_role,
+        aom.executive_role_id,
+        aom.committee_id
+    FROM tbl_archived_organization_members aom
+    JOIN tbl_user u ON aom.user_id = u.user_id
+    WHERE aom.organization_id = p_organization_id
+        AND aom.cycle_number = v_cycle_number
+        AND aom.user_id = v_user_id
+        AND aom.archived_by = v_reviewer_user_id
+    ORDER BY aom.archived_at DESC;
+    
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE RejectLeaveApplication(
+    IN p_leave_application_id INT,
+    IN p_organization_id INT,
+    IN p_organization_version_id INT,
+    IN p_reviewer_email VARCHAR(255),
+    IN p_remarks TEXT
+)
+BEGIN
+    DECLARE v_cycle_number INT;
+    DECLARE v_user_id VARCHAR(200);
+    DECLARE v_reviewer_user_id VARCHAR(200);
+    DECLARE v_application_status VARCHAR(50);
+    
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        RESIGNAL;
+    END;
+    
+    START TRANSACTION;
+    
+    -- Get the cycle number using the organization_version_id
+    SELECT cycle_number INTO v_cycle_number
+    FROM tbl_renewal_cycle
+    WHERE organization_id = p_organization_id 
+    AND org_version_id = p_organization_version_id;
+    
+    IF v_cycle_number IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'No renewal cycle found for this organization version';
+    END IF;
+    
+    -- Get application details and validate
+    SELECT user_id, status INTO v_user_id, v_application_status
+    FROM tbl_membership_leave_application
+    WHERE leave_application_id = p_leave_application_id
+    AND organization_id = p_organization_id
+    AND cycle_number = v_cycle_number;
+    
+    IF v_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Leave application not found';
+    END IF;
+    
+    IF v_application_status != 'Pending' THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Leave application is not pending';
+    END IF;
+    
+    -- Get reviewer user_id from email
+    SELECT user_id INTO v_reviewer_user_id
+    FROM tbl_user 
+    WHERE email = p_reviewer_email
+    LIMIT 1;
+    
+    IF v_reviewer_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Reviewer not found';
+    END IF;
+    
+    -- Update leave application status to rejected
+    UPDATE tbl_membership_leave_application 
+    SET 
+        status = 'Rejected',
+        reviewed_at = NOW(),
+        reviewed_by = v_reviewer_user_id,
+        remarks = p_remarks
+    WHERE leave_application_id = p_leave_application_id;
+    
+    COMMIT;
+    
+    -- Return the rejected application with all details
+    SELECT 
+        la.leave_application_id as id,
+        la.organization_id,
+        la.cycle_number,
+        la.user_id,
+        la.leave_reason,
+        la.effective_date,
+        la.status,
+        la.applied_at,
+        la.reviewed_by,
+        la.reviewed_at,
+        la.remarks,
+        -- User details
+        u.f_name,
+        u.l_name,
+        CONCAT(u.f_name, ' ', u.l_name) AS full_name,
+        u.email,
+        u.profile_picture,
+        u.program_id,
+        -- Program details
+        p.name AS program_name,
+        p.abbreviation AS program_abbreviation,
+        -- College details
+        c.name AS college_name,
+        c.abbreviation AS college_abbreviation,
+        -- Organization member details (still active since rejected)
+        (SELECT member_type 
+         FROM tbl_organization_members om_sub 
+         WHERE om_sub.organization_id = la.organization_id 
+         AND om_sub.cycle_number = la.cycle_number 
+         AND om_sub.user_id = la.user_id
+         AND om_sub.status = 'Active'
+         ORDER BY om_sub.joined_at DESC 
+         LIMIT 1) AS member_type,
+        (SELECT joined_at 
+         FROM tbl_organization_members om_sub 
+         WHERE om_sub.organization_id = la.organization_id 
+         AND om_sub.cycle_number = la.cycle_number 
+         AND om_sub.user_id = la.user_id
+         AND om_sub.status = 'Active'
+         ORDER BY om_sub.joined_at DESC 
+         LIMIT 1) AS member_since,
+        -- Executive role details (if applicable)
+        (SELECT er.role_title 
+         FROM tbl_organization_members om_sub 
+         LEFT JOIN tbl_executive_role er ON om_sub.executive_role_id = er.executive_role_id
+         WHERE om_sub.organization_id = la.organization_id 
+         AND om_sub.cycle_number = la.cycle_number 
+         AND om_sub.user_id = la.user_id
+         AND om_sub.status = 'Active'
+         AND om_sub.executive_role_id IS NOT NULL
+         ORDER BY om_sub.joined_at DESC 
+         LIMIT 1) AS executive_role,
+        -- Organization details
+        o.name AS organization_name,
+        o.logo AS organization_logo,
+        -- Reviewer details
+        reviewer.f_name AS reviewer_first_name,
+        reviewer.l_name AS reviewer_last_name,
+        CONCAT(reviewer.f_name, ' ', reviewer.l_name) AS reviewer_full_name
+    FROM tbl_membership_leave_application la
+    JOIN tbl_user u ON la.user_id = u.user_id
+    LEFT JOIN tbl_program p ON u.program_id = p.program_id
+    LEFT JOIN tbl_college c ON p.college_id = c.college_id
+    JOIN tbl_organization o ON la.organization_id = o.organization_id
+    LEFT JOIN tbl_user reviewer ON la.reviewed_by = reviewer.user_id
+    WHERE la.leave_application_id = p_leave_application_id;
+    
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE ApproveMembershipApplication(
+    IN p_application_id INT,
+    IN p_reviewer_email VARCHAR(200),
+    IN p_remarks TEXT
+)
+BEGIN
+    DECLARE v_org_id INT;
+    DECLARE v_cycle_number INT;
+    DECLARE v_user_id VARCHAR(200);
+    DECLARE v_reviewer_id VARCHAR(200);
+
+    -- Get application details
+    SELECT organization_id, cycle_number, user_id
+      INTO v_org_id, v_cycle_number, v_user_id
+      FROM tbl_membership_application
+     WHERE application_id = p_application_id;
+
+    -- Get reviewer user_id from email
+    SELECT user_id INTO v_reviewer_id
+      FROM tbl_user
+     WHERE email = p_reviewer_email
+     LIMIT 1;
+
+    -- SELECT the application data before updating it
+    SELECT
+        ma.application_id as id,
+        ma.organization_id,
+        ma.cycle_number,
+        ma.user_id,
+        CONCAT(u.f_name, ' ', u.l_name) AS name,
+        u.email,
+        u.profile_picture,
+        'Member' AS member_type, -- Default member type since it's a membership application
+        ma.status AS status,
+        ma.application_id,
+        ma.status AS application_status,
+        ma.applied_at,
+        ma.reviewed_by,
+        ma.reviewed_at,
+        org.membership_fee_type,
+        org.membership_fee_amount,
+        latest_transaction.transaction_id,
+        latest_transaction.amount AS paid_amount,
+        latest_transaction.status AS payment_status,
+        latest_transaction.proof_image,
+        -- Application responses as JSON array
+        (
+            SELECT JSON_ARRAYAGG(
+                JSON_OBJECT(
+                    'response_id', mr.response_id,
+                    'question_id', mr.question_id,
+                    'question_text', mq.question_text,
+                    'question_type', mq.question_type,
+                    'response_value', mr.response_value,
+                    'is_required', mq.is_required
+                )
+            )
+            FROM tbl_membership_response mr
+            JOIN tbl_membership_question mq ON mr.question_id = mq.question_id
+            WHERE mr.application_id = ma.application_id
+        ) AS application_responses
+    FROM tbl_membership_application ma
+    JOIN tbl_user u ON ma.user_id = u.user_id
+    LEFT JOIN tbl_organization org ON ma.organization_id = org.organization_id
+    LEFT JOIN (
+        -- Subquery to get the latest MEMBERSHIP transaction per user for this organization/cycle
+        SELECT 
+            tm.organization_id,
+            tm.cycle_number,
+            t.user_id,
+            t.transaction_id,
+            t.amount,
+            t.status,
+            t.proof_image,
+            ROW_NUMBER() OVER (
+                PARTITION BY tm.organization_id, tm.cycle_number, t.user_id 
+                ORDER BY 
+                    CASE t.status 
+                        WHEN 'Completed' THEN 1 
+                        WHEN 'Pending' THEN 2 
+                        ELSE 3 
+                    END,
+                    t.created_at DESC
+            ) as rn
+        FROM tbl_transaction_membership tm
+        JOIN tbl_transaction t ON tm.transaction_id = t.transaction_id
+        JOIN tbl_transaction_type tt ON t.transaction_type_id = tt.transaction_type_id
+        JOIN tbl_financial_category fc ON t.category_id = fc.category_id
+        WHERE tt.code = 'INCOME'
+          AND fc.code = 'MEMBERSHIP'  -- Only get transactions with MEMBERSHIP category
+          AND t.status IN ('Pending', 'Completed')
+          AND tm.organization_id = v_org_id
+          AND tm.cycle_number = v_cycle_number
+    ) latest_transaction 
+        ON latest_transaction.organization_id = ma.organization_id
+        AND latest_transaction.cycle_number = ma.cycle_number
+        AND latest_transaction.user_id = ma.user_id
+        AND latest_transaction.rn = 1
+    WHERE ma.application_id = p_application_id
+    LIMIT 1;
+
+    -- Now approve the application
+    UPDATE tbl_membership_application
+       SET status = 'Approved',
+           reviewed_by = v_reviewer_id,
+           reviewed_at = NOW(),
+           remarks = p_remarks
+     WHERE application_id = p_application_id;
+
+    -- Update member status in organization_members (if record exists)
+    UPDATE tbl_organization_members
+       SET status = 'Active'
+     WHERE organization_id = v_org_id
+       AND cycle_number = v_cycle_number
+       AND user_id = v_user_id;
+       
+    -- Log the approval using LogAction
+    CALL LogAction(
+        p_reviewer_email,
+        CONCAT('Approved membership application ID: ', p_application_id),
+        'membership_application_approval',
+        JSON_OBJECT(
+            'application_id', p_application_id,
+            'organization_id', v_org_id,
+            'cycle_number', v_cycle_number,
+            'member_user_id', v_user_id,
+            'remarks', p_remarks
+        ),
+        NULL,
+        NULL
+    );
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE ProcessMembershipApproval(
+    IN p_application_id INT,
+    IN p_reviewer_email VARCHAR(255),
+    IN p_remarks TEXT
+)
+BEGIN
+    DECLARE v_user_id VARCHAR(200);
+    DECLARE v_organization_id INT;
+    DECLARE v_cycle_number INT;
+    DECLARE v_transaction_id INT DEFAULT NULL;
+    DECLARE v_application_status VARCHAR(50);
+    DECLARE v_user_exists INT DEFAULT 0;
+    DECLARE v_member_exists INT DEFAULT 0;
+    DECLARE v_reviewer_user_id VARCHAR(200);
+    DECLARE v_new_member_id INT;
+    DECLARE v_org_version_id INT;
+    DECLARE v_is_reactivating BOOLEAN DEFAULT FALSE;
+    
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        RESIGNAL;
+    END;
+    
+    START TRANSACTION;
+    
+    -- Check if application exists and get details
+    SELECT user_id, organization_id, cycle_number, status
+    INTO v_user_id, v_organization_id, v_cycle_number, v_application_status
+    FROM tbl_membership_application 
+    WHERE application_id = p_application_id;
+    
+    -- Get the current organization version ID
+    SELECT current_org_version_id INTO v_org_version_id
+    FROM tbl_organization 
+    WHERE organization_id = v_organization_id;
+    
+    -- Check if application was found
+    IF v_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Application not found';
+    END IF;
+    
+    IF v_application_status != 'Pending' THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Application is not pending';
+    END IF;
+    
+    -- Get reviewer user_id from email
+    SELECT user_id INTO v_reviewer_user_id
+    FROM tbl_user 
+    WHERE email = p_reviewer_email
+    LIMIT 1;
+    
+    IF v_reviewer_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Reviewer not found';
+    END IF;
+    
+    -- Check for existing transaction for this user and organization/cycle
+    SELECT t.transaction_id INTO v_transaction_id
+    FROM tbl_transaction t
+    JOIN tbl_transaction_membership tm ON t.transaction_id = tm.transaction_id
+    WHERE t.user_id = v_user_id 
+    AND tm.organization_id = v_organization_id 
+    AND tm.cycle_number = v_cycle_number
+    AND t.status IN ('Pending', 'Paid')
+    ORDER BY 
+        CASE t.status 
+            WHEN 'Paid' THEN 1 
+            WHEN 'Pending' THEN 2 
+        END,
+        t.created_at DESC
+    LIMIT 1;
+    
+    -- Approve the membership application
+    UPDATE tbl_membership_application 
+    SET 
+        status = 'Approved',
+        reviewed_at = NOW(),
+        reviewed_by = v_reviewer_user_id,
+        remarks = p_remarks
+    WHERE application_id = p_application_id;
+    
+    -- Update transaction status if exists
+    IF v_transaction_id IS NOT NULL THEN
+        UPDATE tbl_transaction 
+        SET status = CASE 
+            WHEN status = 'Pending' THEN 'Completed'
+            WHEN status = 'Paid' THEN 'Completed'
+            ELSE status 
+        END
+        WHERE transaction_id = v_transaction_id;
+    END IF;
+    
+    -- Check if user exists
+    SELECT COUNT(*) INTO v_user_exists
+    FROM tbl_user 
+    WHERE user_id = v_user_id;
+    
+    IF v_user_exists = 0 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'User not found';
+    END IF;
+    
+    -- Check if member already exists (either active or archived)
+    SELECT COUNT(*) INTO v_member_exists
+    FROM tbl_organization_members 
+    WHERE user_id = v_user_id 
+    AND organization_id = v_organization_id 
+    AND cycle_number = v_cycle_number
+    AND status = 'Active';
+    
+    IF v_member_exists > 0 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'User is already an active member of this organization';
+    END IF;
+    
+    -- Check if there's an archived member that can be reactivated
+    SELECT member_id INTO v_new_member_id
+    FROM tbl_organization_members 
+    WHERE user_id = v_user_id 
+    AND organization_id = v_organization_id 
+    AND cycle_number = v_cycle_number
+    AND status = 'Archived'
+    LIMIT 1;
+    
+    IF v_new_member_id IS NOT NULL THEN
+        -- Set flag that we're reactivating an archived member
+        SET v_is_reactivating = TRUE;
+        
+        -- Reactivate existing archived member
+        UPDATE tbl_organization_members 
+        SET 
+            status = 'Active',
+            joined_at = NOW(),
+            org_version_id = v_org_version_id
+        WHERE member_id = v_new_member_id;
+        
+    ELSE
+        -- Create new organization member
+        INSERT INTO tbl_organization_members (
+            user_id, 
+            organization_id, 
+            cycle_number, 
+            org_version_id,
+            member_type,
+            status,
+            joined_at
+        ) VALUES (
+            v_user_id, 
+            v_organization_id, 
+            v_cycle_number, 
+            v_org_version_id,
+            'Member',
+            'Active',
+            NOW()
+        );
+        
+        -- Get the newly created member ID
+        SET v_new_member_id = LAST_INSERT_ID();
+    END IF;
+    
+    COMMIT;
+    
+    -- Return approved application details
+    SELECT
+        ma.application_id as id,
+        ma.organization_id,
+        ma.cycle_number,
+        ma.user_id,
+        CONCAT(u.f_name, ' ', u.l_name) AS name,
+        u.email,
+        u.profile_picture,
+        'Member' AS member_type, -- Default member type since it's a membership application
+        ma.status AS status,
+        ma.application_id,
+        ma.status AS application_status,
+        ma.applied_at,
+        ma.reviewed_by,
+        ma.reviewed_at,
+        org.membership_fee_type,
+        org.membership_fee_amount,
+        latest_transaction.transaction_id,
+        latest_transaction.amount AS paid_amount,
+        latest_transaction.status AS payment_status,
+        latest_transaction.proof_image,
+        -- Application responses as JSON array
+        (
+            SELECT JSON_ARRAYAGG(
+                JSON_OBJECT(
+                    'response_id', mr.response_id,
+                    'question_id', mr.question_id,
+                    'question_text', mq.question_text,
+                    'question_type', mq.question_type,
+                    'response_value', mr.response_value,
+                    'is_required', mq.is_required
+                )
+            )
+            FROM tbl_membership_response mr
+            JOIN tbl_membership_question mq ON mr.question_id = mq.question_id
+            WHERE mr.application_id = ma.application_id
+        ) AS application_responses
+    FROM tbl_membership_application ma
+    JOIN tbl_user u ON ma.user_id = u.user_id
+    LEFT JOIN tbl_organization org ON ma.organization_id = org.organization_id
+    LEFT JOIN (
+        -- Subquery to get the latest MEMBERSHIP transaction per user for this organization/cycle
+        SELECT 
+            tm.organization_id,
+            tm.cycle_number,
+            t.user_id,
+            t.transaction_id,
+            t.amount,
+            t.status,
+            t.proof_image,
+            ROW_NUMBER() OVER (
+                PARTITION BY tm.organization_id, tm.cycle_number, t.user_id 
+                ORDER BY 
+                    CASE t.status 
+                        WHEN 'Completed' THEN 1 
+                        WHEN 'Pending' THEN 2 
+                        ELSE 3 
+                    END,
+                    t.created_at DESC
+            ) as rn
+        FROM tbl_transaction_membership tm
+        JOIN tbl_transaction t ON tm.transaction_id = t.transaction_id
+        JOIN tbl_transaction_type tt ON t.transaction_type_id = tt.transaction_type_id
+        JOIN tbl_financial_category fc ON t.category_id = fc.category_id
+        WHERE tt.code = 'INCOME'
+          AND fc.code = 'MEMBERSHIP'  -- Only get transactions with MEMBERSHIP category
+          AND t.status IN ('Pending', 'Completed')
+          AND tm.organization_id = v_organization_id
+          AND tm.cycle_number = v_cycle_number
+    ) latest_transaction 
+        ON latest_transaction.organization_id = ma.organization_id
+        AND latest_transaction.cycle_number = ma.cycle_number
+        AND latest_transaction.user_id = ma.user_id
+        AND latest_transaction.rn = 1
+    WHERE ma.application_id = p_application_id;
+    
+    -- Return transaction details if exists
+    IF v_transaction_id IS NOT NULL THEN
+        CALL GetTransaction(v_transaction_id);
+    ELSE
+        -- Return empty result set if no transaction
+        SELECT NULL as transaction_id WHERE FALSE;
+    END IF;
+    
+    -- Return new member details using the LAST_INSERT_ID
+    SELECT 
+        om.member_id as id,
+        u.f_name as first_name,
+        u.l_name as last_name,
+        u.email,
+        om.member_type,
+        om.status,
+        om.joined_at,
+        om.organization_id,
+        om.cycle_number,
+        om.org_version_id as organization_version_id
+    FROM tbl_organization_members om
+    JOIN tbl_user u ON om.user_id = u.user_id
+    WHERE om.member_id = v_new_member_id;
+    
+    -- Return archived members for SSE publishing (only when reactivating)
+    SELECT 
+        aom.archived_id as id,
+        u.f_name as first_name,
+        u.l_name as last_name,
+        u.email,
+        aom.member_type,
+        aom.archived_at,
+        aom.archived_by,
+        aom.committee_role,
+        aom.executive_role_id,
+        aom.committee_id
+    FROM tbl_archived_organization_members aom
+    JOIN tbl_user u ON aom.user_id = u.user_id
+    WHERE v_is_reactivating = TRUE
+        AND aom.organization_id = v_organization_id
+        AND aom.cycle_number = v_cycle_number
+        AND aom.user_id = v_user_id
+    ORDER BY aom.archived_at DESC;
+    
+    -- Remove from archived table after selection (only if reactivating)
+    IF v_is_reactivating = TRUE THEN
+        DELETE FROM tbl_archived_organization_members
+        WHERE organization_id = v_organization_id
+        AND cycle_number = v_cycle_number
+        AND user_id = v_user_id;
+    END IF;
+    
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE ProcessMembershipRejection(
+    IN p_application_id INT,
+    IN p_reviewer_email VARCHAR(255),
+    IN p_remarks TEXT
+)
+BEGIN
+    DECLARE v_user_id VARCHAR(200);
+    DECLARE v_organization_id INT;
+    DECLARE v_cycle_number INT;
+    DECLARE v_transaction_id INT DEFAULT NULL;
+    DECLARE v_application_status VARCHAR(50);
+    DECLARE v_reviewer_user_id VARCHAR(200);
+    
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        RESIGNAL;
+    END;
+    
+    START TRANSACTION;
+    
+    -- Check if application exists and get details
+    SELECT user_id, organization_id, cycle_number, status
+    INTO v_user_id, v_organization_id, v_cycle_number, v_application_status
+    FROM tbl_membership_application 
+    WHERE application_id = p_application_id;
+    
+    -- Check if application was found
+    IF v_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Application not found';
+    END IF;
+    
+    IF v_application_status != 'Pending' THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Application is not pending';
+    END IF;
+    
+    -- Get reviewer user_id from email
+    SELECT user_id INTO v_reviewer_user_id
+    FROM tbl_user 
+    WHERE email = p_reviewer_email
+    LIMIT 1;
+    
+    IF v_reviewer_user_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Reviewer not found';
+    END IF;
+    
+    -- Check for existing transaction for this user and organization/cycle
+    SELECT t.transaction_id INTO v_transaction_id
+    FROM tbl_transaction t
+    JOIN tbl_transaction_membership tm ON t.transaction_id = tm.transaction_id
+    WHERE t.user_id = v_user_id 
+    AND tm.organization_id = v_organization_id 
+    AND tm.cycle_number = v_cycle_number
+    AND t.status IN ('Pending', 'Paid')
+    ORDER BY 
+        CASE t.status 
+            WHEN 'Paid' THEN 1 
+            WHEN 'Pending' THEN 2 
+        END,
+        t.created_at DESC
+    LIMIT 1;
+    
+    -- Reject the membership application
+    UPDATE tbl_membership_application 
+    SET 
+        status = 'Rejected',
+        reviewed_at = NOW(),
+        reviewed_by = v_reviewer_user_id,
+        remarks = p_remarks
+    WHERE application_id = p_application_id;
+    
+    -- Update transaction status to Failed if exists
+    IF v_transaction_id IS NOT NULL THEN
+        UPDATE tbl_transaction 
+        SET status = 'Failed'
+        WHERE transaction_id = v_transaction_id;
+    END IF;
+    
+    COMMIT;
+    
+    -- Return rejected application details
+    SELECT
+        ma.application_id as id,
+        ma.organization_id,
+        ma.cycle_number,
+        ma.user_id,
+        CONCAT(u.f_name, ' ', u.l_name) AS name,
+        u.email,
+        u.profile_picture,
+        'Member' AS member_type, -- Default member type since it's a membership application
+        ma.status AS status,
+        ma.application_id,
+        ma.status AS application_status,
+        ma.applied_at,
+        ma.reviewed_by,
+        ma.reviewed_at,
+        ma.remarks,
+        org.membership_fee_type,
+        org.membership_fee_amount,
+        latest_transaction.transaction_id,
+        latest_transaction.amount AS paid_amount,
+        latest_transaction.status AS payment_status,
+        latest_transaction.proof_image,
+        -- Application responses as JSON array
+        (
+            SELECT JSON_ARRAYAGG(
+                JSON_OBJECT(
+                    'response_id', mr.response_id,
+                    'question_id', mr.question_id,
+                    'question_text', mq.question_text,
+                    'question_type', mq.question_type,
+                    'response_value', mr.response_value,
+                    'is_required', mq.is_required
+                )
+            )
+            FROM tbl_membership_response mr
+            JOIN tbl_membership_question mq ON mr.question_id = mq.question_id
+            WHERE mr.application_id = ma.application_id
+        ) AS application_responses
+    FROM tbl_membership_application ma
+    JOIN tbl_user u ON ma.user_id = u.user_id
+    LEFT JOIN tbl_organization org ON ma.organization_id = org.organization_id
+    LEFT JOIN (
+        -- Subquery to get the latest MEMBERSHIP transaction per user for this organization/cycle
+        SELECT 
+            tm.organization_id,
+            tm.cycle_number,
+            t.user_id,
+            t.transaction_id,
+            t.amount,
+            t.status,
+            t.proof_image,
+            ROW_NUMBER() OVER (
+                PARTITION BY tm.organization_id, tm.cycle_number, t.user_id 
+                ORDER BY 
+                    CASE t.status 
+                        WHEN 'Failed' THEN 1 
+                        WHEN 'Pending' THEN 2 
+                        ELSE 3 
+                    END,
+                    t.created_at DESC
+            ) as rn
+        FROM tbl_transaction_membership tm
+        JOIN tbl_transaction t ON tm.transaction_id = t.transaction_id
+        JOIN tbl_transaction_type tt ON t.transaction_type_id = tt.transaction_type_id
+        JOIN tbl_financial_category fc ON t.category_id = fc.category_id
+        WHERE tt.code = 'INCOME'
+          AND fc.code = 'MEMBERSHIP'  -- Only get transactions with MEMBERSHIP category
+          AND t.status IN ('Pending', 'Failed')
+          AND tm.organization_id = v_organization_id
+          AND tm.cycle_number = v_cycle_number
+    ) latest_transaction 
+        ON latest_transaction.organization_id = ma.organization_id
+        AND latest_transaction.cycle_number = ma.cycle_number
+        AND latest_transaction.user_id = ma.user_id
+        AND latest_transaction.rn = 1
+    WHERE ma.application_id = p_application_id;
+    
+    -- Return transaction details if exists
+    IF v_transaction_id IS NOT NULL THEN
+        CALL GetTransaction(v_transaction_id);
+    ELSE
+        -- Return empty result set if no transaction
+        SELECT NULL as transaction_id WHERE FALSE;
+    END IF;
+    
+END $$
 DELIMITER ;
 
 
