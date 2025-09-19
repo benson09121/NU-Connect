@@ -2507,8 +2507,8 @@ BEGIN
         (
             SELECT JSON_ARRAYAGG(
                 JSON_OBJECT(
-                    'first_name', attendee_user.f_name,
-                    'last_name', attendee_user.l_name
+                    'first_name', random_attendees.f_name,
+                    'last_name', random_attendees.l_name
                 )
             )
             FROM (
