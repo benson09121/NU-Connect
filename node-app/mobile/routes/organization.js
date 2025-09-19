@@ -10,6 +10,7 @@ router.get('/profile/organization', middleware.authMiddleware, organizationContr
 router.get('/organization/question', middleware.authMiddleware, organizationController.getOrganizationQuestion);
 router.post('/organization-application/submit', middleware.authMiddleware, organizationController.submitOrganizationApplication);
 router.get('/organization/leave', middleware.authMiddleware, organizationController.leaveOrganization);
+router.get('/organization/leave-check', middleware.authMiddleware, organizationController.checkLeaveStatus);
 router.get('/organization/logo', organizationController.getOrganizationLogo);
 router.get('/organization/getTransactions', middleware.authMiddleware, organizationController.getUserTransactions);
 module.exports = router;

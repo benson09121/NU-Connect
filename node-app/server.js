@@ -34,7 +34,7 @@ const authRoutes = require('./mobile/routes/auth');
 const facebookRoutes = require('./mobile/routes/facebook');
 const eventRoutes = require('./mobile/routes/events');
 const organizationRoutes = require('./mobile/routes/organization');
-
+const notification = require('./mobile/routes/notification');
 
 // Import Routes on Web
 const authRoutesWeb = require('./web/routes/auth');
@@ -54,13 +54,14 @@ const publicRoutes = require('./web/routes/public');
 const analytics = require('./web/routes/analytics');
 const novaRoutes = require('./web/routes/nova');
 
+
 // Routes on Mobile
 app.use('/', indexRoutes);
 app.use('/api/mobile', authRoutes);
 app.use('/api/mobile', facebookRoutes);
 app.use('/api/mobile', eventRoutes);
 app.use('/api/mobile', organizationRoutes);
-
+app.use('/api/mobile', notification);
 // Routes on Web
 app.use('/api/web', authRoutesWeb);
 app.use('/api/web', permissionRoutesWeb);

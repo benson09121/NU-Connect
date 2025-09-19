@@ -30,7 +30,9 @@ function getContentType(filename) {
 
 async function getEvents(req, res) {
     try {
-        const events = await eventModel.getAllEvents(req.user.organizations);
+        const user = await userModel.getPermissions(req.user.email);
+        console.log(user.user_info.organizations);
+        const events = await eventModel.getAllEvents(user.user_info.organizations);
         res.json(events);
     } catch (error) {
         res.status(500).json({ message: error.message });
@@ -393,6 +395,72 @@ async function getEventPublicationImage(req, res) {
   }
 }
 
+async function getQRPermission(req, res) {
+    try {
+        const user = await userModel.getPermissions(req.user.email);
+        const userInfo = user?.user_info;
+        
+        if (!userInfo) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        const permissions = userInfo.permissions || [];
+        const organizations = userInfo.organizations || [];
+        
+        // Get user's organization IDs
+        const userOrgIds = organizations.map(org => org.organization_id);
+        
+        // Check for SCAN_QR permission
+        const hasScanQRPermission = permissions.some(permission => {
+            // Handle simple string permissions (global permissions)
+            if (typeof permission === 'string' && permission === 'SCAN_QR') {
+                return true;
+            }
+            
+            // Handle JSON string permissions (organization-scoped permissions)
+            if (typeof permission === 'string' && permission.startsWith('{')) {
+                try {
+                    const parsedPerm = JSON.parse(permission);
+                    
+                    // Check if this is a SCAN_QR permission
+                    if (parsedPerm.permission === 'SCAN_QR') {
+                        // Parse the organization_ids array
+                        const allowedOrgIds = JSON.parse(parsedPerm.organization_ids);
+                        
+                        // Check if user belongs to any of the allowed organizations
+                        const hasMatchingOrg = allowedOrgIds.some(orgId => 
+                            userOrgIds.includes(orgId)
+                        );
+                        
+                        return hasMatchingOrg;
+                    }
+                } catch (parseError) {
+                    console.error('Error parsing permission:', parseError);
+                    return false;
+                }
+            }
+            
+            return false;
+        });
+
+        if (hasScanQRPermission) {
+            res.status(200).json({ 
+                permission: 'allowed',
+                message: 'User has SCAN_QR permission for their organizations'
+            });
+        } else {
+            res.status(403).json({ 
+                permission: 'denied',
+                message: 'User does not have SCAN_QR permission for any of their organizations'
+            });
+        }
+        
+    } catch (error) {
+        console.error('getQRPermission error:', error);
+        res.status(500).json({ message: error.message });
+    }
+}
+
 module.exports = {
     getEvents,
     registerEvent,
@@ -406,5 +474,6 @@ module.exports = {
     getAllEventCertificates,
     scanTicket,
     getEventPublicationImage,
-    unregisterEvent
+    unregisterEvent,
+    getQRPermission
 };

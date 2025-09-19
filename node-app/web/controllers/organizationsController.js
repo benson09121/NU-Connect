@@ -776,11 +776,11 @@ async function getOrganizationEventApplications(req, res) {
 async function getEventRequirementSubmissionsByOrganization(req, res) {
     try {
         let organization_id = parseInt(req.query.organization_id);
-        const org_name = req.query.org_name;
+        let organization_version_id = parseInt(req.query.organization_version_id);  
 
         // If org_name is provided, look up organization_id using the model function
-        if (!organization_id && org_name) {
-            organization_id = await organizationsModel.getOrganizationIdByName(org_name);
+        if (!organization_id && organization_version_id) {
+            organization_id = await organizationsModel.getOrganizationIdById(organization_id, organization_version_id);
             if (!organization_id) {
                 return res.status(404).json({ message: 'Organization not found.' });
             }
@@ -1901,6 +1901,21 @@ async function removeMemberPermissionOverride(req, res) {
     }
 }
 
+async function getLeaveApplications(req, res) {
+    try {
+        const { organization_id, organization_version_id, sessionId } = req.query;
+        console.log('Fetching leave applications for organization_id:', organization_id, 'organization_version_id:', organization_version_id);
+        const leaves = await organizationsModel.getLeaveApplications(organization_id, organization_version_id);
+        if (sessionId) {
+            subscribeToChannel(sessionId, `leave_organization_${organization_id}_${organization_version_id}`);
+        }
+        res.json(leaves);
+    } catch (error) {
+    res.status(500).json({
+        error: error.message || "An error occurred while fetching leave applications.",
+    });
+        }
+}
 
 module.exports = {
     getOrganizations,
@@ -1963,5 +1978,6 @@ module.exports = {
     updateMemberPermissionOverride,
     removeMemberPermissionOverride,
     getArchivedOrganizationMembers,
-    unarchiveOrganizationMember
+    unarchiveOrganizationMember,
+    getLeaveApplications
 };

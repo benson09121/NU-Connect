@@ -177,12 +177,9 @@ async function leaveOrganization(req, res) {
     try {
         
         const user = await userModel.getUser(req.user.email);
-        const { organization_id } = req.query;
-        const result = await organizationModel.leaveOrganization(organization_id, user.user_id);
-        publishToChannel(`user_organizations_${user.user_id}`, {
-            operation: 'DELETE',
-            data: result,
-        });
+        const { organization_id, organization_version_id, leave_reason } = req.query;
+        const result = await organizationModel.leaveOrganization(organization_id, organization_version_id, user.user_id, leave_reason);
+        res.status(200).json({ message: "Leave application submitted successfully"});
     } catch (error) {
         console.error('Error leaving organization:', error);
         res.status(500).json({ message: error.message });
@@ -216,6 +213,17 @@ async function getUserTransactions(req, res) {
     }
 }
 
+async function checkLeaveStatus(req, res) {
+    try {
+        const {organization_id, organization_version_id} = req.query;
+        const user = await userModel.getUser(req.user.email);
+        const leaveStatus = await organizationModel.checkLeaveStatus(organization_id, organization_version_id,user.user_id);
+        res.json(leaveStatus);
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+}
+
 module.exports = {
     getOrganizations,
     getUserOrganization,
@@ -224,5 +232,6 @@ module.exports = {
     submitOrganizationApplication,
     getOrganizationLogo,
     leaveOrganization,
-    getUserTransactions
+    getUserTransactions,
+    checkLeaveStatus
 };
