@@ -135,6 +135,17 @@ router.post(
 );
 
 router.post(
+    '/approve-leave-application',
+    middleware.validateAzureJWT,
+    organizationsController.approveLeaveApplication
+);
+router.post(
+    '/reject-leave-application',
+    middleware.validateAzureJWT,
+    organizationsController.rejectLeaveApplication
+);
+
+router.post(
     '/add-organization-member',
     middleware.validateAzureJWT,
     middleware.hasPermission("CREATE_COMMITTEE"),

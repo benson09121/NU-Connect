@@ -174,6 +174,12 @@ async function leaveOrganization(req, res) {
         const user = await userModel.getUser(req.user.email);
         const { organization_id, organization_version_id, leave_reason } = req.query;
         const result = await organizationModel.leaveOrganization(organization_id, organization_version_id, user.user_id, leave_reason);
+        publishToChannel(`leave_organization_${organization_id}_${organization_version_id}`,
+            {
+                operation: 'CREATE',
+                data: result,
+            }
+        );
         res.status(200).json({ message: "Leave application submitted successfully"});
     } catch (error) {
         console.error('Error leaving organization:', error);
