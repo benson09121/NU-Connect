@@ -40,12 +40,13 @@ async function getOrganizationFee(org_id) {
         connection.release();
     }
 }
-async function submitOrganizationApplication(org_id, user_id, question_id, answer) {
+
+async function submitOrganizationApplication(org_id, organization_version_id, user_id, answers) {
     const connection = await pool.getConnection();
     try {
         const [rows] = await connection.query(
             'CALL ApplyForMembership(?, ?, ?, ?);', 
-            [org_id, user_id, question_id, answer]
+            [org_id, organization_version_id, user_id, JSON.stringify(answers)]
         );
         return rows[0];
     } finally {

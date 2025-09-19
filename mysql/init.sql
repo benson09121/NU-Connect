@@ -8453,33 +8453,49 @@ BEGIN
     SELECT membership_fee_amount AS membership_fee FROM tbl_organization WHERE organization_id = p_organization_id;  
 END $$
 DELIMITER ;
-
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE ApplyForMembership(
     IN p_org_id INT,
+    IN p_organization_version_id INT,
     IN p_user_id VARCHAR(200),
-    IN p_question_id INT,
-    IN p_response_value TEXT
+    IN p_answers JSON  -- All answers as JSON array
 )
 BEGIN
     DECLARE v_cycle_number INT;
     DECLARE v_application_id INT;
     DECLARE v_member_id INT;
+    DECLARE v_answer_count INT DEFAULT 0;
+    DECLARE v_current_answer JSON;
+    DECLARE v_question_id INT;
+    DECLARE v_answer_text TEXT;
     
-    -- Get current renewal cycle
-    SELECT MAX(cycle_number) INTO v_cycle_number
-    FROM tbl_renewal_cycle 
-    WHERE organization_id = p_org_id;
+    -- Get the cycle number using organization_version_id
+    SELECT cycle_number INTO v_cycle_number
+    FROM tbl_renewal_cycle
+    WHERE organization_id = p_org_id 
+    AND org_version_id = p_organization_version_id;
     
     IF v_cycle_number IS NULL THEN
-        SIGNAL SQLSTATE '45000' 
-        SET MESSAGE_TEXT = 'No active renewal cycle found for organization';
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'No renewal cycle found for this organization version';
+    END IF;
+    
+    -- Check if user already has a pending application
+    IF EXISTS (
+        SELECT 1 FROM tbl_membership_application 
+        WHERE organization_id = p_org_id 
+        AND cycle_number = v_cycle_number 
+        AND user_id = p_user_id 
+        AND status = 'Pending'
+    ) THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'User already has a pending membership application';
     END IF;
 
     -- Start transaction
     START TRANSACTION;
     
-    -- Create membership application (upsert)
+    -- Create membership application (single application)
     INSERT INTO tbl_membership_application (
         organization_id, 
         cycle_number, 
@@ -8491,32 +8507,37 @@ BEGIN
         v_cycle_number,
         p_user_id,
         'Pending'
-    )
-    ON DUPLICATE KEY UPDATE
-        status = 'Pending',
-        applied_at = CURRENT_TIMESTAMP;
+    );
     
     SET v_application_id = LAST_INSERT_ID();
     
-    -- Store custom question response (upsert)
-    INSERT INTO tbl_membership_response (
-        application_id,
-        question_id,
-        response_value
-    )
-    VALUES (
-        v_application_id,
-        p_question_id,
-        p_response_value
-    )
-    ON DUPLICATE KEY UPDATE
-        response_value = p_response_value;
+    -- Process each answer in the JSON array
+    SET v_answer_count = JSON_LENGTH(p_answers);
     
-    -- Create organization member record (UPSERT)
+    WHILE v_answer_count > 0 DO
+        SET v_answer_count = v_answer_count - 1;
+        SET v_current_answer = JSON_EXTRACT(p_answers, CONCAT('$[', v_answer_count, ']'));
+        SET v_question_id = JSON_UNQUOTE(JSON_EXTRACT(v_current_answer, '$.question_id'));
+        SET v_answer_text = JSON_UNQUOTE(JSON_EXTRACT(v_current_answer, '$.answer'));
+        
+        -- Insert each response linked to the same application
+        INSERT INTO tbl_membership_response (
+            application_id,
+            question_id,
+            response_value
+        ) VALUES (
+            v_application_id,
+            v_question_id,
+            v_answer_text
+        );
+    END WHILE;
+    
+    -- Create organization member record (single member record)
     INSERT INTO tbl_organization_members (
         organization_id,
         cycle_number,
         user_id,
+        org_version_id,
         member_type,
         status,
         joined_at
@@ -8525,6 +8546,7 @@ BEGIN
         p_org_id,
         v_cycle_number,
         p_user_id,
+        p_organization_version_id,
         'Member',
         'Pending',
         CURRENT_TIMESTAMP
@@ -8532,7 +8554,8 @@ BEGIN
     ON DUPLICATE KEY UPDATE
         member_type = 'Member',
         status = 'Pending',
-        joined_at = CURRENT_TIMESTAMP;
+        joined_at = CURRENT_TIMESTAMP,
+        org_version_id = p_organization_version_id;
     
     -- Get the member_id (works for both INSERT and UPDATE)
     SELECT member_id INTO v_member_id
