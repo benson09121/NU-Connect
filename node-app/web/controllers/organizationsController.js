@@ -1917,6 +1917,204 @@ async function getLeaveApplications(req, res) {
         }
 }
 
+// Membership Questions controller functions
+async function getMembershipQuestions(req, res) {
+    try {
+        const { organization_id, cycle_number, sessionId } = req.query;
+        
+        if (!organization_id || !cycle_number) {
+            return res.status(400).json({
+                error: 'organization_id and cycle_number are required parameters'
+            });
+        }
+
+        const questions = await organizationsModel.getMembershipQuestions(organization_id, cycle_number);
+        
+        if (sessionId) {
+            publishToChannel(`organizations:${sessionId}`, {
+                action: 'MEMBERSHIP_QUESTIONS_FETCHED',
+                data: questions
+            });
+        }
+        
+        res.status(200).json(questions);
+    } catch (error) {
+        console.error('Error fetching membership questions:', error);
+        res.status(500).json({
+            error: error.message || 'An error occurred while fetching membership questions'
+        });
+    }
+}
+
+async function createMembershipQuestion(req, res) {
+    try {
+        const { organization_id, cycle_number, question_text, question_type = 'text', is_required = true, options, sessionId } = req.body;
+        
+        if (!organization_id || !cycle_number || !question_text) {
+            return res.status(400).json({
+                error: 'organization_id, cycle_number, and question_text are required'
+            });
+        }
+
+        const result = await organizationsModel.createMembershipQuestion(
+            organization_id, 
+            cycle_number, 
+            question_text, 
+            question_type, 
+            is_required, 
+            options
+        );
+        
+        if (sessionId) {
+            publishToChannel(`organizations:${sessionId}`, {
+                action: 'MEMBERSHIP_QUESTION_CREATED',
+                data: result
+            });
+        }
+        
+        res.status(201).json(result);
+    } catch (error) {
+        console.error('Error creating membership question:', error);
+        res.status(500).json({
+            error: error.message || 'An error occurred while creating membership question'
+        });
+    }
+}
+
+async function updateMembershipQuestion(req, res) {
+    try {
+        const { question_id, question_text, question_type, is_required, options, sessionId } = req.body;
+        
+        if (!question_id || !question_text) {
+            return res.status(400).json({
+                error: 'question_id and question_text are required'
+            });
+        }
+
+        const result = await organizationsModel.updateMembershipQuestion(
+            question_id, 
+            question_text, 
+            question_type, 
+            is_required, 
+            options
+        );
+        
+        if (!result.success) {
+            return res.status(404).json({
+                error: 'Membership question not found or could not be updated'
+            });
+        }
+        
+        if (sessionId) {
+            publishToChannel(`organizations:${sessionId}`, {
+                action: 'MEMBERSHIP_QUESTION_UPDATED',
+                data: result
+            });
+        }
+        
+        res.status(200).json(result);
+    } catch (error) {
+        console.error('Error updating membership question:', error);
+        res.status(500).json({
+            error: error.message || 'An error occurred while updating membership question'
+        });
+    }
+}
+
+async function deleteMembershipQuestion(req, res) {
+    try {
+        const { question_id, sessionId } = req.body;
+        
+        if (!question_id) {
+            return res.status(400).json({
+                error: 'question_id is required'
+            });
+        }
+
+        const result = await organizationsModel.deleteMembershipQuestion(question_id);
+        
+        if (!result.success) {
+            return res.status(404).json({
+                error: 'Membership question not found or could not be deleted'
+            });
+        }
+        
+        if (sessionId) {
+            publishToChannel(`organizations:${sessionId}`, {
+                action: 'MEMBERSHIP_QUESTION_DELETED',
+                data: { question_id }
+            });
+        }
+        
+        res.status(200).json(result);
+    } catch (error) {
+        console.error('Error deleting membership question:', error);
+        res.status(500).json({
+            error: error.message || 'An error occurred while deleting membership question'
+        });
+    }
+}
+
+async function getMembershipResponses(req, res) {
+    try {
+        const { application_id, sessionId } = req.query;
+        
+        if (!application_id) {
+            return res.status(400).json({
+                error: 'application_id is required'
+            });
+        }
+
+        const responses = await organizationsModel.getMembershipResponses(application_id);
+        
+        if (sessionId) {
+            publishToChannel(`organizations:${sessionId}`, {
+                action: 'MEMBERSHIP_RESPONSES_FETCHED',
+                data: responses
+            });
+        }
+        
+        res.status(200).json(responses);
+    } catch (error) {
+        console.error('Error fetching membership responses:', error);
+        res.status(500).json({
+            error: error.message || 'An error occurred while fetching membership responses'
+        });
+    }
+}
+
+async function createMembershipResponse(req, res) {
+    try {
+        const { application_id, question_id, response_value, sessionId } = req.body;
+        
+        if (!application_id || !question_id || !response_value) {
+            return res.status(400).json({
+                error: 'application_id, question_id, and response_value are required'
+            });
+        }
+
+        const result = await organizationsModel.createMembershipResponse(
+            application_id, 
+            question_id, 
+            response_value
+        );
+        
+        if (sessionId) {
+            publishToChannel(`organizations:${sessionId}`, {
+                action: 'MEMBERSHIP_RESPONSE_CREATED',
+                data: result
+            });
+        }
+        
+        res.status(201).json(result);
+    } catch (error) {
+        console.error('Error creating membership response:', error);
+        res.status(500).json({
+            error: error.message || 'An error occurred while creating membership response'
+        });
+    }
+}
+
 module.exports = {
     getOrganizations,
     createOrganizationApplication,
@@ -1979,5 +2177,12 @@ module.exports = {
     removeMemberPermissionOverride,
     getArchivedOrganizationMembers,
     unarchiveOrganizationMember,
-    getLeaveApplications
+    getLeaveApplications,
+    // Membership Questions functions
+    getMembershipQuestions,
+    createMembershipQuestion,
+    updateMembershipQuestion,
+    deleteMembershipQuestion,
+    getMembershipResponses,
+    createMembershipResponse
 };
