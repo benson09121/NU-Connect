@@ -5807,8 +5807,6 @@ BEGIN
             ) VALUES 
             (v_new_org_id, v_effective_cycle_number, 'Why do you want to join this organization?', 'text', TRUE, NULL),
             (v_new_org_id, v_effective_cycle_number, 'What skills or experiences can you contribute to the organization?', 'text', TRUE, NULL),
-            (v_new_org_id, v_effective_cycle_number, 'Are you currently a member of other organizations?', 'multiple_choice', TRUE, JSON_ARRAY('Yes', 'No')),
-            (v_new_org_id, v_effective_cycle_number, 'How did you hear about this organization?', 'multiple_choice', FALSE, JSON_ARRAY('Friend/Colleague', 'Social Media', 'Website', 'Event/Presentation', 'Other')),
             (v_new_org_id, v_effective_cycle_number, 'What are your expectations from this organization?', 'text', FALSE, NULL);
         END IF;
 
