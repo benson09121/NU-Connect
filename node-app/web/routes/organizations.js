@@ -281,5 +281,6 @@ router.put(
     organizationsController.updateExecutivePermissions
 );
 
+router.get('/leave-application',organizationsController.getLeaveApplications);
 
 module.exports = router;

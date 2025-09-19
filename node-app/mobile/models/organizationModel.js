@@ -79,13 +79,35 @@ async function getUserTransactions(user_id) {
     }
 }
 
+async function leaveOrganization(organization_id, organization_version_id , user_id,leave_reason = null) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL CreateLeaveApplication(?, ?, ?, ?);', [organization_id, organization_version_id, user_id, leave_reason]);
+        return rows[0];
+    } finally {
+        connection.release();
+    }
+}
+
+async function checkLeaveStatus(organization_id, organization_version_id , user_id) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL CheckPendingLeaveStatus(?, ?, ?);', [organization_id, organization_version_id, user_id]);
+        return rows[0];
+    } finally {
+        connection.release();
+    }
+}
+
 module.exports = {
     getOrganizations,
     getUserOrganization,
     getOrganizationQuestion,
     getOrganizationFee,
+    checkLeaveStatus,
     submitOrganizationApplication,
     createMembershipTransaction,
     getUserTransactions,
+    leaveOrganization
 };
 

@@ -99,4 +99,20 @@ async function login(req, res) {
     }
 }
 
-module.exports = { register, login };
+async function getUser(req,res){
+    const email = req.user.email;
+    const sessionId = req.query.sessionId;
+    try {
+        const user = await userModel.getUserByEmail(email);
+        if (sessionId) {
+            subscribeToChannel(sessionId, `users:${email}`);
+        }
+        res.status(200).json(user);
+    } catch (error) {
+        res.status(500).json({
+            error: error.message || "An error occurred while fetching the user.",
+        });
+    }
+}
+
+module.exports = { register, login, getUser };
