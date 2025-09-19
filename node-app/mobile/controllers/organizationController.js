@@ -41,6 +41,7 @@ async function getOrganizationFee(req, res) {
         res.status(500).json({ message: error.message });
     }
 }
+
 async function submitOrganizationApplication(req, res) {
     console.log('Request body:', req.body);
     console.log('Request files:', req.files);
@@ -137,20 +138,15 @@ async function submitOrganizationApplication(req, res) {
             }
         }
 
-        // Apply for membership - handle multiple answers
-        let membershipResult;
+        // Apply for membership - create one application with all answers
+        const membershipResult = await organizationModel.submitOrganizationApplication(
+            org_id, 
+            organization_version_id,
+            user.user_id, 
+            answers  // Pass all answers at once
+        );
         
-        // Process each answer (question/response pair)
-        for (let i = 0; i < answers.length; i++) {
-            const answer = answers[i];
-            membershipResult = await organizationModel.submitOrganizationApplication(
-                org_id, 
-                user.user_id, 
-                answer.question_id, 
-                answer.answer
-            );
-            console.log(`Membership application result for question ${answer.question_id}:`, membershipResult);
-        }
+        console.log('Membership application result:', membershipResult);
         
         publishToChannel(`pending_organization_members_${org_id}_${organization_version_id}`, {
             operation: 'CREATE',
@@ -171,7 +167,6 @@ async function submitOrganizationApplication(req, res) {
         res.status(500).json({ message: error.message });
     }
 }
-
 
 async function leaveOrganization(req, res) {
     try {
