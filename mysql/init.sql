@@ -768,7 +768,7 @@ CREATE TABLE tbl_transaction (
     transaction_type_id INT NOT NULL,
     payment_type_id INT NOT NULL,
     category_id INT NULL,
-    status ENUM('Pending', 'Completed', 'Failed') DEFAULT 'Pending',
+    status ENUM('Pending', 'Completed', 'Failed', 'Cancelled') DEFAULT 'Pending',
     transaction_date DATETIME NOT NULL,
     receipt_no VARCHAR(100) NULL,
     proof_image VARCHAR(500) DEFAULT NULL,
@@ -796,6 +796,7 @@ CREATE TABLE tbl_event_attendance (
     time_in DATETIME DEFAULT NULL,
     time_out DATETIME DEFAULT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     deleted_at DATETIME DEFAULT NULL,
     FOREIGN KEY (transaction_id) REFERENCES tbl_transaction(transaction_id) ON DELETE SET NULL,  -- Fixed: changed from tbl_event_transaction to tbl_transaction
     FOREIGN KEY (event_id) REFERENCES tbl_event(event_id) ON DELETE CASCADE,
@@ -2087,24 +2088,47 @@ BEGIN
 
     SET v_status = COALESCE(p_status, 'Registered');
 
-    -- Insert new attendance (prevent duplicate active rows)
+    -- Insert new attendance or update existing rejected/completed registration
     IF NOT EXISTS (
         SELECT 1
         FROM tbl_event_attendance
         WHERE event_id = p_event_id
           AND user_id  = p_user_id
+          AND status IN ('Registered', 'Pending')  -- Only prevent if actively registered
           AND deleted_at IS NULL
     ) THEN
-        INSERT INTO tbl_event_attendance (event_id, user_id, status, transaction_id)
-        VALUES (p_event_id, p_user_id, v_status, p_transaction_id);
+        -- Check if there's an existing record (could be rejected/completed)
+        IF EXISTS (
+            SELECT 1
+            FROM tbl_event_attendance
+            WHERE event_id = p_event_id
+              AND user_id = p_user_id
+              AND deleted_at IS NULL
+        ) THEN
+            -- Update existing record (re-registration after rejection)
+            UPDATE tbl_event_attendance
+            SET status = v_status,
+                transaction_id = p_transaction_id,
+                time_in = NULL,
+                time_out = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE event_id = p_event_id
+              AND user_id = p_user_id
+              AND deleted_at IS NULL;
+        ELSE
+            -- Insert new record
+            INSERT INTO tbl_event_attendance (event_id, user_id, status, transaction_id)
+            VALUES (p_event_id, p_user_id, v_status, p_transaction_id);
+        END IF;
     ELSE
-        -- Update existing (only overwrite transaction_id if provided)
+        -- Update existing active registration (only overwrite transaction_id if provided)
         UPDATE tbl_event_attendance
         SET status = v_status,
             transaction_id = CASE 
                 WHEN p_transaction_id IS NOT NULL THEN p_transaction_id 
                 ELSE transaction_id 
-            END
+            END,
+            updated_at = CURRENT_TIMESTAMP
         WHERE event_id = p_event_id
           AND user_id  = p_user_id
           AND deleted_at IS NULL;
@@ -2184,7 +2208,12 @@ CREATE DEFINER='admin'@'%' PROCEDURE CheckEventRegistration(IN
     user_id VARCHAR(200)
 )
 BEGIN
-SELECT * FROM tbl_event_attendance a WHERE a.event_id = event_id AND a.user_id = user_id;
+    -- Only return registration if status is 'Registered' or 'Pending'
+    -- This allows re-registration for 'Rejected' or other statuses
+    SELECT * FROM tbl_event_attendance a 
+    WHERE a.event_id = event_id 
+      AND a.user_id = user_id 
+      AND a.status IN ('Registered', 'Pending');
 END $$
 DELIMITER ;
 
@@ -5955,6 +5984,8 @@ BEGIN
     DECLARE v_attendance_id INT;
     DECLARE v_transaction_id INT;
     DECLARE v_final_remarks VARCHAR(255);
+    DECLARE v_user_email VARCHAR(100);
+    DECLARE v_event_title VARCHAR(300);
 
     -- Set remarks to 'No Remarks' if NULL or empty
     IF p_remarks IS NULL OR LENGTH(TRIM(p_remarks)) = 0 THEN
@@ -5963,10 +5994,17 @@ BEGIN
         SET v_final_remarks = p_remarks;
     END IF;
 
-    -- Find the attendance record
+    -- Get user email and event title for notification
+    SELECT email INTO v_user_email FROM tbl_user WHERE user_id = p_user_id;
+    SELECT title INTO v_event_title FROM tbl_event WHERE event_id = p_event_id;
+
+    -- Find the MOST RECENT attendance record (to handle cases where multiple records exist)
     SELECT attendance_id INTO v_attendance_id
     FROM tbl_event_attendance
-    WHERE event_id = p_event_id AND user_id = p_user_id
+    WHERE event_id = p_event_id 
+      AND user_id = p_user_id 
+      AND deleted_at IS NULL
+    ORDER BY created_at DESC
     LIMIT 1;
 
     IF v_attendance_id IS NULL THEN
@@ -5974,22 +6012,44 @@ BEGIN
         SET MESSAGE_TEXT = 'No registration found for this event and user';
     END IF;
 
-    -- Get transaction ID if exists
+    -- Clean up any duplicate attendance records (keep the most recent one)
+    DELETE FROM tbl_event_attendance 
+    WHERE event_id = p_event_id 
+      AND user_id = p_user_id 
+      AND attendance_id != v_attendance_id
+      AND deleted_at IS NULL;
+
+    -- Get the MOST RECENT transaction ID if exists
     SELECT te.transaction_id INTO v_transaction_id
     FROM tbl_transaction_event te
     JOIN tbl_transaction t ON te.transaction_id = t.transaction_id
-    WHERE te.event_id = p_event_id AND t.user_id = p_user_id
+    WHERE te.event_id = p_event_id 
+      AND t.user_id = p_user_id
+      AND t.status IN ('Pending', 'Processing')  -- Only get pending transactions
+    ORDER BY t.created_at DESC
     LIMIT 1;
 
     -- Update attendance status
     UPDATE tbl_event_attendance
-    SET status = 'Registered'
+    SET status = 'Registered',
+        updated_at = CURRENT_TIMESTAMP
     WHERE attendance_id = v_attendance_id;
 
     -- Update transaction status and remarks if exists
     IF v_transaction_id IS NOT NULL THEN
+        -- Clean up any duplicate pending transactions for the same event/user
+        UPDATE tbl_transaction t
+        JOIN tbl_transaction_event te ON t.transaction_id = te.transaction_id
+        SET t.status = 'Cancelled'
+        WHERE te.event_id = p_event_id 
+          AND t.user_id = p_user_id
+          AND t.transaction_id != v_transaction_id
+          AND t.status IN ('Pending', 'Processing');
+
+        -- Update the selected transaction
         UPDATE tbl_transaction
-        SET status = 'Completed'
+        SET status = 'Completed',
+            updated_at = CURRENT_TIMESTAMP
         WHERE transaction_id = v_transaction_id;
 
         UPDATE tbl_transaction_event
@@ -6004,6 +6064,18 @@ BEGIN
         CONCAT('Approved registration for event ', p_event_id), 
         CONCAT('/event-attendance/', p_event_id), 
         'Attendance Approval'
+    );
+
+    -- Send notification to user
+    CALL CreateNotification(
+        'Event Registration Approved',
+        CONCAT('Your registration for "', v_event_title, '" has been approved. ', v_final_remarks),
+        CONCAT('/events/', p_event_id),
+        'event',
+        p_event_id,
+        p_approver_id,
+        JSON_ARRAY(v_user_email),
+        'registration_approved'
     );
 
     SELECT 'Attendance approved successfully' AS message;
@@ -6021,11 +6093,20 @@ CREATE DEFINER='admin'@'%' PROCEDURE RejectPaidEventRegistration(
 BEGIN
     DECLARE v_attendance_id INT;
     DECLARE v_transaction_id INT;
+    DECLARE v_user_email VARCHAR(100);
+    DECLARE v_event_title VARCHAR(300);
 
-    -- Find the attendance record
+    -- Get user email and event title for notification
+    SELECT email INTO v_user_email FROM tbl_user WHERE user_id = p_user_id;
+    SELECT title INTO v_event_title FROM tbl_event WHERE event_id = p_event_id;
+
+    -- Find the MOST RECENT attendance record
     SELECT attendance_id INTO v_attendance_id
     FROM tbl_event_attendance
-    WHERE event_id = p_event_id AND user_id = p_user_id AND deleted_at IS NULL
+    WHERE event_id = p_event_id 
+      AND user_id = p_user_id 
+      AND deleted_at IS NULL
+    ORDER BY created_at DESC
     LIMIT 1;
 
     IF v_attendance_id IS NULL THEN
@@ -6033,22 +6114,27 @@ BEGIN
         SET MESSAGE_TEXT = 'No registration found for this event and user';
     END IF;
 
-    -- Get transaction ID if exists
+    -- Get the MOST RECENT transaction ID if exists
     SELECT te.transaction_id INTO v_transaction_id
     FROM tbl_transaction_event te
     JOIN tbl_transaction t ON te.transaction_id = t.transaction_id
-    WHERE te.event_id = p_event_id AND t.user_id = p_user_id
+    WHERE te.event_id = p_event_id 
+      AND t.user_id = p_user_id
+      AND t.status IN ('Pending', 'Processing')
+    ORDER BY t.created_at DESC
     LIMIT 1;
 
-    -- Soft-delete attendance using deleted_at
+    -- Update attendance status to Rejected (don't soft-delete to allow re-registration)
     UPDATE tbl_event_attendance
-    SET deleted_at = NOW(), status = 'Rejected'
+    SET status = 'Rejected',
+        updated_at = CURRENT_TIMESTAMP
     WHERE attendance_id = v_attendance_id;
 
     -- Update transaction status and remarks if exists
     IF v_transaction_id IS NOT NULL THEN
         UPDATE tbl_transaction
-        SET status = 'Failed'
+        SET status = 'Failed',
+            updated_at = CURRENT_TIMESTAMP
         WHERE transaction_id = v_transaction_id;
 
         UPDATE tbl_transaction_event
@@ -6065,7 +6151,19 @@ BEGIN
         'Attendance Rejection'
     );
 
-    SELECT 'Attendance rejected and soft-deleted successfully' AS message;
+    -- Send notification to user
+    CALL CreateNotification(
+        'Event Registration Rejected',
+        CONCAT('Your registration for "', v_event_title, '" has been rejected. Reason: ', p_reason),
+        CONCAT('/events/', p_event_id),
+        'event',
+        p_event_id,
+        p_approver_id,
+        JSON_ARRAY(v_user_email),
+        'registration_rejected'
+    );
+
+    SELECT 'Attendance rejected successfully' AS message;
 END $$
 DELIMITER ;
 
@@ -17276,6 +17374,7 @@ INSERT INTO tbl_rank_permission(rank_id, permission_id) VALUES
 (1,14),
 (1,23),
 (1,4),
+(1,24),
 (1,25),
 (1,17),
 (1,19),

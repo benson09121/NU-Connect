@@ -57,7 +57,7 @@ async function registerEvent(req, res) {
             // Handle paid event with transaction
             let uploadedFileName = null;
             
-            // Handle file upload if there's a payment proof
+            // Handle file upload if there's a payment proof file
             if (req.files && req.files.file && req.body.payment_proof) {
                 const uploadedFile = req.files.file;
                 const eventDetails = await eventModel.getSpecificEvent(event_id, user.user_id);
