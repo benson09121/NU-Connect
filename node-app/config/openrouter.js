@@ -6,7 +6,7 @@ const OPENROUTER_MODELS = {
   current: {
     model: 'google/gemini-exp-1121',
     temperature: 0.5, // Lower for more focused analytical responses
-    max_tokens: 1500, // Significantly increased for comprehensive responses
+    max_tokens: 1000, // Significantly increased for comprehensive responses
     top_p: 0.9,
     description: 'Gemini Experimental 1121 - Google\'s latest model with excellent analytics and reasoning capabilities'
   },
@@ -17,7 +17,7 @@ const OPENROUTER_MODELS = {
     gemini_flash: {
       model: 'google/gemini-flash-1.5',
       temperature: 0.5,
-      max_tokens: 1500,
+      max_tokens: 1000,
       top_p: 0.9,
       description: 'Gemini Flash 1.5 - Fast and efficient Google model'
     },
@@ -25,7 +25,7 @@ const OPENROUTER_MODELS = {
     gemini_pro: {
       model: 'google/gemini-pro-1.5',
       temperature: 0.5,
-      max_tokens: 1500,
+      max_tokens: 1000,
       top_p: 0.9,
       description: 'Gemini Pro 1.5 - Google\'s reliable model for complex tasks'
     },
@@ -34,7 +34,7 @@ const OPENROUTER_MODELS = {
     claude_sonnet: {
       model: 'anthropic/claude-3.5-sonnet',
       temperature: 0.1, // Very low for professional, focused responses
-      max_tokens: 1500, // Maximum for comprehensive analysis
+      max_tokens: 1000, // Maximum for comprehensive analysis
       top_p: 0.9,
       description: 'Claude 3.5 Sonnet - Excellent for analytics and data interpretation'
     },
@@ -43,7 +43,7 @@ const OPENROUTER_MODELS = {
     claude_opus: {
       model: 'anthropic/claude-3-opus',
       temperature: 0.1, // Very low for most professional responses
-      max_tokens: 1500, // Maximum tokens for comprehensive reports
+      max_tokens: 1000, // Maximum tokens for comprehensive reports
       top_p: 0.9,
       description: 'Claude 3 Opus - Most powerful for complex reasoning and comprehensive analysis'
     },
@@ -52,7 +52,7 @@ const OPENROUTER_MODELS = {
     gpt4o: {
       model: 'openai/gpt-4o',
       temperature: 0.4,
-      max_tokens: 1500,
+      max_tokens: 1000,
       top_p: 0.9,
       description: 'GPT-4o - Latest OpenAI model with strong analytical capabilities'
     },
@@ -61,7 +61,7 @@ const OPENROUTER_MODELS = {
     claude_haiku: {
       model: 'anthropic/claude-3-haiku',
       temperature: 0.5,
-      max_tokens: 1500,
+      max_tokens: 1000,
       top_p: 0.9,
       description: 'Claude 3 Haiku - Fast and economical for simpler queries'
     },
@@ -70,7 +70,7 @@ const OPENROUTER_MODELS = {
     gpt4_turbo: {
       model: 'openai/gpt-4-turbo',
       temperature: 0.4,
-      max_tokens: 1500,
+      max_tokens: 1000,
       top_p: 0.9,
       description: 'GPT-4 Turbo - Reliable and powerful'
     }
