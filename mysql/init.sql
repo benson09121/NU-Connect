@@ -1066,10 +1066,22 @@ CREATE DEFINER='admin'@'%' PROCEDURE LogAction(
 )
 BEGIN
     DECLARE v_user_id VARCHAR(200);
+    DECLARE v_error_message TEXT;
+    
+    -- Look up user by email
     SELECT user_id INTO v_user_id FROM tbl_user WHERE email = p_user_email LIMIT 1;
-    IF v_user_id IS NULL THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='User email not found for logging';
+    
+    -- If system email and user not found, use the system user ID directly
+    IF v_user_id IS NULL AND p_user_email = 'system@nu-dasma.edu.ph' THEN
+        SET v_user_id = 'sys-system';
     END IF;
+    
+    -- Final check - if still no user found, signal error
+    IF v_user_id IS NULL THEN
+        SET v_error_message = CONCAT('User email not found for logging: ', COALESCE(p_user_email, 'NULL'));
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = v_error_message;
+    END IF;
+    
     INSERT INTO tbl_logs(user_id, action_type, type, meta_data, redirect_url, file_path)
     VALUES (v_user_id, p_action, p_type, p_meta_data, p_redirect_url, p_file_path);
 END$$
@@ -1433,8 +1445,8 @@ BEGIN
     -- Log the action
     CALL LogAction(
         p_user_email,
-        CONCAT('Created event transaction for event ', p_event_id),
-        'EVENT_TRANSACTION_CREATE',
+        'Successfully created event payment transaction',
+        'Event Payment',
         JSON_OBJECT(
             'transaction_id', v_transaction_id,
             'amount', p_amount,
@@ -1687,8 +1699,8 @@ BEGIN
         -- Log the action
         CALL LogAction(
             v_user_email,
-            CONCAT('Created SDAO event: ', p_title),
-            'event',
+            CONCAT('Created new SDAO event: ', p_title),
+            'Event Management',
             JSON_OBJECT(
                 'event_id', v_event_id,
                 'title', p_title,
@@ -1701,8 +1713,8 @@ BEGIN
 
         -- Notify all users
         CALL CreateNotification(
-            CONCAT('New SDAO Event: ', p_title),
-            CONCAT('A new SDAO event "', p_title, '" has been created and is now available.'),
+            CONCAT('New Event: ', p_title),
+            CONCAT('A new event "', p_title, '" has been created and is now available for registration.'),
             CONCAT('/events/', v_event_id),
             'event',
             v_event_id,
@@ -1899,8 +1911,9 @@ BEGIN
 
     CALL LogAction(
         v_user_email,
-        CONCAT('Archived SDAO event ID ', p_event_id, IF(p_reason IS NOT NULL, CONCAT(' (Reason: ', p_reason, ')'), '')),
-        'event',
+        CONCAT('Archived event "', (SELECT title FROM tbl_event WHERE event_id = p_event_id), '"', 
+               IF(p_reason IS NOT NULL, CONCAT(' - Reason: ', p_reason), '')),
+        'Event Management',
         JSON_OBJECT('event_id', p_event_id, 'archived_at', NOW(), 'reason', p_reason),
         CONCAT('/events/', p_event_id),
         NULL
@@ -1939,8 +1952,9 @@ BEGIN
 
     CALL LogAction(
         v_user_email,
-        CONCAT('Unarchived SDAO event ID ', p_event_id, IF(p_reason IS NOT NULL AND p_reason != '', CONCAT(' (Reason: ', p_reason, ')'), '')),
-        'event',
+        CONCAT('Restored event "', (SELECT title FROM tbl_event WHERE event_id = p_event_id), '"',
+               IF(p_reason IS NOT NULL AND p_reason != '', CONCAT(' - Reason: ', p_reason), '')),
+        'Event Management',
         JSON_OBJECT('event_id', p_event_id, 'unarchived_at', NOW(), 'reason', p_reason),
         CONCAT('/events/', p_event_id),
         NULL
@@ -2029,8 +2043,8 @@ BEGIN
 
     CALL LogAction(
         v_user_email,
-        CONCAT('Updated SDAO event ID ', p_event_id),
-        'event',
+        CONCAT('Updated event "', p_title, '"'),
+        'Event Management',
         JSON_OBJECT('event_id', p_event_id, 'updated_at', NOW()),
         CONCAT('/events/', p_event_id),
         NULL
@@ -2067,8 +2081,8 @@ BEGIN
 
     CALL LogAction(
         v_user_email,
-        CONCAT('Deleted SDAO event ID ', p_event_id, IF(p_reason IS NOT NULL, CONCAT(' (Reason: ', p_reason, ')'), '')),
-        'event',
+        CONCAT('Permanently deleted event', IF(p_reason IS NOT NULL, CONCAT(' - Reason: ', p_reason), '')),
+        'Event Management',
         JSON_OBJECT('event_id', p_event_id, 'deleted_at', NOW(), 'reason', p_reason),
         '/events',
         NULL
@@ -2665,8 +2679,8 @@ BEGIN
     -- Log the action
     CALL LogAction(
         v_user_email,
-        CONCAT('Uploaded/Updated certificate template for event ', p_event_id),
-        'certificate',
+        'Updated certificate template',
+        'Certificate Management',
         JSON_OBJECT('event_id', p_event_id, 'template_path', p_template_path),
         CONCAT('/events/', p_event_id),
         p_template_path
@@ -2705,7 +2719,7 @@ BEGIN
     -- Log the action
     CALL LogAction(
         v_user_email,
-        CONCAT('Deleted certificate template for event ', p_event_id),
+        'Removed certificate template',
         'certificate',
         JSON_OBJECT('event_id', p_event_id, 'template_path', v_template_path),
         CONCAT('/events/', p_event_id),
@@ -3434,7 +3448,7 @@ BEGIN
         -- Log the update using LogAction
         CALL LogAction(
             p_created_by_email,
-            CONCAT('Updated managed account for ', p_email),
+            'Updated managed account access',
             'account',
             JSON_OBJECT('role_name', p_role_name, 'program_id', p_program_id, 'target_email', p_email),
             NULL,
@@ -3459,7 +3473,7 @@ BEGIN
         -- Log the creation using LogAction
         CALL LogAction(
             p_created_by_email,
-            CONCAT('Created managed account for ', p_email),
+            'Created new managed account',
             'account',
             JSON_OBJECT('role_name', p_role_name, 'program_id', p_program_id, 'target_email', p_email),
             NULL,
@@ -3555,7 +3569,7 @@ BEGIN
     -- Log the update using LogAction
     CALL LogAction(
         p_updated_by_email,
-        CONCAT('Updated managed account for ', v_email),
+        'Updated account permissions',
         'account',
         JSON_OBJECT(
             'role_name', p_role_name, 
@@ -3624,7 +3638,7 @@ BEGIN
         -- Log the archiving using LogAction
         CALL LogAction(
             p_archived_by_email,
-            CONCAT('Archived managed account for ', p_email),
+            'Removed account access',
             'account',
             JSON_OBJECT('reason', COALESCE(p_reason, 'Manual archive'), 'target_email', p_email),
             NULL,
@@ -5855,6 +5869,50 @@ BEGIN
         SET status = 'Approved',
             organization_id = v_new_org_id
         WHERE application_id = p_application_id;
+
+        -- Send invitation emails to all officers
+        BEGIN
+            DECLARE done INT DEFAULT FALSE;
+            DECLARE v_officer_email VARCHAR(255);
+            DECLARE v_officer_name VARCHAR(255);
+            
+            DECLARE email_cursor CURSOR FOR
+                SELECT DISTINCT u.email, CONCAT(u.f_name, ' ', u.l_name) as full_name
+                FROM tbl_application_executives ae
+                JOIN tbl_user u ON ae.proposed_user_id = u.user_id
+                WHERE ae.application_id = p_application_id
+                  AND u.email IS NOT NULL 
+                  AND u.email != ''
+                  AND u.status = 'Pending';
+
+            DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = TRUE;
+
+            OPEN email_cursor;
+            email_loop: LOOP
+                FETCH email_cursor INTO v_officer_email, v_officer_name;
+                IF done THEN
+                    LEAVE email_loop;
+                END IF;
+
+                -- Log invitation attempt for audit trail
+                CALL LogAction(
+                    'system@nu-dasma.edu.ph',
+                    'Sent officer invitation email',
+                    'user_invitation',
+                    JSON_OBJECT(
+                        'organization_name', v_org_name,
+                        'recipient_email', v_officer_email,
+                        'recipient_name', v_officer_name,
+                        'application_id', p_application_id,
+                        'organization_id', v_new_org_id
+                    ),
+                    NULL,
+                    NULL
+                );
+
+            END LOOP email_loop;
+            CLOSE email_cursor;
+        END;
     END IF;
 
     -- Commit transaction
@@ -7656,7 +7714,7 @@ BEGIN
             SELECT email INTO v_next_approver_email FROM tbl_user WHERE user_id = v_next_approver_id LIMIT 1;
             CALL CreateNotification(
                 'Event Application Approval Needed',
-                CONCAT('You have a pending event application to review (Application ID: ', p_event_application_id, ').'),
+                'You have a pending event application that requires your review and approval.',
                 NULL,
                 'approval',
                 p_event_application_id,
@@ -9461,6 +9519,11 @@ BEGIN
     FROM tbl_renewal_cycle
     WHERE organization_id = p_org_id;
 
+    -- If no cycle found, default to 1
+    IF v_current_cycle IS NULL THEN
+        SET v_current_cycle = 1;
+    END IF;
+
     -- Validate organization exists and is active
     SELECT COUNT(*) INTO v_organization_exists 
     FROM tbl_organization 
@@ -9472,15 +9535,16 @@ BEGIN
         SET MESSAGE_TEXT = 'Organization not found or not active';
     END IF;
 
+    -- Check for duplicate committee name (case-insensitive and trimmed)
     SELECT COUNT(*) INTO v_committee_exists
     FROM tbl_committee
     WHERE organization_id = p_org_id
     AND cycle_number = v_current_cycle
-    AND name = p_committee_name;
+    AND LOWER(TRIM(name)) = LOWER(TRIM(p_committee_name));
 
     IF v_committee_exists > 0 THEN
         SIGNAL SQLSTATE '45000' 
-        SET MESSAGE_TEXT = 'Committee with this name already exists';
+        SET MESSAGE_TEXT = 'A committee with this name already exists in this organization';
     END IF;
 
     SELECT user_id INTO v_action_by_user_id 
@@ -9507,6 +9571,12 @@ BEGIN
 
     SET v_new_committee_id = LAST_INSERT_ID();
 
+    -- Create default committee roles (Committee Head, Committee Officer)
+    INSERT INTO tbl_committee_role (committee_id, role_name)
+    VALUES 
+        (v_new_committee_id, 'Committee Head'),
+        (v_new_committee_id, 'Committee Officer');
+
     -- Log the action
     INSERT INTO tbl_logs (
         user_id, 
@@ -9516,7 +9586,7 @@ BEGIN
         timestamp
     ) VALUES (
         v_action_by_user_id,
-        CONCAT('Created committee: ', p_committee_name),
+        'Created new committee',
         'committee_creation',
         JSON_OBJECT(
             'organization_id', p_org_id,
@@ -10092,6 +10162,15 @@ BEGIN
             (organization_id, cycle_number, user_id, org_version_id, member_type, status, joined_at)
         VALUES
             (v_organization_id, v_cycle_number, v_user_id, v_org_version_id, 'Committee', 'Active', CURRENT_TIMESTAMP);
+    ELSE
+        -- Update existing member to Committee type if they were a regular member
+        UPDATE tbl_organization_members 
+        SET member_type = 'Committee', 
+            status = 'Active',
+            org_version_id = v_org_version_id
+        WHERE organization_id = v_organization_id
+          AND cycle_number = v_cycle_number
+          AND user_id = v_user_id;
     END IF;
 
     -- log action (aligned to tbl_logs schema)
@@ -10115,6 +10194,22 @@ BEGIN
     );
 
     -- return the newly added member row with enhanced information
+    -- Debug: Check if the query will return results
+    IF NOT EXISTS (
+        SELECT 1 FROM tbl_committee c
+        JOIN tbl_committee_members cm ON c.committee_id = cm.committee_id
+        JOIN tbl_user u ON cm.user_id = u.user_id
+        JOIN tbl_organization_members om ON om.user_id = u.user_id
+         AND om.organization_id = v_organization_id
+         AND om.cycle_number = v_cycle_number
+        WHERE c.organization_id = v_organization_id
+          AND c.cycle_number = v_cycle_number
+          AND cm.committee_member_id = v_new_member_id
+    ) THEN
+        SIGNAL SQLSTATE '45000' 
+            SET MESSAGE_TEXT = 'Failed to retrieve committee member data after creation';
+    END IF;
+
     SELECT 
         c.committee_id,
         c.name AS committee_name,
@@ -12124,7 +12219,7 @@ BEGIN
 
     CALL LogAction(
         p_user_email,
-        CONCAT('Archived program ID ', p_program_id, COALESCE(CONCAT(' — reason: ', p_reason), '')),
+        CONCAT('Archived program ID ', p_program_id, COALESCE(CONCAT(' - reason: ', p_reason), '')),
         'Program.Archive',
         JSON_OBJECT('program_id', p_program_id, 'reason', p_reason),
         NULL, NULL
@@ -12412,16 +12507,16 @@ BEGIN
 
     /* Build human-friendly notification title/message */
     IF v_application_status IS NOT NULL AND LOWER(v_application_status) = 'approved' THEN
-        SET v_title = CONCAT('Application Approved — ', v_org_name);
-        SET v_message = CONCAT('Good news — the ', v_application_type, ' application for "', v_org_name, '" has completed all approval steps.');
+        SET v_title = CONCAT('Application Approved - ', v_org_name);
+        SET v_message = CONCAT('Good news - the ', v_application_type, ' application for "', v_org_name, '" has completed all approval steps.');
     ELSEIF v_step_status = 'Approved' THEN
-        SET v_title = CONCAT('Approval Progress — ', v_org_name);
+        SET v_title = CONCAT('Approval Progress - ', v_org_name);
         SET v_message = CONCAT('Step ', v_step, ' for "', v_org_name, '" was approved. ', v_remaining_steps, ' step(s) remaining. You can view details here: ', v_url);
     ELSEIF v_step_status = 'Rejected' OR (v_application_status IS NOT NULL AND LOWER(v_application_status) = 'rejected') THEN
-        SET v_title = CONCAT('Application Rejected — ', v_org_name);
+        SET v_title = CONCAT('Application Rejected - ', v_org_name);
         SET v_message = CONCAT('The ', v_application_type, ' application for "', v_org_name, '" was rejected at step ', v_step, '. Please review the comments and next steps: ', v_url);
     ELSE
-        SET v_title = CONCAT('Application Update — ', v_org_name);
+        SET v_title = CONCAT('Application Update - ', v_org_name);
         SET v_message = CONCAT('Status update for "', v_org_name, '": ', COALESCE(v_application_status,'Updated'), '. Current step: ', COALESCE(CAST(v_step AS CHAR), 'N/A'), '. See details: ', v_url);
     END IF;
 
@@ -12439,7 +12534,7 @@ BEGIN
         );
     END IF;
 
-    /* Log action — LogAction(p_user_email, p_action, p_type, p_meta_data, p_redirect_url, p_file_path) */
+    /* Log action - LogAction(p_user_email, p_action, p_type, p_meta_data, p_redirect_url, p_file_path) */
     CALL LogAction(
         (SELECT email FROM tbl_user WHERE user_id = v_approver_id LIMIT 1),
         CONCAT('Approval step updated for ', v_org_name, ': ', v_title),
@@ -14162,7 +14257,7 @@ BEGIN
   /* ===== Single SELECT (CTEs visible here) ===== */
   SELECT *
   FROM (
-    /* 1) SDAO/System — only when no org filter */
+    /* 1) SDAO/System - only when no org filter */
     SELECT
       NULL AS organization_id,
       'SDAO' AS organization_name,
@@ -14199,7 +14294,7 @@ BEGIN
 
     UNION ALL
 
-    /* 2) All Organizations — only when no org filter */
+    /* 2) All Organizations - only when no org filter */
     SELECT
       -1 AS organization_id,
       'All Organizations' AS organization_name,
@@ -14236,7 +14331,7 @@ BEGIN
 
     UNION ALL
 
-    /* 3) Per-organization rows — all orgs when NULL, or single org when set */
+    /* 3) Per-organization rows - all orgs when NULL, or single org when set */
     SELECT
       ol.organization_id,
       ol.organization_name,
@@ -14492,6 +14587,12 @@ BEGIN
 
     START TRANSACTION;
 
+    -- Ensure committee roles exist for this committee (Committee Head, Committee Officer)
+    INSERT IGNORE INTO tbl_committee_role (committee_id, role_name)
+    VALUES 
+        (p_committee_id, 'Committee Head'),
+        (p_committee_id, 'Committee Officer');
+
     -- Get the committee_role_id for the given committee and role type
     SELECT committee_role_id INTO v_committee_role_id
     FROM tbl_committee_role
@@ -14568,6 +14669,30 @@ BEGIN
 
 END$$
 DELIMITER ;
+
+-- Procedure to fix existing committees that might not have their default roles
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE FixCommitteeRoles()
+BEGIN
+    -- Insert missing committee roles for all existing committees
+    INSERT IGNORE INTO tbl_committee_role (committee_id, role_name)
+    SELECT c.committee_id, 'Committee Head'
+    FROM tbl_committee c
+    WHERE c.status != 'Archived'
+    UNION ALL
+    SELECT c.committee_id, 'Committee Officer'
+    FROM tbl_committee c
+    WHERE c.status != 'Archived';
+    
+    -- Return count of committees fixed
+    SELECT 
+        COUNT(DISTINCT c.committee_id) as committees_processed,
+        'Committee roles created/verified for all active committees' as message
+    FROM tbl_committee c
+    WHERE c.status != 'Archived';
+END$$
+DELIMITER ;
+
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetMemberPermissionOverrides(
     IN p_organization_id INT,
@@ -18041,6 +18166,18 @@ VALUES("Student",0,null),
 ("SDAO",1,5),
 ("Dean",1,3),
 ("Academic Director",1,4);
+
+-- Create system user for automated logging
+INSERT INTO tbl_user (user_id, f_name, l_name, email, role_id, status, created_at)
+VALUES (
+    'sys-system',
+    'System',
+    'User',
+    'system@nu-dasma.edu.ph',
+    (SELECT role_id FROM tbl_role WHERE LOWER(role_name) = 'sdao' LIMIT 1),
+    'Active',
+    CURRENT_TIMESTAMP
+);
 
 INSERT INTO tbl_permission(permission_name, scope)
 VALUES("CREATE_EVENT","Organization"),

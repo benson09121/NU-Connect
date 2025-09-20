@@ -480,6 +480,60 @@ async function approveApplication(req, res) {
                 data: update_data
             });
 
+            // Send invitation emails to all officers
+            try {
+                const emailService = require('../../services/emailService');
+                const msal = require('@azure/msal-node');
+                const axios = require('axios');
+                const officers = await organizationsModel.getApplicationOfficers(application_id);
+                
+                if (officers && officers.length > 0) {
+                    // Create MSAL client configuration for Azure invitations
+                    const cca = new msal.ConfidentialClientApplication({
+                        auth: {
+                            clientId: process.env.AZURE_CLIENT_ID,
+                            clientSecret: process.env.AZURE_CLIENT_SECRET,
+                            authority: `https://login.microsoftonline.com/${process.env.AZURE_TENANT_ID}`,
+                        },
+                    });
+
+                    // Helper function to get access token
+                    async function getAccessToken(cca) {
+                        const response = await cca.acquireTokenByClientCredential({
+                            scopes: ['https://graph.microsoft.com/.default'],
+                        });
+                        return response.accessToken;
+                    }
+
+                    for (const officer of officers) {
+                        if (officer.email && officer.email.includes('@') && officer.status === 'Pending') {
+                            try {
+                                // Create Azure AD invitation using Microsoft Graph API
+                                const accessToken = await getAccessToken(cca);
+                                const response = await axios.post(
+                                    'https://graph.microsoft.com/v1.0/invitations',
+                                    {
+                                        invitedUserEmailAddress: officer.email,
+                                        inviteRedirectUrl: process.env.FRONTEND_URL || 'https://nuconnect.azurewebsites.net',
+                                        sendInvitationMessage: false,
+                                    },
+                                    { headers: { Authorization: `Bearer ${accessToken}` } }
+                                );
+                                
+                                // Get the proper redemption URL from Azure
+                                const redemptionUrl = response.data.inviteRedeemUrl;
+                                await emailService.sendInvitationEmail(officer.email, redemptionUrl);
+                                console.log(`Invitation email sent to: ${officer.email}`);
+                            } catch (emailError) {
+                                console.error(`Failed to send email to ${officer.email}:`, emailError);
+                            }
+                        }
+                    }
+                }
+            } catch (emailError) {
+                console.error('Error sending invitation emails:', emailError);
+            }
+
             // Copy logo file to organization directory
             try {
                 const appId = application_id;
@@ -1023,19 +1077,37 @@ async function addCommitteeMember(req, res) {
             action_by_email
         });
 
+        console.log('[addCommitteeMember] Result from stored procedure:', JSON.stringify(result, null, 2));
+
         // Remove from plain members if they existed there
-        const emailUpdate = await organizationsModel.getSingleOrganizationMember(result[0].member_id, orgId);
-        const emailSSuggestionOrganizationUpdate = await organizationsModel.GetSingleOrganizationUser(result[0].member_id);
-        await userCacheModel.cacheSingleOrganizationUser(orgId, orgVersionId, emailSSuggestionOrganizationUpdate[0]);
+        let emailUpdate = null;
+        let emailSSuggestionOrganizationUpdate = null;
+        
+        if (result && result.length > 0 && result[0].organization_member_id) {
+            try {
+                emailUpdate = await organizationsModel.getSingleOrganizationMember(result[0].organization_member_id, orgId);
+                emailSSuggestionOrganizationUpdate = await organizationsModel.GetSingleOrganizationUser(result[0].organization_member_id);
+                
+                if (emailSSuggestionOrganizationUpdate && emailSSuggestionOrganizationUpdate.length > 0) {
+                    await userCacheModel.cacheSingleOrganizationUser(orgId, orgVersionId, emailSSuggestionOrganizationUpdate[0]);
+                }
+            } catch (cacheError) {
+                console.warn('[addCommitteeMember] Cache update failed:', cacheError.message);
+                // Don't fail the whole operation if cache update fails
+            }
+        }
 
         publishToChannel(`committee_members_${orgId}_${orgVersionId}`, {
             operation: 'CREATE',
             data: result
         });
-        publishToChannel(`organization_members_${orgId}_${orgVersionId}`, {
-            operation: 'DELETE',
-            data: emailUpdate
-        });
+        
+        if (emailUpdate) {
+            publishToChannel(`organization_members_${orgId}_${orgVersionId}`, {
+                operation: 'DELETE',
+                data: emailUpdate
+            });
+        }
 
         res.status(201).json({
             message: 'Committee member added successfully.',
