@@ -409,6 +409,7 @@ async function archiveCommittee({
         return rows[0];
     } catch (error) {
         console.error('[archiveCommittee] SQL/Error:', error.sqlMessage || error.message, error);
+        // Pass through the original error to preserve the SQL message
         throw error;
     } finally {
         connection.release();
@@ -486,6 +487,8 @@ async function archiveCommitteeMember({
         );
         return rows[0];
     } catch (error) {
+        console.error('[archiveCommitteeMember] SQL/Error:', error.sqlMessage || error.message, error);
+        // Pass through the original error to preserve the SQL message
         throw error;
     } finally {
         connection.release();
