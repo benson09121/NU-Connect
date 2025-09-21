@@ -768,6 +768,7 @@ CREATE TABLE tbl_transaction (
     transaction_type_id INT NOT NULL,
     payment_type_id INT NOT NULL,
     category_id INT NULL,
+    org_version_id INT NULL,
     status ENUM('Pending', 'Completed', 'Failed', 'Cancelled') DEFAULT 'Pending',
     transaction_date DATETIME NOT NULL,
     receipt_no VARCHAR(100) NULL,
@@ -782,9 +783,12 @@ CREATE TABLE tbl_transaction (
     FOREIGN KEY (transaction_type_id) REFERENCES tbl_transaction_type(transaction_type_id) ON DELETE RESTRICT ON UPDATE CASCADE,
     FOREIGN KEY (category_id) REFERENCES tbl_financial_category(category_id) ON DELETE SET NULL,
     FOREIGN KEY (archived_by) REFERENCES tbl_user(user_id) ON DELETE SET NULL ON UPDATE CASCADE,
+    FOREIGN KEY (org_version_id) REFERENCES tbl_organization_version(org_version_id) ON DELETE SET NULL,
     CONSTRAINT fk_txn_type_category
       FOREIGN KEY (transaction_type_id, category_id)
-      REFERENCES tbl_transaction_type_category(transaction_type_id, category_id)
+      REFERENCES tbl_transaction_type_category(transaction_type_id, category_id),
+    INDEX idx_txn_org_version (org_version_id),
+    INDEX idx_txn_org_version_date (org_version_id, transaction_date)
 );
 
 CREATE TABLE tbl_event_attendance (
@@ -1464,6 +1468,7 @@ BEGIN
         transaction_type_id,
         payment_type_id,
         category_id,
+        org_version_id,
         status,
         transaction_date,
         receipt_no,
@@ -1477,6 +1482,7 @@ BEGIN
         v_transaction_type_id,
         v_payment_type_id,
         v_category_id,
+        p_organization_version_id,
         'Pending',
         NOW(),
         v_receipt_no,
@@ -2918,11 +2924,11 @@ BEGIN
     -- Create main transaction record
     INSERT INTO tbl_transaction (
         user_id, payer_name, payee_name, payment_description, amount,
-        transaction_type_id, payment_type_id, category_id, status, 
+        transaction_type_id, payment_type_id, category_id, org_version_id, status, 
         transaction_date, receipt_no, proof_image
     ) VALUES (
         v_user_id, p_payer_name, 'NU Connect', 'Membership Fee', p_amount,
-        v_transaction_type_id, v_payment_type_id, v_category_id, 'Pending', 
+        v_transaction_type_id, v_payment_type_id, v_category_id, p_organization_version_id, 'Pending', 
         NOW(), v_receipt_no, p_proof_image
     );
 
@@ -6140,6 +6146,7 @@ BEGIN
     DECLARE v_transaction_id INT;
     DECLARE v_final_remarks VARCHAR(255);
     DECLARE v_user_email VARCHAR(100);
+    DECLARE v_approver_email VARCHAR(100);
     DECLARE v_event_title VARCHAR(300);
 
     -- Set remarks to 'No Remarks' if NULL or empty
@@ -6149,8 +6156,9 @@ BEGIN
         SET v_final_remarks = p_remarks;
     END IF;
 
-    -- Get user email and event title for notification
+    -- Get user email, approver email, and event title for notification
     SELECT email INTO v_user_email FROM tbl_user WHERE user_id = p_user_id;
+    SELECT email INTO v_approver_email FROM tbl_user WHERE user_id = p_approver_id;
     SELECT title INTO v_event_title FROM tbl_event WHERE event_id = p_event_id;
 
     -- Find the MOST RECENT attendance record (to handle cases where multiple records exist)
@@ -6214,10 +6222,18 @@ BEGIN
 
     -- Log the approval
     CALL LogAction(
-        p_approver_id, 
+        v_approver_email, 
         CONCAT('Approved registration for "', v_event_title, '" by ', v_user_email), 
         'Attendance Approval',
-        NULL,
+        JSON_OBJECT(
+            'event_id', p_event_id,
+            'event_title', v_event_title,
+            'user_id', p_user_id,
+            'user_email', v_user_email,
+            'attendance_id', v_attendance_id,
+            'transaction_id', v_transaction_id,
+            'remarks', v_final_remarks
+        ),
         CONCAT('/event-attendance/', p_event_id), 
         NULL
     );
@@ -6250,10 +6266,12 @@ BEGIN
     DECLARE v_attendance_id INT;
     DECLARE v_transaction_id INT;
     DECLARE v_user_email VARCHAR(100);
+    DECLARE v_approver_email VARCHAR(100);
     DECLARE v_event_title VARCHAR(300);
 
-    -- Get user email and event title for notification
+    -- Get user email, approver email, and event title for notification
     SELECT email INTO v_user_email FROM tbl_user WHERE user_id = p_user_id;
+    SELECT email INTO v_approver_email FROM tbl_user WHERE user_id = p_approver_id;
     SELECT title INTO v_event_title FROM tbl_event WHERE event_id = p_event_id;
 
     -- Find the MOST RECENT attendance record
@@ -6300,10 +6318,18 @@ BEGIN
 
     -- Log the rejection
     CALL LogAction(
-        p_approver_id, 
+        v_approver_email, 
         CONCAT('Rejected registration for "', v_event_title, '" by ', v_user_email, ' - Reason: ', p_reason), 
         'Attendance Rejection',
-        NULL,
+        JSON_OBJECT(
+            'event_id', p_event_id,
+            'event_title', v_event_title,
+            'user_id', p_user_id,
+            'user_email', v_user_email,
+            'attendance_id', v_attendance_id,
+            'transaction_id', v_transaction_id,
+            'reason', p_reason
+        ),
         CONCAT('/event-attendance/', p_event_id), 
         NULL
     );
@@ -12794,7 +12820,8 @@ BEGIN
            te.remarks,
            tm.organization_id,
            tm.cycle_number,
-           -- Add current_org_version_id from tbl_organization
+           -- Include both the transaction's org_version_id and current from organization
+           t.org_version_id AS transaction_org_version_id,
            o.current_org_version_id,
            u.f_name AS user_first_name,
            u.l_name AS user_last_name,
@@ -12861,7 +12888,7 @@ BEGIN
            te.remarks,
            tm.organization_id,
            tm.cycle_number,
-           rc.org_version_id AS organization_version_id,
+           COALESCE(t.org_version_id, rc.org_version_id) AS organization_version_id,
            u.f_name AS user_first_name,
            u.l_name AS user_last_name,
            u.email AS user_email
@@ -12904,7 +12931,7 @@ BEGIN
            -- Use COALESCE to get organization_id from either membership or event
            COALESCE(tm.organization_id, e.organization_id) AS organization_id,
            COALESCE(tm.cycle_number, e.cycle_number) AS cycle_number,
-           COALESCE(rc1.org_version_id, rc2.org_version_id) AS organization_version_id,
+           COALESCE(t.org_version_id, rc1.org_version_id, rc2.org_version_id) AS organization_version_id,
            u.f_name AS user_first_name,
            u.l_name AS user_last_name,
            u.email AS user_email
@@ -13032,7 +13059,8 @@ CREATE DEFINER='admin'@'%' PROCEDURE CreateTransaction(
     IN p_payer_name_override VARCHAR(255),
     IN p_event_remarks VARCHAR(255),
     IN p_organization_id INT,
-    IN p_cycle_number INT
+    IN p_cycle_number INT,
+    IN p_org_version_id INT
 )
 BEGIN
     DECLARE v_user_id VARCHAR(200);
@@ -13113,11 +13141,11 @@ BEGIN
     -- Create main transaction record
     INSERT INTO tbl_transaction (
         user_id, payer_name, payee_name, payment_description, amount,
-        transaction_type_id, payment_type_id, category_id, status, 
+        transaction_type_id, payment_type_id, category_id, org_version_id, status, 
         transaction_date, receipt_no, proof_image
     ) VALUES (
         v_user_id, p_payer_name, p_payee_name, p_payment_description, p_amount,
-        v_transaction_type_id, v_payment_type_id, v_category_id, p_status, 
+        v_transaction_type_id, v_payment_type_id, v_category_id, p_org_version_id, p_status, 
         p_transaction_date, v_receipt_no, p_proof_image
     );
 
@@ -13170,7 +13198,8 @@ CREATE DEFINER='admin'@'%' PROCEDURE UpdateTransaction(
     IN p_payee_name VARCHAR(255),
     IN p_payer_name_override VARCHAR(255),
     IN p_event_remarks VARCHAR(255),
-    IN p_remove_proof_image TINYINT      -- 1 = remove image, 0/NULL = don't remove
+    IN p_remove_proof_image TINYINT,     -- 1 = remove image, 0/NULL = don't remove
+    IN p_org_version_id INT              -- new parameter for organization version
 )
 BEGIN
     DECLARE v_actor_id VARCHAR(200);
@@ -13235,6 +13264,7 @@ BEGIN
            status              = COALESCE(p_status, status),
            receipt_no          = COALESCE(NULLIF(p_receipt_no,''), receipt_no),
            category_id         = COALESCE(v_category_id, category_id),
+           org_version_id      = COALESCE(p_org_version_id, org_version_id),
            payer_name          = COALESCE(NULLIF(p_payer_name,''), payer_name),
            payee_name          = COALESCE(NULLIF(p_payee_name,''), payee_name),
            proof_image         =
@@ -15719,6 +15749,9 @@ CREATE INDEX idx_event_program ON tbl_event_course(program_id);
 CREATE INDEX idx_org_members ON tbl_organization_members(organization_id, user_id);
 CREATE INDEX idx_committee_org ON tbl_committee(organization_id);
 CREATE INDEX idx_committee_members_user ON tbl_committee_members(user_id);
+
+-- Recommended index for lookups from version -> cycle
+CREATE INDEX idx_rc_org_version ON tbl_renewal_cycle (org_version_id);
 
 CREATE INDEX idx_active_end_datetime 
 ON tbl_application_period(is_active, end_date, end_time);

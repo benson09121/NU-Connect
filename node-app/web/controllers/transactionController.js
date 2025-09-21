@@ -101,7 +101,8 @@ async function create(req, res) {
       payer_name_override,
       event_remarks,
       organization_id,
-      cycle_number
+      cycle_number,
+      org_version_id: organization_version_id
     }, proofImagePath);
 
     publishToChannel('transactions', { type: 'created', data: txn });
@@ -317,6 +318,7 @@ async function update(req, res) {
       payer_name_override,
       event_remarks,
       remove_proof_image: removeFlag,
+      org_version_id: organization_version_id
     });
 
     const payload = unwrapSPResult(raw);
