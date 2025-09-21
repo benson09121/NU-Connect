@@ -8,31 +8,92 @@ const userCacheModel = require('../models/userCacheModel');
 // Helper function for unified organization hub channel
 const getOrgHubChannel = (orgId, orgVersionId) => `orghub_${orgId}_${orgVersionId}`;
 
-// Helper function to publish to both old and new channels (backward compatibility)
-function publishOrgHub({ orgId, orgVersionId, entity, operation, data, legacyChannel = null }) {
+// Keep the publishOrgHub function simple - just publish to the hub channel
+function publishOrgHub({ orgId, orgVersionId, entity, operation, data }) {
   const hubChannel = getOrgHubChannel(orgId, orgVersionId);
   
-  // New unified hub format
+  // Format that matches what RealTimeContext expects
   const hubEvent = {
-    entity,
+    channel: hubChannel,
     operation,
-    keys: { 
-      organization_id: parseInt(orgId), 
-      organization_version_id: parseInt(orgVersionId) 
-    },
     data: Array.isArray(data) ? data : [data],
     timestamp: Date.now()
   };
   
-  // Publish to new hub channel
+  // Publish to hub channel
   publishToChannel(hubChannel, hubEvent);
   
-  // Backward compatibility: also publish to legacy channel if provided
-  if (legacyChannel) {
-    publishToChannel(legacyChannel, {
-      operation,
-      data: Array.isArray(data) ? data : [data],
-      timestamp: new Date()
+  // Also publish to entity-specific channel for backward compatibility
+  const entityChannel = `${entity}_${orgId}_${orgVersionId}`;
+  publishToChannel(entityChannel, {
+    operation,
+    data: Array.isArray(data) ? data : [data],
+    timestamp: Date.now()
+  });
+}
+
+//////////////////   
+
+// Helper function for standardized real-time endpoints
+const handleRealtimeEndpoint = async (req, res, dataFetcher, entity) => {
+  try {
+    const { org_id, org_version_id, sessionId, hub } = req.query;
+    
+    // Always fetch and return data immediately
+    const data = await dataFetcher(org_id, org_version_id);
+    
+    // If sessionId is provided, the client wants real-time updates
+    // The RealTimeContext will handle the subscription when it calls this endpoint
+    // We just need to return the data
+    
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+async function getOrganizationHubData(req, res) {
+  try {
+    const { org_id, org_version_id } = req.query;
+    
+    if (!org_id || !org_version_id) {
+      return res.status(400).json({ error: 'org_id and org_version_id are required' });
+    }
+    
+    // Fetch all data in parallel
+    const [
+      officers,
+      members,
+      committees,
+      committeeMembers,
+      pendingMembers,
+      archivedMembers,
+      leaveApplications
+    ] = await Promise.all([
+      organizationsModel.getOrganizationOfficers(org_id, org_version_id).catch(() => []),
+      organizationsModel.getOrganizationMembers(org_id, org_version_id).catch(() => []),
+      organizationsModel.getOrganizationCommittees(org_id, org_version_id).catch(() => []),
+      organizationsModel.getAllCommitteeMembers(org_id, org_version_id).catch(() => []),
+      organizationsModel.getPendingOrganizationMembers(org_id, org_version_id).catch(() => []),
+      organizationsModel.getArchivedOrganizationMembers(org_id, org_version_id).catch(() => []),
+      organizationsModel.getLeaveApplications(org_id, org_version_id).catch(() => [])
+    ]);
+    
+    // Return all data at once
+    res.json({
+      officers,
+      members,
+      committees,
+      committeeMembers,
+      pendingMembers,
+      archivedMembers,
+      leaveApplications
+    });
+    
+  } catch (error) {
+    console.error('Error fetching organization hub data:', error);
+    res.status(500).json({
+      error: error.message || 'An error occurred while fetching organization hub data'
     });
   }
 }
@@ -101,73 +162,21 @@ async function getOrganizationDetails(req, res) {
 }
 
 async function getOrganizationOfficers(req, res) {
-  try {
-    const { org_id, org_version_id, sessionId, hub } = req.query;
-    const officers = await organizationsModel.getOrganizationOfficers(org_id, org_version_id);
-    
-    if (sessionId) {
-      if (hub) {
-        // Subscribe to hub channel and return data in hub format
-        subscribeToChannel(sessionId, getOrgHubChannel(org_id, org_version_id));
-        // Immediately publish initial data to the channel
-        publishToChannel(getOrgHubChannel(org_id, org_version_id), {
-          entity: 'officers',
-          operation: 'INITIAL',
-          data: officers,
-          timestamp: Date.now()
-        });
-      } else {
-        // Legacy subscription
-        subscribeToChannel(sessionId, `organization_officers_${org_id}_${org_version_id}`);
-        // Immediately publish initial data
-        publishToChannel(`organization_officers_${org_id}_${org_version_id}`, {
-          operation: 'INITIAL',
-          data: officers,
-          timestamp: Date.now()
-        });
-      }
-    }
-    
-    // Return empty response since data will come through real-time channel
-    res.json({ subscribed: true, message: 'Data will be delivered via real-time channel' });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  return handleRealtimeEndpoint(
+    req, 
+    res, 
+    organizationsModel.getOrganizationOfficers,
+    'organization_officers'
+  );
 }
 
 async function getOrganizationMembers(req, res) {
-  try {
-    const { org_id, org_version_id, sessionId, hub } = req.query;
-    const members = await organizationsModel.getOrganizationMembers(org_id, org_version_id);
-    
-    if (sessionId) {
-      if (hub) {
-        // Subscribe to hub channel and return data in hub format
-        subscribeToChannel(sessionId, getOrgHubChannel(org_id, org_version_id));
-        // Immediately publish initial data to the channel
-        publishToChannel(getOrgHubChannel(org_id, org_version_id), {
-          entity: 'members',
-          operation: 'INITIAL',
-          data: members,
-          timestamp: Date.now()
-        });
-      } else {
-        // Legacy subscription
-        subscribeToChannel(sessionId, `organization_members_${org_id}_${org_version_id}`);
-        // Immediately publish initial data
-        publishToChannel(`organization_members_${org_id}_${org_version_id}`, {
-          operation: 'INITIAL',
-          data: members,
-          timestamp: Date.now()
-        });
-      }
-    }
-    
-    // Return empty response since data will come through real-time channel
-    res.json({ subscribed: true, message: 'Data will be delivered via real-time channel' });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  return handleRealtimeEndpoint(
+    req, 
+    res, 
+    organizationsModel.getOrganizationMembers,
+    'organization_members'
+  );
 }
 
 async function createOrganizationApplication(req, res) {
@@ -897,38 +906,12 @@ async function archiveExecutiveMember(req, res) {
 }
 
 async function getOrganizationCommittees(req, res) {
-  try {
-    const { org_id, org_version_id, sessionId, hub } = req.query;
-    const committees = await organizationsModel.getOrganizationCommittees(org_id, org_version_id);
-    
-    if (sessionId) {
-      if (hub) {
-        // Subscribe to hub channel and return data in hub format
-        subscribeToChannel(sessionId, getOrgHubChannel(org_id, org_version_id));
-        // Immediately publish initial data to the channel
-        publishToChannel(getOrgHubChannel(org_id, org_version_id), {
-          entity: 'committees',
-          operation: 'INITIAL',
-          data: committees,
-          timestamp: Date.now()
-        });
-      } else {
-        // Legacy subscription
-        subscribeToChannel(sessionId, `organization_committees_${org_id}_${org_version_id}`);
-        // Immediately publish initial data
-        publishToChannel(`organization_committees_${org_id}_${org_version_id}`, {
-          operation: 'INITIAL',
-          data: committees,
-          timestamp: Date.now()
-        });
-      }
-    }
-    
-    // Return empty response since data will come through real-time channel
-    res.json({ subscribed: true, message: 'Data will be delivered via real-time channel' });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  return handleRealtimeEndpoint(
+    req, 
+    res, 
+    organizationsModel.getOrganizationCommittees,
+    'organization_committees'
+  );
 }
 
 async function createCommittee(req, res) {
@@ -1025,38 +1008,12 @@ async function archiveCommittee(req, res) {
 }
 
 async function getAllCommitteeMembers(req, res) {
-  try {
-    const { org_id, org_version_id, sessionId, hub } = req.query;
-    const committees = await organizationsModel.getAllCommitteeMembers(org_id, org_version_id);
-    
-    if (sessionId) {
-      if (hub) {
-        // Subscribe to hub channel and return data in hub format
-        subscribeToChannel(sessionId, getOrgHubChannel(org_id, org_version_id));
-        // Immediately publish initial data to the channel
-        publishToChannel(getOrgHubChannel(org_id, org_version_id), {
-          entity: 'committee_members',
-          operation: 'INITIAL',
-          data: committees,
-          timestamp: Date.now()
-        });
-      } else {
-        // Legacy subscription
-        subscribeToChannel(sessionId, `committee_members_${org_id}_${org_version_id}`);
-        // Immediately publish initial data
-        publishToChannel(`committee_members_${org_id}_${org_version_id}`, {
-          operation: 'INITIAL',
-          data: committees,
-          timestamp: Date.now()
-        });
-      }
-    }
-    
-    // Return empty response since data will come through real-time channel
-    res.json({ subscribed: true, message: 'Data will be delivered via real-time channel' });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  return handleRealtimeEndpoint(
+    req, 
+    res, 
+    organizationsModel.getAllCommitteeMembers,
+    'committee_members'
+  );
 }
 
 async function addCommitteeMember(req, res) {
@@ -1186,38 +1143,7 @@ async function archiveCommitteeMember(req, res) {
 }
 
 async function getPendingOrganizationMembers(req, res) {
-  try {
-    const { org_id, org_version_id, sessionId, hub } = req.query;
-    const members = await organizationsModel.getPendingOrganizationMembers(org_id, org_version_id);
-    
-    if (sessionId) {
-      if (hub) {
-        // Subscribe to hub channel and return data in hub format
-        subscribeToChannel(sessionId, getOrgHubChannel(org_id, org_version_id));
-        // Immediately publish initial data to the channel
-        publishToChannel(getOrgHubChannel(org_id, org_version_id), {
-          entity: 'pending_members',
-          operation: 'INITIAL',
-          data: members,
-          timestamp: Date.now()
-        });
-      } else {
-        // Legacy subscription
-        subscribeToChannel(sessionId, `pending_organization_members_${org_id}_${org_version_id}`);
-        // Immediately publish initial data
-        publishToChannel(`pending_organization_members_${org_id}_${org_version_id}`, {
-          operation: 'INITIAL',
-          data: members,
-          timestamp: Date.now()
-        });
-      }
-    }
-    
-    // Return empty response since data will come through real-time channel
-    res.json({ subscribed: true, message: 'Data will be delivered via real-time channel' });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  return handleRealtimeEndpoint(req, res, organizationsModel.getPendingOrganizationMembers, 'pending_organization_members');
 }
 
 async function approveMembershipApplication(req, res) {
@@ -1498,41 +1424,7 @@ async function editOrganizationMember(req, res) {
 }
 
 async function getArchivedOrganizationMembers(req, res) {
-  try {
-    const { org_id, org_version_id, sessionId, hub } = req.query;
-    if (!org_id || !org_version_id) {
-      return res.status(400).json({ message: 'org_id and org_version_id are required.' });
-    }
-    const archivedMembers = await organizationsModel.getArchivedOrganizationMembers(org_id, org_version_id);
-    
-    if (sessionId) {
-      if (hub) {
-        // Subscribe to hub channel and return data in hub format
-        subscribeToChannel(sessionId, getOrgHubChannel(org_id, org_version_id));
-        // Immediately publish initial data to the channel
-        publishToChannel(getOrgHubChannel(org_id, org_version_id), {
-          entity: 'archived_members',
-          operation: 'INITIAL',
-          data: archivedMembers,
-          timestamp: Date.now()
-        });
-      } else {
-        // Legacy subscription
-        subscribeToChannel(sessionId, `archived_organization_members_${org_id}_${org_version_id}`);
-        // Immediately publish initial data
-        publishToChannel(`archived_organization_members_${org_id}_${org_version_id}`, {
-          operation: 'INITIAL',
-          data: archivedMembers,
-          timestamp: Date.now()
-        });
-      }
-    }
-    
-    // Return empty response since data will come through real-time channel
-    res.json({ subscribed: true, message: 'Data will be delivered via real-time channel' });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  return handleRealtimeEndpoint(req, res, organizationsModel.getArchivedOrganizationMembers, 'archived_organization_members');
 }
 
 async function archiveOrganizationMember(req, res) {
@@ -2148,22 +2040,7 @@ async function removeMemberPermissionOverride(req, res) {
 }
 
 async function getLeaveApplications(req, res) {
-  try {
-    const { organization_id, organization_version_id, sessionId } = req.query;
-    const leaves = await organizationsModel.getLeaveApplications(organization_id, organization_version_id);
-    
-    if (sessionId) {
-      // Subscribe to both old channel (backward compatibility) and new hub
-      subscribeToChannel(sessionId, `leave_organization_${organization_id}_${organization_version_id}`);
-      subscribeToChannel(sessionId, getOrgHubChannel(organization_id, organization_version_id));
-    }
-    
-    res.json(leaves);
-  } catch (error) {
-    res.status(500).json({
-      error: error.message || "An error occurred while fetching leave applications.",
-    });
-  }
+  return handleRealtimeEndpoint(req, res, organizationsModel.getLeaveApplications, 'leave_applications');
 }
 
 /** ---------------- Membership Questions & Responses (REALTIME STANDARDIZED) ---------------- */
@@ -2364,6 +2241,7 @@ module.exports = {
   GetApprovalTimeline,
   getOrganizationOfficers,
   getOrganizationMembers,
+  getOrganizationHubData,
   getProgram,
   getAllExecutiveRanks,
   // Enhanced functions

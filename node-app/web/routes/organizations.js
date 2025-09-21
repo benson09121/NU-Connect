@@ -292,6 +292,13 @@ router.put(
     organizationsController.updateExecutivePermissions
 );
 
-router.get('/leave-application',organizationsController.getLeaveApplications);
+router.get('/leave-application', organizationsController.getLeaveApplications);
+
+// Organization hub data endpoint for batch loading
+router.get(
+    '/organization-hub-data',
+    middleware.validateAzureJWT,
+    organizationsController.getOrganizationHubData
+);
 
 module.exports = router;

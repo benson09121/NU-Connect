@@ -9818,14 +9818,24 @@ BEGIN
 
     -- Log the action
     CALL LogAction(
-        v_action_by_user_id,
+        p_action_by_email,
         CONCAT('Updated committee "', v_current_name, '"', 
                CASE WHEN p_new_name IS NOT NULL AND p_new_name <> v_current_name 
                     THEN CONCAT(' to "', p_new_name, '"') 
                     ELSE '' END,
                ' in ', v_organization_name),
+        'committee_update',
+        JSON_OBJECT(
+            'committee_id', p_committee_id,
+            'organization_id', v_organization_id,
+            'cycle_number', v_cycle_number,
+            'current_name', v_current_name,
+            'new_name', p_new_name,
+            'current_description', v_current_description,
+            'new_description', p_new_description
+        ),
         CONCAT('/organization/', v_organization_id),
-        'committee_update'
+        NULL
     );
     
     SELECT 
