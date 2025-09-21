@@ -32,6 +32,7 @@ app.use(cors({
 const indexRoutes = require('./index');
 const authRoutes = require('./mobile/routes/auth');
 const facebookRoutes = require('./mobile/routes/facebook');
+const facebookScraperRoutes = require('./mobile/routes/facebookScraper');
 const eventRoutes = require('./mobile/routes/events');
 const organizationRoutes = require('./mobile/routes/organization');
 const notification = require('./mobile/routes/notification');
@@ -59,6 +60,7 @@ const novaRoutes = require('./web/routes/nova');
 app.use('/', indexRoutes);
 app.use('/api/mobile', authRoutes);
 app.use('/api/mobile', facebookRoutes);
+app.use('/api/facebook-scraper', facebookScraperRoutes);
 app.use('/api/mobile', eventRoutes);
 app.use('/api/mobile', organizationRoutes);
 app.use('/api/mobile', notification);

@@ -1237,6 +1237,51 @@ END $$
 DELIMITER ;
 
 DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE CreatePendingMobileUser(
+    IN p_email VARCHAR(100),
+    IN p_program_id INT
+)
+BEGIN
+    DECLARE v_user_id VARCHAR(200);
+    DECLARE v_role_id INT DEFAULT 1; -- Assuming 1 is student role, adjust as needed
+    
+    -- Generate UUID for user_id
+    SET v_user_id = UUID();
+    
+    -- Check if email already exists
+    IF EXISTS (SELECT 1 FROM tbl_user WHERE email = p_email) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Email already exists';
+    END IF;
+    
+    -- Insert pending user
+    INSERT INTO tbl_user (
+        user_id,
+        email,
+        program_id,
+        role_id,
+        status
+    ) VALUES (
+        v_user_id,
+        p_email,
+        p_program_id,
+        v_role_id,
+        'Pending'
+    );
+    
+    -- Return the created user information
+    SELECT 
+        user_id,
+        email,
+        program_id,
+        role_id,
+        status,         
+        created_at
+    FROM tbl_user 
+    WHERE user_id = v_user_id;
+END $$
+DELIMITER ;
+
+DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetSpecificEvent(
 IN eventId INT, 
    userId VARCHAR(200)
@@ -1278,7 +1323,14 @@ t.created_at as payment_date,
 te.payer_name_override,
 te.remarks as payment_remarks,
 -- Certificate template information
-ct.template_path as certificate
+ct.template_path as certificate,
+-- Eligibility check
+CASE 
+    WHEN a.is_open_to = 'Open to all' THEN TRUE
+    WHEN a.is_open_to = 'NU Students only' THEN TRUE
+    WHEN a.is_open_to = 'Members only' AND om.member_id IS NOT NULL THEN TRUE
+    ELSE FALSE
+END as is_eligible
 FROM tbl_event a
 LEFT JOIN tbl_event_attendance b ON a.event_id = b.event_id AND b.user_id = userId AND b.deleted_at IS NULL
 LEFT JOIN tbl_organization c ON a.organization_id = c.organization_id
@@ -1291,6 +1343,10 @@ LEFT JOIN tbl_transaction t ON b.transaction_id = t.transaction_id
 LEFT JOIN tbl_transaction_event te ON t.transaction_id = te.transaction_id
 -- Join certificate template information
 LEFT JOIN tbl_certificate_template ct ON a.event_id = ct.event_id
+-- Join organization membership to check eligibility
+LEFT JOIN tbl_organization_members om ON a.organization_id = om.organization_id 
+    AND a.cycle_number = om.cycle_number 
+    AND om.user_id = userId
 WHERE a.event_id = eventId;
 END $$
 DELIMITER ;
@@ -10824,135 +10880,6 @@ BEGIN
 END $$
 DELIMITER ;
 
-DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE ApproveMembershipApplication(
-    IN p_application_id INT,
-    IN p_reviewer_email VARCHAR(200),
-    IN p_remarks TEXT
-)
-BEGIN
-    DECLARE v_org_id INT;
-    DECLARE v_cycle_number INT;
-    DECLARE v_user_id VARCHAR(200);
-    DECLARE v_reviewer_id VARCHAR(200);
-    DECLARE v_member_id INT;
-
-    -- Get application details
-    SELECT organization_id, cycle_number, user_id
-      INTO v_org_id, v_cycle_number, v_user_id
-      FROM tbl_membership_application
-     WHERE application_id = p_application_id;
-
-    -- Get reviewer user_id from email
-    SELECT user_id INTO v_reviewer_id
-      FROM tbl_user
-     WHERE email = p_reviewer_email
-     LIMIT 1;
-
-    -- Get the member_id for this user in this organization/cycle
-    SELECT member_id INTO v_member_id
-    FROM tbl_organization_members
-    WHERE organization_id = v_org_id
-      AND cycle_number = v_cycle_number
-      AND user_id = v_user_id
-    LIMIT 1;
-
-    -- Approve application
-    UPDATE tbl_membership_application
-       SET status = 'Approved',
-           reviewed_by = v_reviewer_id,
-           reviewed_at = NOW(),
-           remarks = p_remarks
-     WHERE application_id = p_application_id;
-
-    -- Update member status
-    UPDATE tbl_organization_members
-       SET status = 'Active'
-     WHERE organization_id = v_org_id
-       AND cycle_number = v_cycle_number
-       AND user_id = v_user_id;
-       
-    -- Log the approval using LogAction
-    CALL LogAction(
-        p_reviewer_email,
-        CONCAT('Approved membership application ID: ', p_application_id),
-        'membership_application_approval',
-        JSON_OBJECT(
-            'application_id', p_application_id,
-            'organization_id', v_org_id,
-            'cycle_number', v_cycle_number,
-            'member_user_id', v_user_id,
-            'remarks', p_remarks
-        ),
-        NULL,
-        NULL
-    );
-    
-    -- Return detailed membership information after approval (using same logic as GetPendingOrganizationMembers)
-    SELECT
-        om.member_id as id,
-        om.organization_id,
-        om.cycle_number,
-        om.user_id,
-        CONCAT(u.f_name, ' ', u.l_name) AS name,
-        u.email,
-        u.profile_picture,
-        om.member_type,
-        om.status,
-        ma.application_id,
-        ma.status AS application_status,
-        ma.applied_at,
-        ma.reviewed_by,
-        ma.reviewed_at,
-        org.membership_fee_type,
-        org.membership_fee_amount,
-        latest_transaction.transaction_id,
-        latest_transaction.amount AS paid_amount,
-        latest_transaction.status AS payment_status,
-        latest_transaction.proof_image
-    FROM tbl_organization_members om
-    JOIN tbl_user u ON om.user_id = u.user_id
-    LEFT JOIN tbl_membership_application ma
-        ON om.organization_id = ma.organization_id
-        AND om.cycle_number = ma.cycle_number
-        AND om.user_id = ma.user_id
-    LEFT JOIN tbl_organization org ON om.organization_id = org.organization_id
-    LEFT JOIN (
-        -- Subquery to get the latest transaction per user for this organization/cycle
-        SELECT 
-            tm.organization_id,
-            tm.cycle_number,
-            t.user_id,
-            t.transaction_id,
-            t.amount,
-            t.status,
-            t.proof_image,
-            ROW_NUMBER() OVER (
-                PARTITION BY tm.organization_id, tm.cycle_number, t.user_id 
-                ORDER BY 
-                    CASE t.status 
-                        WHEN 'Completed' THEN 1 
-                        WHEN 'Pending' THEN 2 
-                        ELSE 3 
-                    END,
-                    t.created_at DESC
-            ) as rn
-        FROM tbl_transaction_membership tm
-        JOIN tbl_transaction t ON tm.transaction_id = t.transaction_id
-        JOIN tbl_transaction_type tt ON t.transaction_type_id = tt.transaction_type_id
-        WHERE tt.code = 'INCOME'
-          AND t.status IN ('Pending', 'Completed')
-          AND tm.organization_id = v_org_id
-          AND tm.cycle_number = v_cycle_number
-    ) latest_transaction 
-        ON latest_transaction.organization_id = om.organization_id
-        AND latest_transaction.cycle_number = om.cycle_number
-        AND latest_transaction.user_id = om.user_id
-        AND latest_transaction.rn = 1
-    WHERE om.member_id = v_member_id  -- Use the specific member_id we found
-    LIMIT 1;
-END$$
-DELIMITER ;
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE RejectMembershipApplication(
@@ -17646,141 +17573,6 @@ BEGIN
     LEFT JOIN tbl_user reviewer ON la.reviewed_by = reviewer.user_id
     WHERE la.leave_application_id = p_leave_application_id;
     
-END$$
-DELIMITER ;
-
-DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE ApproveMembershipApplication(
-    IN p_application_id INT,
-    IN p_reviewer_email VARCHAR(200),
-    IN p_remarks TEXT
-)
-BEGIN
-    DECLARE v_org_id INT;
-    DECLARE v_cycle_number INT;
-    DECLARE v_user_id VARCHAR(200);
-    DECLARE v_reviewer_id VARCHAR(200);
-
-    -- Get application details
-    SELECT organization_id, cycle_number, user_id
-      INTO v_org_id, v_cycle_number, v_user_id
-      FROM tbl_membership_application
-     WHERE application_id = p_application_id;
-
-    -- Get reviewer user_id from email
-    SELECT user_id INTO v_reviewer_id
-      FROM tbl_user
-     WHERE email = p_reviewer_email
-     LIMIT 1;
-
-    -- SELECT the application data before updating it
-    SELECT
-        ma.application_id as id,
-        ma.organization_id,
-        ma.cycle_number,
-        ma.user_id,
-        CONCAT(u.f_name, ' ', u.l_name) AS name,
-        u.email,
-        u.profile_picture,
-        'Member' AS member_type, -- Default member type since it's a membership application
-        ma.status AS status,
-        ma.application_id,
-        ma.status AS application_status,
-        ma.applied_at,
-        ma.reviewed_by,
-        ma.reviewed_at,
-        org.membership_fee_type,
-        org.membership_fee_amount,
-        latest_transaction.transaction_id,
-        latest_transaction.amount AS paid_amount,
-        latest_transaction.status AS payment_status,
-        latest_transaction.proof_image,
-        -- Application responses as JSON array
-        (
-            SELECT JSON_ARRAYAGG(
-                JSON_OBJECT(
-                    'response_id', mr.response_id,
-                    'question_id', mr.question_id,
-                    'question_text', mq.question_text,
-                    'question_type', mq.question_type,
-                    'response_value', mr.response_value,
-                    'is_required', mq.is_required
-                )
-            )
-            FROM tbl_membership_response mr
-            JOIN tbl_membership_question mq ON mr.question_id = mq.question_id
-            WHERE mr.application_id = ma.application_id
-        ) AS application_responses
-    FROM tbl_membership_application ma
-    JOIN tbl_user u ON ma.user_id = u.user_id
-    LEFT JOIN tbl_organization org ON ma.organization_id = org.organization_id
-    LEFT JOIN (
-        -- Subquery to get the latest MEMBERSHIP transaction per user for this organization/cycle
-        SELECT 
-            tm.organization_id,
-            tm.cycle_number,
-            t.user_id,
-            t.transaction_id,
-            t.amount,
-            t.status,
-            t.proof_image,
-            ROW_NUMBER() OVER (
-                PARTITION BY tm.organization_id, tm.cycle_number, t.user_id 
-                ORDER BY 
-                    CASE t.status 
-                        WHEN 'Completed' THEN 1 
-                        WHEN 'Pending' THEN 2 
-                        ELSE 3 
-                    END,
-                    t.created_at DESC
-            ) as rn
-        FROM tbl_transaction_membership tm
-        JOIN tbl_transaction t ON tm.transaction_id = t.transaction_id
-        JOIN tbl_transaction_type tt ON t.transaction_type_id = tt.transaction_type_id
-        JOIN tbl_financial_category fc ON t.category_id = fc.category_id
-        WHERE tt.code = 'INCOME'
-          AND fc.code = 'MEMBERSHIP'  -- Only get transactions with MEMBERSHIP category
-          AND t.status IN ('Pending', 'Completed')
-          AND tm.organization_id = v_org_id
-          AND tm.cycle_number = v_cycle_number
-    ) latest_transaction 
-        ON latest_transaction.organization_id = ma.organization_id
-        AND latest_transaction.cycle_number = ma.cycle_number
-        AND latest_transaction.user_id = ma.user_id
-        AND latest_transaction.rn = 1
-    WHERE ma.application_id = p_application_id
-    LIMIT 1;
-
-    -- Now approve the application
-    UPDATE tbl_membership_application
-       SET status = 'Approved',
-           reviewed_by = v_reviewer_id,
-           reviewed_at = NOW(),
-           remarks = p_remarks
-     WHERE application_id = p_application_id;
-
-    -- Update member status in organization_members (if record exists)
-    UPDATE tbl_organization_members
-       SET status = 'Active'
-     WHERE organization_id = v_org_id
-       AND cycle_number = v_cycle_number
-       AND user_id = v_user_id;
-       
-    -- Log the approval using LogAction
-    CALL LogAction(
-        p_reviewer_email,
-        CONCAT('Approved membership application ID: ', p_application_id),
-        'membership_application_approval',
-        JSON_OBJECT(
-            'application_id', p_application_id,
-            'organization_id', v_org_id,
-            'cycle_number', v_cycle_number,
-            'member_user_id', v_user_id,
-            'remarks', p_remarks
-        ),
-        NULL,
-        NULL
-    );
 END$$
 DELIMITER ;
 
