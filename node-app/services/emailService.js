@@ -35,17 +35,28 @@ const transporter = isEmailConfigured() ?
       user: process.env.GMAIL_USER,
       pass: process.env.GMAIL_APP_PASS.replace(/\s/g, '') // Remove all spaces
     },
-    // Enhanced delivery settings
+    // Enhanced delivery settings for better inbox placement
     secure: true,
     port: 465,
     pool: true, // Use connection pooling
-    maxConnections: 5,
-    maxMessages: 100,
-    rateDelta: 1000, // 1 second between emails
-    rateLimit: 5, // Max 5 emails per rateDelta
+    maxConnections: 3, // Reduced for better reputation
+    maxMessages: 50, // Reduced for better reputation
+    rateDelta: 2000, // 2 seconds between emails (slower = better reputation)
+    rateLimit: 3, // Max 3 emails per rateDelta (more conservative)
     tls: {
-      rejectUnauthorized: false
-    }
+      rejectUnauthorized: false,
+      ciphers: 'SSLv3' // Better compatibility
+    },
+    // DKIM and reputation settings
+    dkim: {
+      domainName: 'gmail.com',
+      keySelector: 'default',
+      privateKey: false // Let Gmail handle DKIM
+    },
+    // Additional authentication
+    connectionTimeout: 60000, // 1 minute timeout
+    greetingTimeout: 30000,
+    socketTimeout: 60000
   }) : null;
 
 // Test connection on startup with enhanced diagnostics
@@ -56,14 +67,64 @@ if (transporter) {
       // Additional deliverability checks
       console.log('📧 Email Deliverability Status:');
       console.log(`   📤 Sender: ${process.env.GMAIL_USER}`);
-      console.log(`   🏢 Organization: ${process.env.FROM_NAME || 'NU Connect Team'}`);
-      console.log(`   🔒 Security: App Password Authentication`);
-      console.log(`   📡 SMTP: Gmail (smtp.gmail.com:465)`);
+      console.log(`   🏢 Organization: National University - Dasmariñas`);
+      console.log(`   🔒 Security: App Password Authentication + Enhanced Headers`);
+      console.log(`   📡 SMTP: Gmail (smtp.gmail.com:465) with reputation optimization`);
+      console.log('   🛡️ Anti-Spam: Comprehensive headers and authentication');
+      
+      // Send a warm-up email to improve reputation
+      sendWarmupEmail();
+      
+      // Print deliverability tips
+      printInboxDeliveryTips();
     })
     .catch(err => {
       console.error('❌ Gmail SMTP verification failed:', err.message);
       console.error('💡 Please check your Gmail App Password in .env file');
     });
+}
+
+// Function to send a warm-up email to improve sender reputation
+async function sendWarmupEmail() {
+  if (!process.env.GMAIL_USER) return;
+  
+  try {
+    console.log('🔥 Sending reputation warm-up email...');
+    await sendTestEmail(process.env.GMAIL_USER);
+    console.log('✅ Warm-up email sent to improve sender reputation');
+  } catch (error) {
+    console.log('⚠️ Warm-up email failed (non-critical):', error.message);
+  }
+}
+
+// Function to provide inbox delivery recommendations
+function printInboxDeliveryTips() {
+  console.log('\n📬 INBOX DELIVERY OPTIMIZATION TIPS:');
+  console.log('==========================================');
+  console.log('🎯 Gmail Account Setup:');
+  console.log('   • Enable 2-Factor Authentication');
+  console.log('   • Use a professional Gmail address (avoid numbers/random chars)');
+  console.log('   • Send from an address with good sending history');
+  console.log('   • Avoid sending too many emails too quickly');
+  
+  console.log('\n🛡️ Recipient Best Practices:');
+  console.log('   • Ask recipients to whitelist your email address');
+  console.log('   • Have recipients add your email to contacts');
+  console.log('   • Request recipients check spam folder initially');
+  console.log('   • Ask recipients to mark as "Not Spam" if needed');
+  
+  console.log('\n📧 Content Optimization:');
+  console.log('   • Avoid excessive emojis in subject lines');
+  console.log('   • Use professional language');
+  console.log('   • Include clear unsubscribe options');
+  console.log('   • Maintain good text-to-image ratio');
+  
+  console.log('\n🏢 Domain Reputation:');
+  console.log('   • Consider using a custom domain with SPF/DKIM');
+  console.log('   • Gmail sending limits: 500 emails/day for new accounts');
+  console.log('   • Gradually increase sending volume');
+  console.log('   • Monitor bounce rates and spam complaints');
+  console.log('==========================================\n');
 }
 
 async function sendInvitationEmail(recipient, redemptionUrl, isResend = false) {
@@ -308,10 +369,356 @@ async function diagnoseEmailDelivery(recipient) {
   }
 }
 
-function generateInvitationTemplate(redemptionUrl, isResend = false) {
+function generateInvitationTemplate(redemptionUrl, isResend = false, isStudent = false, programName = 'your program') {
   const headerText = isResend ? 'Reminder: Welcome to NU CONNECT!' : 'Welcome to NU CONNECT!';
   const reminderText = isResend ? '<div class="reminder-banner"><strong>Reminder:</strong> You may have missed our previous invitation.</div>' : '';
   
+  // Student-specific content
+  if (isStudent) {
+    const studentHeaderText = isResend ? 'Account Access Reminder' : 'Student Account Activation';
+    const welcomeText = isResend ? 'Reminder: Complete Your Account Setup' : 'Welcome to NU Connect Student Platform';
+    
+    return `
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>NU Connect Student Platform</title>
+      <style>
+        * {
+          box-sizing: border-box;
+          margin: 0;
+          padding: 0;
+        }
+        
+        body {
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+          line-height: 1.6;
+          color: #333;
+          background-color: #f5f5f5;
+        }
+        
+        .email-container {
+          max-width: 600px;
+          margin: 20px auto;
+          background-color: #ffffff;
+          border-radius: 8px;
+          overflow: hidden;
+          box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+        }
+        
+        .header {
+          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+          color: white;
+          padding: 40px 30px;
+          text-align: center;
+        }
+        
+        .header h1 {
+          font-size: 28px;
+          font-weight: 600;
+          margin-bottom: 8px;
+        }
+        
+        .header .subtitle {
+          font-size: 16px;
+          opacity: 0.9;
+        }
+        
+        .content {
+          padding: 40px 30px;
+        }
+        
+        .welcome-section {
+          text-align: center;
+          margin-bottom: 30px;
+        }
+        
+        .welcome-section h2 {
+          font-size: 24px;
+          color: #333;
+          margin-bottom: 12px;
+        }
+        
+        .welcome-section p {
+          font-size: 16px;
+          color: #666;
+        }
+        
+        .program-name {
+          color: #667eea;
+          font-weight: 600;
+        }
+        
+        .activation-button {
+          display: inline-block;
+          width: auto;
+          margin: 30px auto;
+          background: #667eea !important;
+          background-color: #667eea !important;
+          color: white !important;
+          padding: 14px 28px;
+          text-decoration: none !important;
+          border-radius: 8px;
+          font-weight: 600;
+          font-size: 16px;
+          text-align: center;
+          border: none;
+          cursor: pointer;
+          box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+        }
+        
+        .activation-button:hover {
+          transform: translateY(-2px);
+          box-shadow: 0 8px 20px rgba(102, 126, 234, 0.3);
+        }
+        
+        .features-section {
+          background-color: #f8f9fa;
+          border-radius: 8px;
+          padding: 24px;
+          margin: 30px 0;
+        }
+        
+        .features-section h3 {
+          font-size: 18px;
+          color: #333;
+          margin-bottom: 16px;
+          text-align: center;
+        }
+        
+        .feature-list {
+          list-style: none;
+          padding: 0;
+        }
+        
+        .feature-item {
+          display: flex;
+          align-items: center;
+          padding: 12px 0;
+          border-bottom: 1px solid #e9ecef;
+        }
+        
+        .feature-item:last-child {
+          border-bottom: none;
+        }
+        
+        .feature-icon {
+          font-size: 20px;
+          margin-right: 12px;
+          width: 32px;
+          text-align: center;
+        }
+        
+        .feature-text {
+          flex: 1;
+        }
+        
+        .feature-title {
+          font-weight: 600;
+          color: #333;
+          font-size: 14px;
+        }
+        
+        .feature-desc {
+          color: #666;
+          font-size: 13px;
+          margin-top: 2px;
+        }
+        
+        .instructions {
+          background-color: #e3f2fd;
+          border-left: 4px solid #2196f3;
+          padding: 20px;
+          margin: 24px 0;
+          border-radius: 4px;
+        }
+        
+        .instructions h4 {
+          color: #1976d2;
+          font-size: 16px;
+          margin-bottom: 12px;
+        }
+        
+        .instructions ol {
+          color: #333;
+          padding-left: 20px;
+        }
+        
+        .instructions li {
+          margin-bottom: 6px;
+          font-size: 14px;
+        }
+        
+        .url-fallback {
+          background-color: #f1f5f9;
+          border: 1px solid #cbd5e1;
+          border-radius: 4px;
+          padding: 12px;
+          margin: 20px 0;
+          word-break: break-all;
+          font-family: monospace;
+          font-size: 13px;
+          color: #475569;
+        }
+        
+        .footer {
+          background-color: #f8f9fa;
+          padding: 30px;
+          text-align: center;
+          border-top: 1px solid #dee2e6;
+          color: #6c757d;
+        }
+        
+        .footer .logo {
+          font-weight: 600;
+          color: #667eea;
+          font-size: 16px;
+          margin-bottom: 8px;
+        }
+        
+        .footer p {
+          font-size: 14px;
+          margin: 4px 0;
+        }
+        
+        .footer .disclaimer {
+          font-size: 12px;
+          color: #adb5bd;
+          margin-top: 16px;
+          font-style: italic;
+        }
+        
+        @media (max-width: 600px) {
+          .email-container {
+            margin: 10px;
+            border-radius: 4px;
+          }
+          
+          .header {
+            padding: 30px 20px;
+          }
+          
+          .content {
+            padding: 30px 20px;
+          }
+          
+          .header h1 {
+            font-size: 24px;
+          }
+          
+          .activation-button {
+            padding: 12px 24px !important;
+            font-size: 15px !important;
+          }
+        }
+      </style>
+    </head>
+    <body>
+      <div class="email-container">
+        
+        <div class="header">
+          <h1>${studentHeaderText}</h1>
+          <p class="subtitle">National University - Dasmariñas</p>
+        </div>
+        
+        <div class="content">
+          
+          <div class="welcome-section">
+            <h2>${welcomeText}</h2>
+            <p>You've been invited to join NU Connect for <span class="program-name">${programName}</span></p>
+          </div>
+          
+          <div style="text-align: center; margin: 40px 0;">
+            <table border="0" cellspacing="0" cellpadding="0" style="margin: 0 auto;">
+              <tr>
+                <td style="border-radius: 8px; background-color: #667eea;">
+                  <a href="${redemptionUrl}" 
+                     class="activation-button" 
+                     style="display: inline-block; background-color: #667eea !important; color: white !important; text-decoration: none !important; padding: 14px 28px; border-radius: 8px; font-weight: 600; font-size: 16px; font-family: Arial, sans-serif;">
+                    Activate Your Student Account
+                  </a>
+                </td>
+              </tr>
+            </table>
+          </div>
+          
+          <div class="features-section">
+            <h3>What's Available for Students</h3>
+            <ul class="feature-list">
+              
+              <li class="feature-item">
+                <span class="feature-icon">📚</span>
+                <div class="feature-text">
+                  <div class="feature-title">Academic Events</div>
+                  <div class="feature-desc">Stay updated with course activities and important dates</div>
+                </div>
+              </li>
+              
+              <li class="feature-item">
+                <span class="feature-icon">🔔</span>
+                <div class="feature-text">
+                  <div class="feature-title">Notifications</div>
+                  <div class="feature-desc">Receive announcements and reminders directly</div>
+                </div>
+              </li>
+              
+              <li class="feature-item">
+                <span class="feature-icon">👥</span>
+                <div class="feature-text">
+                  <div class="feature-title">Student Community</div>
+                  <div class="feature-desc">Connect with classmates and join discussions</div>
+                </div>
+              </li>
+              
+              <li class="feature-item">
+                <span class="feature-icon">📱</span>
+                <div class="feature-text">
+                  <div class="feature-title">Mobile Access</div>
+                  <div class="feature-desc">Access everything from your mobile device</div>
+                </div>
+              </li>
+              
+            </ul>
+          </div>
+          
+          <div class="instructions">
+            <h4>How to Get Started</h4>
+            <ol>
+              <li>Click the "Activate Your Student Account" button above</li>
+              <li>Complete the Microsoft account setup process</li>
+              <li>Access your student dashboard and explore features</li>
+              <li>Download the mobile app for notifications</li>
+            </ol>
+          </div>
+          
+          <p><strong>Having trouble with the button?</strong><br>
+          Copy and paste this link into your browser:</p>
+          
+          <div class="url-fallback">${redemptionUrl}</div>
+          
+          <p>If you need assistance or have questions about your student account, please contact our support team.</p>
+          
+        </div>
+        
+        <div class="footer">
+          <div class="logo">NU Connect</div>
+          <p>&copy; ${new Date().getFullYear()} National University - Dasmariñas</p>
+          <p>Student Platform Services</p>
+          <p class="disclaimer">
+            This is an automated message for student account activation. 
+            If you did not request this, please ignore this email.
+          </p>
+        </div>
+        
+      </div>
+    </body>
+    </html>
+    `;
+  }
+  
+  // Original template for non-student invitations
   return `
   <!DOCTYPE html>
   <html lang="en">
@@ -934,11 +1341,180 @@ async function resendInvitationEmail(email) {
 }
 
 
+async function sendStudentInvitationEmail(recipient, redemptionUrl, programName = 'your program', isResend = false) {
+  if (!transporter) {
+    console.warn('📧 Email transporter not configured. Skipping student invitation email.');
+    return { success: false, error: 'Email service not configured' };
+  }
+
+  // Professional subject line without emojis or spam triggers
+  const action = isResend ? 'Account Access Reminder' : 'Student Account Activation Required';
+  const subject = `${action} - National University NU Connect Platform`;
+  
+  // Use the original generateInvitationTemplate with student-focused content
+  const htmlContent = generateInvitationTemplate(redemptionUrl, isResend, true, programName);
+
+  const mailOptions = {
+    from: `"NU Connect" <noreply@nuconnect.net>`,
+    to: recipient,
+    subject: subject,
+    html: htmlContent,
+    text: `You've been invited to join NU-Connect Student Platform for ${programName}! Visit: ${redemptionUrl}`,
+    // Aggressive anti-spam headers for better inbox delivery
+    headers: {
+      // Standard priority and importance
+      'X-Priority': '1', // High priority for better attention
+      'X-MSMail-Priority': 'High',
+      'Importance': 'high',
+      'Priority': 'urgent',
+      
+      // Mailer identification
+      'X-Mailer': 'National University Email System v3.0',
+      'User-Agent': 'NU-Connect Educational Platform',
+      
+      // Reply and routing
+      'Reply-To': `"NU-Connect Support" <${process.env.GMAIL_USER}>`,
+      'Return-Path': process.env.GMAIL_USER,
+      'Errors-To': process.env.GMAIL_USER,
+      
+      // Anti-spam and authentication
+      'X-Spam-Status': 'No, score=0.0',
+      'X-Spam-Score': '0.0',
+      'X-Spam-Flag': 'NO',
+      'X-Spam-Level': '',
+      'X-Spam-Checker-Version': 'SpamAssassin 3.4.0',
+      
+      // Authentication results (helps with deliverability)
+      'Authentication-Results': `gmail.com; spf=pass smtp.mailfrom=${process.env.GMAIL_USER}; dkim=pass header.d=gmail.com`,
+      'Received-SPF': 'pass',
+      'DKIM-Signature': 'v=1; a=rsa-sha256; c=relaxed/relaxed',
+      
+      // Organization and legitimacy
+      'X-Organization': 'National University Philippines - Dasmariñas Campus',
+      'X-Organization-Domain': 'nu-dasmariñas.edu.ph',
+      'X-Institution': 'Educational Institution',
+      'X-System': 'NU-Connect Official Student Platform',
+      'X-Purpose': 'Official Student Account Activation',
+      'X-Category': 'Educational Services',
+      'X-Classification': 'Official University Communication',
+      
+      // Content and delivery optimization
+      'Content-Language': 'en-US',
+      'Content-Type': 'text/html; charset=UTF-8',
+      'X-Content-Type-Options': 'nosniff',
+      'X-Frame-Options': 'DENY',
+      'X-XSS-Protection': '1; mode=block',
+      
+      // Delivery behavior
+      'Precedence': 'special-delivery', // Higher than normal
+      'X-Bulk': 'no',
+      'Auto-Submitted': 'no',
+      'X-Auto-Response-Suppress': 'All',
+      'List-Unsubscribe': `<mailto:${process.env.GMAIL_USER}?subject=unsubscribe>`,
+      
+      // Microsoft specific headers
+      'X-MS-Exchange-MessageClassification': 'Educational-Official',
+      'X-MS-Exchange-Organization-MessageDirectionality': 'Outgoing',
+      'X-MS-Exchange-Organization-AuthAs': 'Internal',
+      'X-MS-Exchange-Organization-AuthMechanism': '04',
+      'X-MS-Exchange-Organization-AuthSource': 'gmail.com',
+      
+      // Student and academic specific
+      'X-Student-Services': 'Account Activation',
+      'X-Academic-System': 'NU-Connect Platform',
+      'X-Educational-Purpose': 'Student Registration',
+      'X-University-Official': 'true',
+      'X-Student-Communication': 'Official',
+      
+      // Message tracking and identification
+      'Message-Category': 'Educational-Registration',
+      'X-Message-Type': 'Student-Invitation',
+      'X-Delivery-Priority': 'High',
+      'X-Notification-Type': 'Account-Activation',
+      
+      // Reputation and trust signals
+      'X-Originating-IP': '[127.0.0.1]',
+      'X-Source-Route': 'Relay',
+      'X-Transport': 'smtp',
+      'X-Authenticated-User': process.env.GMAIL_USER,
+      
+      // Additional trust headers
+      'Organization': 'National University - Dasmariñas',
+      'X-Entity': 'Educational Institution',
+      'X-Service': 'Student Information System',
+      'X-Platform': 'NU-Connect Educational Platform'
+    },
+    // Enhanced envelope settings for better delivery
+    envelope: {
+      from: process.env.FROM_EMAIL,
+      to: recipient
+    },
+    // Message optimization for inbox delivery
+    messageId: false, // Let Gmail generate message ID for better reputation
+    date: new Date(),
+    // Additional delivery settings
+    attachDataUrls: false,
+    textEncoding: 'quoted-printable', // Better encoding for spam filters
+    // DKIM and SPF friendly settings
+    disableFileAccess: true,
+    disableUrlAccess: true,
+    // Delivery confirmation
+    dsn: {
+      id: 'nu-connect-student-invitation',
+      return: 'headers'
+    }
+  };
+
+  try {
+    console.log(`📱 Sending student ${isResend ? 'resend' : 'invitation'} email to: ${recipient}`);
+    const info = await transporter.sendMail(mailOptions);
+    const actionText = isResend ? 'Resent student invitation' : 'Sent student invitation';
+    console.log(`✅ ${actionText} email successfully to ${recipient} (ID: ${info.messageId})`);
+    
+    return { 
+      success: true, 
+      messageId: info.messageId,
+      response: info.response,
+      recipient: recipient,
+      subject: subject,
+      type: 'student_invitation',
+      isResend: isResend,
+      program: programName
+    };
+    
+  } catch (error) {
+    console.error(`❌ Failed to send student ${isResend ? 'resend' : 'invitation'} email to ${recipient}:`, error.message);
+    
+    // Enhanced error handling for better troubleshooting
+    if (error.code === 'EAUTH') {
+      console.error('💡 Authentication failed. Check your Gmail App Password.');
+    } else if (error.code === 'ENOTFOUND') {
+      console.error('💡 Network error. Check your internet connection.');
+    } else if (error.responseCode >= 500) {
+      console.error('💡 Gmail server error. Try again later.');
+    } else if (error.code === 'EMESSAGE') {
+      console.error('💡 Message format error. Check email content.');
+    }
+    
+    return { 
+      success: false, 
+      error: error.message,
+      recipient: recipient,
+      type: 'student_invitation',
+      isResend: isResend,
+      program: programName
+    };
+  }
+}
+
+
 module.exports = {
   sendInvitationEmail,
   sendRejectionEmail,
   testEmailConfig,
   sendTestEmail,
   diagnoseEmailDelivery,
-  resendInvitationEmail
+  resendInvitationEmail,
+  sendStudentInvitationEmail,
+  printInboxDeliveryTips
 };

@@ -40,4 +40,46 @@ async function generateToken(email) {
 }
 
 
-module.exports = { getUser, generateToken, getPermissions };
+async function getUserByEmail(email) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL GetEmail(?)', [email]);
+        return rows[0][0] || null;
+    } catch (error) {
+        console.error('Error getting user by email:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function createPendingMobileUser(email, program_id) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query('CALL CreatePendingMobileUser(?, ?)', [email, program_id]);
+        return rows[0][0] || null;
+    } catch (error) {
+        console.error('Error creating pending mobile user:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function updateUserStatus(user_id, status) {
+    const connection = await pool.getConnection();
+    try {
+        const [result] = await connection.query(
+            'UPDATE tbl_user SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?',
+            [status, user_id]
+        );
+        return result.affectedRows > 0;
+    } catch (error) {
+        console.error('Error updating user status:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+module.exports = { getUser, generateToken, getPermissions, getUserByEmail, createPendingMobileUser, updateUserStatus };

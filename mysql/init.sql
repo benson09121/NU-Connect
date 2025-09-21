@@ -1249,6 +1249,51 @@ END $$
 DELIMITER ;
 
 DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE CreatePendingMobileUser(
+    IN p_email VARCHAR(100),
+    IN p_program_id INT
+)
+BEGIN
+    DECLARE v_user_id VARCHAR(200);
+    DECLARE v_role_id INT DEFAULT 1; -- Assuming 1 is student role, adjust as needed
+    
+    -- Generate UUID for user_id
+    SET v_user_id = UUID();
+    
+    -- Check if email already exists
+    IF EXISTS (SELECT 1 FROM tbl_user WHERE email = p_email) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Email already exists';
+    END IF;
+    
+    -- Insert pending user
+    INSERT INTO tbl_user (
+        user_id,
+        email,
+        program_id,
+        role_id,
+        status
+    ) VALUES (
+        v_user_id,
+        p_email,
+        p_program_id,
+        v_role_id,
+        'Pending'
+    );
+    
+    -- Return the created user information
+    SELECT 
+        user_id,
+        email,
+        program_id,
+        role_id,
+        status,         
+        created_at
+    FROM tbl_user 
+    WHERE user_id = v_user_id;
+END $$
+DELIMITER ;
+
+DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetSpecificEvent(
 IN eventId INT, 
    userId VARCHAR(200)
@@ -1290,7 +1335,14 @@ t.created_at as payment_date,
 te.payer_name_override,
 te.remarks as payment_remarks,
 -- Certificate template information
-ct.template_path as certificate
+ct.template_path as certificate,
+-- Eligibility check
+CASE 
+    WHEN a.is_open_to = 'Open to all' THEN TRUE
+    WHEN a.is_open_to = 'NU Students only' THEN TRUE
+    WHEN a.is_open_to = 'Members only' AND om.member_id IS NOT NULL THEN TRUE
+    ELSE FALSE
+END as is_eligible
 FROM tbl_event a
 LEFT JOIN tbl_event_attendance b ON a.event_id = b.event_id AND b.user_id = userId AND b.deleted_at IS NULL
 LEFT JOIN tbl_organization c ON a.organization_id = c.organization_id
@@ -1303,6 +1355,10 @@ LEFT JOIN tbl_transaction t ON b.transaction_id = t.transaction_id
 LEFT JOIN tbl_transaction_event te ON t.transaction_id = te.transaction_id
 -- Join certificate template information
 LEFT JOIN tbl_certificate_template ct ON a.event_id = ct.event_id
+-- Join organization membership to check eligibility
+LEFT JOIN tbl_organization_members om ON a.organization_id = om.organization_id 
+    AND a.cycle_number = om.cycle_number 
+    AND om.user_id = userId
 WHERE a.event_id = eventId;
 END $$
 DELIMITER ;
