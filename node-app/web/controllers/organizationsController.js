@@ -5,6 +5,99 @@ const { subscribeToChannel, publishToChannel } = require('./sseController');
 const organizationsModel = require('../models/organizationsModel');
 const userCacheModel = require('../models/userCacheModel');
 
+// Helper function for unified organization hub channel
+const getOrgHubChannel = (orgId, orgVersionId) => `orghub_${orgId}_${orgVersionId}`;
+
+// Keep the publishOrgHub function simple - just publish to the hub channel
+function publishOrgHub({ orgId, orgVersionId, entity, operation, data }) {
+  const hubChannel = getOrgHubChannel(orgId, orgVersionId);
+  
+  // Format that matches what RealTimeContext expects
+  const hubEvent = {
+    channel: hubChannel,
+    operation,
+    data: Array.isArray(data) ? data : [data],
+    timestamp: Date.now()
+  };
+  
+  // Publish to hub channel
+  publishToChannel(hubChannel, hubEvent);
+  
+  // Also publish to entity-specific channel for backward compatibility
+  const entityChannel = `${entity}_${orgId}_${orgVersionId}`;
+  publishToChannel(entityChannel, {
+    operation,
+    data: Array.isArray(data) ? data : [data],
+    timestamp: Date.now()
+  });
+}
+
+//////////////////   
+
+// Helper function for standardized real-time endpoints
+const handleRealtimeEndpoint = async (req, res, dataFetcher, entity) => {
+  try {
+    const { org_id, org_version_id, sessionId, hub } = req.query;
+    
+    // Always fetch and return data immediately
+    const data = await dataFetcher(org_id, org_version_id);
+    
+    // If sessionId is provided, the client wants real-time updates
+    // The RealTimeContext will handle the subscription when it calls this endpoint
+    // We just need to return the data
+    
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+async function getOrganizationHubData(req, res) {
+  try {
+    const { org_id, org_version_id } = req.query;
+    
+    if (!org_id || !org_version_id) {
+      return res.status(400).json({ error: 'org_id and org_version_id are required' });
+    }
+    
+    // Fetch all data in parallel
+    const [
+      officers,
+      members,
+      committees,
+      committeeMembers,
+      pendingMembers,
+      archivedMembers,
+      leaveApplications
+    ] = await Promise.all([
+      organizationsModel.getOrganizationOfficers(org_id, org_version_id).catch(() => []),
+      organizationsModel.getOrganizationMembers(org_id, org_version_id).catch(() => []),
+      organizationsModel.getOrganizationCommittees(org_id, org_version_id).catch(() => []),
+      organizationsModel.getAllCommitteeMembers(org_id, org_version_id).catch(() => []),
+      organizationsModel.getPendingOrganizationMembers(org_id, org_version_id).catch(() => []),
+      organizationsModel.getArchivedOrganizationMembers(org_id, org_version_id).catch(() => []),
+      organizationsModel.getLeaveApplications(org_id, org_version_id).catch(() => [])
+    ]);
+    
+    // Return all data at once
+    res.json({
+      officers,
+      members,
+      committees,
+      committeeMembers,
+      pendingMembers,
+      archivedMembers,
+      leaveApplications
+    });
+    
+  } catch (error) {
+    console.error('Error fetching organization hub data:', error);
+    res.status(500).json({
+      error: error.message || 'An error occurred while fetching organization hub data'
+    });
+  }
+}
+
 async function getOrganizations(req, res) {
   const { sessionId, user_role, org_name, status } = req.query;
   const program_id = req.query.program_id || null;
@@ -68,34 +161,22 @@ async function getOrganizationDetails(req, res) {
   }
 }
 
-async function getOrganizationOfficers(req,res){
-  try {
-    const { org_id, org_version_id, sessionId } = req.query;
-    const officers = await organizationsModel.getOrganizationOfficers(org_id, org_version_id);
-    if (sessionId) {
-      subscribeToChannel(sessionId, `organization_officers_${org_id}_${org_version_id}`);
-    }
-    res.status(200).json(officers);
-  } catch (error) {
-    res.status(500).json({
-      error: error.message || "An error occurred while fetching the organization officers.",
-    });
-  }
+async function getOrganizationOfficers(req, res) {
+  return handleRealtimeEndpoint(
+    req, 
+    res, 
+    organizationsModel.getOrganizationOfficers,
+    'organization_officers'
+  );
 }
 
 async function getOrganizationMembers(req, res) {
-  try {
-    const { org_id, org_version_id, sessionId } = req.query;
-    const members = await organizationsModel.getOrganizationMembers(org_id, org_version_id);
-    if (sessionId) {
-      subscribeToChannel(sessionId, `organization_members_${org_id}_${org_version_id}`);
-    }
-    res.status(200).json(members);
-  } catch (error) {
-    res.status(500).json({
-      error: error.message || "An error occurred while fetching the organization members.",
-    });
-  }
+  return handleRealtimeEndpoint(
+    req, 
+    res, 
+    organizationsModel.getOrganizationMembers,
+    'organization_members'
+  );
 }
 
 async function createOrganizationApplication(req, res) {
@@ -365,10 +446,13 @@ async function approveApplication(req, res) {
     );
     const result = approvalRow[0]?.result;
 
-    // timeline update
+    // Get the updated approval timeline after the approval
+    const updatedTimeline = await organizationsModel.GetApprovalTimeline(appName, application_id);
+    
+    // Publish the complete updated timeline
     publishToChannel(`application_approval_timeline_${appName}_${application_id}`, {
       operation: 'UPDATE',
-      data: [result.application],
+      data: Array.isArray(updatedTimeline) ? updatedTimeline : [updatedTimeline],
       timestamp: new Date()
     });
 
@@ -450,6 +534,7 @@ async function approveApplication(req, res) {
       approval: approvalRow
     });
   } catch (error) {
+    console.error('Approval error:', error);
     res.status(500).json({
       error: error.message || "An error occurred while approving the application.",
     });
@@ -465,9 +550,13 @@ async function rejectApplication(req, res) {
       application_id
     );
 
+    // Get the updated approval timeline after the rejection
+    const updatedTimeline = await organizationsModel.GetApprovalTimeline(appName, application_id);
+
+    // Publish the complete updated timeline
     publishToChannel(`application_approval_timeline_${appName}_${application_id}`, {
       operation: 'UPDATE',
-      data: approvalRow,
+      data: Array.isArray(updatedTimeline) ? updatedTimeline : [updatedTimeline],
       timestamp: new Date()
     });
 
@@ -476,6 +565,7 @@ async function rejectApplication(req, res) {
       approval: approvalRow
     });
   } catch (error) {
+    console.error('Rejection error:', error);
     res.status(500).json({
       error: error.message || "An error occurred while rejecting the application.",
     });
@@ -739,10 +829,14 @@ async function createExecutiveMember(req, res) {
       orgVersionId
     });
 
-    publishToChannel(`organization_officers_${orgId}_${orgVersionId}`, {
+    // Publish to both old channel (backward compatibility) and new hub
+    publishOrgHub({
+      orgId, 
+      orgVersionId,
+      entity: 'officers',
       operation: 'CREATE',
-      data: Array.isArray(result) ? result : [result],
-      timestamp: new Date()
+      data: result,
+      legacyChannel: `organization_officers_${orgId}_${orgVersionId}`
     });
 
     res.status(201).json({ message: result.message });
@@ -766,10 +860,14 @@ async function updateExecutiveMember(req, res) {
       action_by_email
     });
 
-    publishToChannel(`organization_officers_${orgId}_${orgVersionId}`, {
+    // Publish to both old channel (backward compatibility) and new hub
+    publishOrgHub({
+      orgId, 
+      orgVersionId,
+      entity: 'officers',
       operation: 'UPDATE',
-      data: Array.isArray(result) ? result : [result],
-      timestamp: new Date()
+      data: result,
+      legacyChannel: `organization_officers_${orgId}_${orgVersionId}`
     });
 
     res.status(200).json({ message: "Update Successful" });
@@ -778,6 +876,7 @@ async function updateExecutiveMember(req, res) {
     res.status(400).json({ error: sqlMessage });
   }
 }
+
 async function archiveExecutiveMember(req, res) {
   try {
     const { organization_id, email, orgVersionId } = req.body;
@@ -789,10 +888,14 @@ async function archiveExecutiveMember(req, res) {
       action_by_email
     });
 
-    publishToChannel(`organization_officers_${organization_id}_${orgVersionId}`, {
+    // Publish to both old channel (backward compatibility) and new hub
+    publishOrgHub({
+      orgId: organization_id, 
+      orgVersionId,
+      entity: 'officers',
       operation: 'DELETE',
-      data: Array.isArray(result) ? result : [result],
-      timestamp: new Date()
+      data: result,
+      legacyChannel: `organization_officers_${organization_id}_${orgVersionId}`
     });
 
     res.status(200).json({ message: "Archive Successful" });
@@ -803,17 +906,14 @@ async function archiveExecutiveMember(req, res) {
 }
 
 async function getOrganizationCommittees(req, res) {
-  try {
-    const { org_id, org_version_id, sessionId } = req.query;
-    const committees = await organizationsModel.getOrganizationCommittees(org_id, org_version_id);
-    if (sessionId) subscribeToChannel(sessionId, `organization_committees_${org_id}_${org_version_id}`);
-    res.status(200).json(committees);
-  } catch (error) {
-    res.status(500).json({
-      error: error.message || "An error occurred while fetching organization committees.",
-    });
-  }
+  return handleRealtimeEndpoint(
+    req, 
+    res, 
+    organizationsModel.getOrganizationCommittees,
+    'organization_committees'
+  );
 }
+
 async function createCommittee(req, res) {
   try {
     const { committee_name, description, orgId, orgVersionId } = req.body;
@@ -826,10 +926,14 @@ async function createCommittee(req, res) {
       action_by_email,
     });
 
-    publishToChannel(`organization_committees_${orgId}_${orgVersionId}`, {
+    // Publish to both old channel (backward compatibility) and new hub
+    publishOrgHub({
+      orgId, 
+      orgVersionId,
+      entity: 'committees',
       operation: 'CREATE',
-      data: Array.isArray(result) ? result : [result],
-      timestamp: new Date()
+      data: result,
+      legacyChannel: `organization_committees_${orgId}_${orgVersionId}`
     });
 
     res.status(201).json({ message: 'Committee created successfully.' });
@@ -838,6 +942,7 @@ async function createCommittee(req, res) {
     res.status(400).json({ error: sqlMessage });
   }
 }
+
 async function updateCommittee(req, res) {
   try {
     const { committee_id, new_name, new_description, orgId, orgVersionId } = req.body;
@@ -850,10 +955,14 @@ async function updateCommittee(req, res) {
       action_by_email
     });
 
-    publishToChannel(`organization_committees_${orgId}_${orgVersionId}`, {
+    // Publish to both old channel (backward compatibility) and new hub
+    publishOrgHub({
+      orgId, 
+      orgVersionId,
+      entity: 'committees',
       operation: 'UPDATE',
-      data: Array.isArray(result) ? result : [result],
-      timestamp: new Date()
+      data: result,
+      legacyChannel: `organization_committees_${orgId}_${orgVersionId}`
     });
 
     res.status(200).json({ message: 'Committee updated successfully.' });
@@ -862,6 +971,7 @@ async function updateCommittee(req, res) {
     res.status(400).json({ error: sqlMessage });
   }
 }
+
 async function archiveCommittee(req, res) {
   try {
     const { committee_id, reason, orgId, orgVersionId } = req.body;
@@ -873,10 +983,14 @@ async function archiveCommittee(req, res) {
       archived_by_email
     });
 
-    publishToChannel(`organization_committees_${orgId}_${orgVersionId}`, {
+    // Publish to both old channel (backward compatibility) and new hub
+    publishOrgHub({
+      orgId, 
+      orgVersionId,
+      entity: 'committees',
       operation: 'DELETE',
-      data: Array.isArray(result) ? result : [result],
-      timestamp: new Date()
+      data: result,
+      legacyChannel: `organization_committees_${orgId}_${orgVersionId}`
     });
 
     res.status(200).json({
@@ -894,16 +1008,12 @@ async function archiveCommittee(req, res) {
 }
 
 async function getAllCommitteeMembers(req, res) {
-  try {
-    const { org_id, org_version_id, sessionId } = req.query;
-    const committees = await organizationsModel.getAllCommitteeMembers(org_id, org_version_id);
-    if (sessionId) subscribeToChannel(sessionId, `committee_members_${org_id}_${org_version_id}`);
-    res.status(200).json(committees);
-  } catch (error) {
-    res.status(500).json({
-      error: error.message || "An error occurred while fetching the organization committees.",
-    });
-  }
+  return handleRealtimeEndpoint(
+    req, 
+    res, 
+    organizationsModel.getAllCommitteeMembers,
+    'committee_members'
+  );
 }
 
 async function addCommitteeMember(req, res) {
@@ -934,16 +1044,25 @@ async function addCommitteeMember(req, res) {
       }
     }
 
-    publishToChannel(`committee_members_${orgId}_${orgVersionId}`, {
+    // Publish to both old channel (backward compatibility) and new hub
+    publishOrgHub({
+      orgId, 
+      orgVersionId,
+      entity: 'committee_members',
       operation: 'CREATE',
-      data: Array.isArray(result) ? result : [result],
-      timestamp: new Date()
+      data: result,
+      legacyChannel: `committee_members_${orgId}_${orgVersionId}`
     });
+
+    // Also update members list since member was moved from regular to committee
     if (emailUpdate) {
-      publishToChannel(`organization_members_${orgId}_${orgVersionId}`, {
+      publishOrgHub({
+        orgId, 
+        orgVersionId,
+        entity: 'members',
         operation: 'DELETE',
-        data: Array.isArray(emailUpdate) ? emailUpdate : [emailUpdate],
-        timestamp: new Date()
+        data: emailUpdate,
+        legacyChannel: `organization_members_${orgId}_${orgVersionId}`
       });
     }
 
@@ -968,10 +1087,14 @@ async function updateCommitteeMember(req, res) {
       action_by_email
     });
 
-    publishToChannel(`committee_members_${orgId}_${orgVersionId}`, {
+    // Publish to both old channel (backward compatibility) and new hub
+    publishOrgHub({
+      orgId, 
+      orgVersionId,
+      entity: 'committee_members',
       operation: 'UPDATE',
-      data: Array.isArray(result) ? result : [result],
-      timestamp: new Date()
+      data: result,
+      legacyChannel: `committee_members_${orgId}_${orgVersionId}`
     });
 
     res.status(200).json({
@@ -995,10 +1118,14 @@ async function archiveCommitteeMember(req, res) {
       action_by_email
     });
 
-    publishToChannel(`committee_members_${orgId}_${orgVersionId}`, {
+    // Publish to both old channel (backward compatibility) and new hub
+    publishOrgHub({
+      orgId, 
+      orgVersionId,
+      entity: 'committee_members',
       operation: 'DELETE',
-      data: Array.isArray(result) ? result : [result],
-      timestamp: new Date()
+      data: result,
+      legacyChannel: `committee_members_${orgId}_${orgVersionId}`
     });
 
     res.status(200).json({
@@ -1016,16 +1143,7 @@ async function archiveCommitteeMember(req, res) {
 }
 
 async function getPendingOrganizationMembers(req, res) {
-  try {
-    const { org_id, org_version_id, sessionId } = req.query;
-    const members = await organizationsModel.getPendingOrganizationMembers(org_id, org_version_id);
-    if (sessionId) subscribeToChannel(sessionId, `pending_organization_members_${org_id}_${org_version_id}`);
-    res.json(members);
-  } catch (error) {
-    res.status(500).json({
-      error: error.message || "An error occurred while fetching pending organization members.",
-    });
-  }
+  return handleRealtimeEndpoint(req, res, organizationsModel.getPendingOrganizationMembers, 'pending_organization_members');
 }
 
 async function approveMembershipApplication(req, res) {
@@ -1042,10 +1160,13 @@ async function approveMembershipApplication(req, res) {
 
     // remove from pending
     if (approvedApplication) {
-      publishToChannel(`pending_organization_members_${organization_id}_${organization_version_id}`, {
+      publishOrgHub({
+        orgId: organization_id, 
+        orgVersionId: organization_version_id,
+        entity: 'pending_members',
         operation: 'DELETE',
         data: [approvedApplication],
-        timestamp: new Date()
+        legacyChannel: `pending_organization_members_${organization_id}_${organization_version_id}`
       });
     }
 
@@ -1059,19 +1180,25 @@ async function approveMembershipApplication(req, res) {
 
     // member created
     if (newMember) {
-      publishToChannel(`organization_members_${organization_id}_${organization_version_id}`, {
+      publishOrgHub({
+        orgId: organization_id, 
+        orgVersionId: organization_version_id,
+        entity: 'members',
         operation: 'CREATE',
         data: [newMember],
-        timestamp: new Date()
+        legacyChannel: `organization_members_${organization_id}_${organization_version_id}`
       });
     }
 
     // archived members removed from archive list (reactivation)
     if (archivedMembers && archivedMembers.length > 0) {
-      publishToChannel(`archived_organization_members_${organization_id}_${organization_version_id}`, {
+      publishOrgHub({
+        orgId: organization_id, 
+        orgVersionId: organization_version_id,
+        entity: 'archived_members',
         operation: 'DELETE',
         data: archivedMembers,
-        timestamp: new Date()
+        legacyChannel: `archived_organization_members_${organization_id}_${organization_version_id}`
       });
     }
 
@@ -1103,10 +1230,13 @@ async function rejectMembershipApplication(req, res) {
     const failedTransaction = result.failedTransaction?.[0] || null;
 
     if (rejectedApplication) {
-      publishToChannel(`pending_organization_members_${organization_id}_${organization_version_id}`, {
+      publishOrgHub({
+        orgId: organization_id, 
+        orgVersionId: organization_version_id,
+        entity: 'pending_members',
         operation: 'DELETE',
         data: [rejectedApplication],
-        timestamp: new Date()
+        legacyChannel: `pending_organization_members_${organization_id}_${organization_version_id}`
       });
     }
     if (failedTransaction) {
@@ -1147,22 +1277,32 @@ async function approveLeaveApplication(req, res) {
     const archivedMembers = result.archivedMembers || null;
 
     if (approvedApplication) {
-      publishToChannel(`leave_organization_${organization_id}_${organization_version_id}`, {
+      publishOrgHub({
+        orgId: organization_id, 
+        orgVersionId: organization_version_id,
+        entity: 'leave_applications',
         operation: 'DELETE',
         data: [approvedApplication],
-        timestamp: new Date()
+        legacyChannel: `leave_organization_${organization_id}_${organization_version_id}`
       });
-      publishToChannel(`organization_members_${organization_id}_${organization_version_id}`, {
+      
+      publishOrgHub({
+        orgId: organization_id, 
+        orgVersionId: organization_version_id,
+        entity: 'members',
         operation: 'DELETE',
         data: [approvedApplication],
-        timestamp: new Date()
+        legacyChannel: `organization_members_${organization_id}_${organization_version_id}`
       });
     }
     if (archivedMembers && archivedMembers.length > 0) {
-      publishToChannel(`archived_organization_members_${organization_id}_${organization_version_id}`, {
+      publishOrgHub({
+        orgId: organization_id, 
+        orgVersionId: organization_version_id,
+        entity: 'archived_members',
         operation: 'CREATE',
         data: archivedMembers,
-        timestamp: new Date()
+        legacyChannel: `archived_organization_members_${organization_id}_${organization_version_id}`
       });
     }
 
@@ -1195,10 +1335,13 @@ async function rejectLeaveApplication(req, res) {
     );
 
     if (rejectedApplication && rejectedApplication.length > 0) {
-      publishToChannel(`leave_organization_${organization_id}_${organization_version_id}`, {
+      publishOrgHub({
+        orgId: organization_id, 
+        orgVersionId: organization_version_id,
+        entity: 'leave_applications',
         operation: 'DELETE',
         data: rejectedApplication,
-        timestamp: new Date()
+        legacyChannel: `leave_organization_${organization_id}_${organization_version_id}`
       });
     }
 
@@ -1235,11 +1378,15 @@ async function addOrganizationMember(req, res) {
       await userCacheModel.cacheSingleOrganizationUser(orgName, emailSUggestionOrganizationUpdate[0]); // backward compat
     }
 
+    // Publish to both old and new channels
     if (orgId && orgVersionId) {
-      publishToChannel(`organization_members_${orgId}_${orgVersionId}`, {
+      publishOrgHub({
+        orgId, 
+        orgVersionId,
+        entity: 'members',
         operation: 'CREATE',
-        data: Array.isArray(result) ? result : [result],
-        timestamp: new Date()
+        data: result,
+        legacyChannel: `organization_members_${orgId}_${orgVersionId}`
       });
     } else {
       publishToChannel(`organization_members_${orgName}`, {
@@ -1277,19 +1424,7 @@ async function editOrganizationMember(req, res) {
 }
 
 async function getArchivedOrganizationMembers(req, res) {
-  try {
-    const { org_id, org_version_id, sessionId } = req.query;
-    if (!org_id || !org_version_id) {
-      return res.status(400).json({ message: 'org_id and org_version_id are required.' });
-    }
-    const archivedMembers = await organizationsModel.getArchivedOrganizationMembers(org_id, org_version_id);
-    if (sessionId) subscribeToChannel(sessionId, `archived_organization_members_${org_id}_${org_version_id}`);
-    res.status(200).json(archivedMembers);
-  } catch (error) {
-    res.status(500).json({
-      error: error.message || "An error occurred while fetching archived organization members.",
-    });
-  }
+  return handleRealtimeEndpoint(req, res, organizationsModel.getArchivedOrganizationMembers, 'archived_organization_members');
 }
 
 async function archiveOrganizationMember(req, res) {
@@ -1300,10 +1435,23 @@ async function archiveOrganizationMember(req, res) {
     const result = await organizationsModel.archiveOrganizationMember({ member_id, archived_by_email, reason, orgId, orgVersionId });
 
     if (orgId && orgVersionId) {
-      publishToChannel(`organization_members_${orgId}_${orgVersionId}`, {
+      // Remove from members, add to archived
+      publishOrgHub({
+        orgId, 
+        orgVersionId,
+        entity: 'members',
         operation: 'DELETE',
-        data: Array.isArray(result) ? result : [result],
-        timestamp: new Date()
+        data: result,
+        legacyChannel: `organization_members_${orgId}_${orgVersionId}`
+      });
+      
+      publishOrgHub({
+        orgId, 
+        orgVersionId,
+        entity: 'archived_members',
+        operation: 'CREATE',
+        data: result,
+        legacyChannel: `archived_organization_members_${orgId}_${orgVersionId}`
       });
     }
 
@@ -1330,10 +1478,23 @@ async function unarchiveOrganizationMember(req, res) {
       orgVersionId
     );
 
-    publishToChannel(`organization_members_${orgId}_${orgVersionId}`, {
+    // Remove from archived, add back to active members
+    publishOrgHub({
+      orgId, 
+      orgVersionId,
+      entity: 'archived_members',
+      operation: 'DELETE',
+      data: result,
+      legacyChannel: `archived_organization_members_${orgId}_${orgVersionId}`
+    });
+    
+    publishOrgHub({
+      orgId, 
+      orgVersionId,
+      entity: 'members',
       operation: 'CREATE',
-      data: Array.isArray(result) ? result : [result],
-      timestamp: new Date()
+      data: result,
+      legacyChannel: `organization_members_${orgId}_${orgVersionId}`
     });
 
     res.status(200).json({ message: 'Organization member unarchived successfully.' });
@@ -1344,13 +1505,44 @@ async function unarchiveOrganizationMember(req, res) {
   }
 }
 
-async function GetApprovalTimeline(req, res){
-  try{
-    const { sessionId, org_name, app_id} = req.query;
+async function GetApprovalTimeline(req, res) {
+  try {
+    const { sessionId, org_name, app_id } = req.query;
+    
+    if (!org_name || !app_id) {
+      return res.status(400).json({ 
+        error: 'org_name and app_id are required parameters' 
+      });
+    }
+
     const result = await organizationsModel.GetApprovalTimeline(org_name, app_id);
-    if (sessionId) subscribeToChannel(sessionId, `application_approval_timeline_${org_name}_${app_id}`);
-    res.status(201).json(result);
+    
+    // Ensure consistent data structure
+    let timelineData = [];
+    if (Array.isArray(result)) {
+      timelineData = result;
+    } else if (result && Array.isArray(result.timeline)) {
+      timelineData = result.timeline;
+    } else if (result && typeof result === 'object') {
+      timelineData = [result];
+    }
+
+    console.log('GetApprovalTimeline result:', {
+      org_name,
+      app_id,
+      resultType: typeof result,
+      isArray: Array.isArray(result),
+      timelineLength: timelineData.length,
+      timeline: timelineData
+    });
+
+    if (sessionId) {
+      subscribeToChannel(sessionId, `application_approval_timeline_${org_name}_${app_id}`);
+    }
+    
+    res.status(200).json(timelineData); // Return the processed array directly
   } catch (error) {
+    console.error('GetApprovalTimeline error:', error);
     res.status(500).json({
       error: error.message || "An error occurred while fetching the approval timeline.",
     });
@@ -1514,7 +1706,13 @@ async function getOrganizationCommitteeRoles(req, res) {
   try{
     const {sessionId, organization_id, organization_version_id} = req.query;
     const roles = await organizationsModel.getOrganizationCommitteeRoles(organization_id, organization_version_id);
-    if (sessionId) subscribeToChannel(sessionId, `committee_roles_${organization_id}_${organization_version_id}`);
+    
+    if (sessionId) {
+      // Subscribe to both old channel (backward compatibility) and new hub
+      subscribeToChannel(sessionId, `committee_roles_${organization_id}_${organization_version_id}`);
+      subscribeToChannel(sessionId, getOrgHubChannel(organization_id, organization_version_id));
+    }
+    
     res.json(roles);
   } catch (error) {
     console.error('Error fetching organization committee roles:', error);
@@ -1528,7 +1726,13 @@ async function getOrganizationExecutives(req, res) {
   try {
     const { organization_id, organization_version_id, sessionId } = req.query;
     const executives = await organizationsModel.getOrganizationExecutives(organization_id, organization_version_id);
-    if (sessionId) subscribeToChannel(sessionId, `executives_${organization_id}_${organization_version_id}`);
+    
+    if (sessionId) {
+      // Subscribe to both old channel (backward compatibility) and new hub
+      subscribeToChannel(sessionId, `executives_${organization_id}_${organization_version_id}`);
+      subscribeToChannel(sessionId, getOrgHubChannel(organization_id, organization_version_id));
+    }
+    
     res.json(executives);
   } catch (error) {
     console.error('Error fetching organization executives:', error);
@@ -1573,10 +1777,14 @@ async function updateCommitteePermissions(req, res) {
 
     const result = await organizationsModel.updateCommitteePermissions(targetCommitteeId, dbRoleType, permissions);
 
-    publishToChannel(`committee_roles_${organization_id}_${organization_version_id}`, {
+    // Publish to both old channel (backward compatibility) and new hub
+    publishOrgHub({
+      orgId: organization_id, 
+      orgVersionId: organization_version_id,
+      entity: 'committee_roles',
       operation: 'UPDATE',
-      data: Array.isArray(result) ? result : [result],
-      timestamp: new Date()
+      data: result,
+      legacyChannel: `committee_roles_${organization_id}_${organization_version_id}`
     });
 
     res.json({
@@ -1610,10 +1818,14 @@ async function updateExecutivePermissions(req, res) {
     else if (Array.isArray(result)) formattedResult = result;
     else formattedResult = [result];
 
-    publishToChannel(`executives_${organization_id}_${organization_version_id}`, {
+    // Publish to both old channel (backward compatibility) and new hub
+    publishOrgHub({
+      orgId: organization_id, 
+      orgVersionId: organization_version_id,
+      entity: 'executives',
       operation: 'UPDATE',
       data: formattedResult,
-      timestamp: new Date()
+      legacyChannel: `executives_${organization_id}_${organization_version_id}`
     });
 
     res.json({
@@ -1632,9 +1844,15 @@ async function updateExecutivePermissions(req, res) {
 
 async function getMemberPermissionOverrides(req, res){
   try{
-    const {  organization_id, organization_version_id, sessionId } = req.query;
+    const { organization_id, organization_version_id, sessionId } = req.query;
     const overrides = await organizationsModel.getMemberPermissionOverrides(organization_id, organization_version_id);
-    if (sessionId) subscribeToChannel(sessionId, `member_permission_${organization_id}_${organization_version_id}`);
+    
+    if (sessionId) {
+      // Subscribe to both old channel (backward compatibility) and new hub
+      subscribeToChannel(sessionId, `member_permission_${organization_id}_${organization_version_id}`);
+      subscribeToChannel(sessionId, getOrgHubChannel(organization_id, organization_version_id));
+    }
+    
     res.status(200).json(overrides);
   } catch (error) {
     console.error('Error fetching member permission overrides:', error);
@@ -1696,11 +1914,14 @@ async function addMemberPermissionOverride(req, res) {
       action_by_email
     );
 
-    publishToChannel(`member_permission_${organization_id}_${organization_version_id}`, {
+    // Publish to both old channel (backward compatibility) and new hub
+    publishOrgHub({
+      orgId: organization_id, 
+      orgVersionId: organization_version_id,
+      entity: 'member_permissions',
       operation: 'CREATE',
-      data: Array.isArray(result) ? result : [result],
-      user_details: user_details || null,
-      timestamp: new Date()
+      data: result,
+      legacyChannel: `member_permission_${organization_id}_${organization_version_id}`
     });
 
     res.json({
@@ -1747,10 +1968,14 @@ async function updateMemberPermissionOverride(req, res) {
       action_by_email
     );
 
-    publishToChannel(`member_permission_${organization_id}_${organization_version_id}`, {
+    // Publish to both old channel (backward compatibility) and new hub
+    publishOrgHub({
+      orgId: organization_id, 
+      orgVersionId: organization_version_id,
+      entity: 'member_permissions',
       operation: 'UPDATE',
-      data: Array.isArray(result) ? result : [result],
-      timestamp: new Date()
+      data: result,
+      legacyChannel: `member_permission_${organization_id}_${organization_version_id}`
     });
 
     res.json({
@@ -1788,10 +2013,14 @@ async function removeMemberPermissionOverride(req, res) {
       action_by_email
     );
 
-    publishToChannel(`member_permission_${organization_id}_${organization_version_id}`, {
+    // Publish to both old channel (backward compatibility) and new hub
+    publishOrgHub({
+      orgId: organization_id, 
+      orgVersionId: organization_version_id,
+      entity: 'member_permissions',
       operation: 'DELETE',
-      data: Array.isArray(result) ? result : [result],
-      timestamp: new Date()
+      data: result,
+      legacyChannel: `member_permission_${organization_id}_${organization_version_id}`
     });
 
     res.json({
@@ -1811,16 +2040,7 @@ async function removeMemberPermissionOverride(req, res) {
 }
 
 async function getLeaveApplications(req, res) {
-  try {
-    const { organization_id, organization_version_id, sessionId } = req.query;
-    const leaves = await organizationsModel.getLeaveApplications(organization_id, organization_version_id);
-    if (sessionId) subscribeToChannel(sessionId, `leave_organization_${organization_id}_${organization_version_id}`);
-    res.json(leaves);
-  } catch (error) {
-    res.status(500).json({
-      error: error.message || "An error occurred while fetching leave applications.",
-    });
-  }
+  return handleRealtimeEndpoint(req, res, organizationsModel.getLeaveApplications, 'leave_applications');
 }
 
 /** ---------------- Membership Questions & Responses (REALTIME STANDARDIZED) ---------------- */
@@ -2021,6 +2241,7 @@ module.exports = {
   GetApprovalTimeline,
   getOrganizationOfficers,
   getOrganizationMembers,
+  getOrganizationHubData,
   getProgram,
   getAllExecutiveRanks,
   // Enhanced functions
