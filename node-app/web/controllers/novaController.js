@@ -1,11 +1,17 @@
+/* eslint-disable no-console */
 const { publishToChannel, subscribeToChannel } = require('./sseController');
 const db = require('../../config/db');
 const organizationsModel = require('../models/organizationsModel');
 const eventModel = require('../models/eventModel');
-const { getCurrentModel, selectModelForContext } = require('../../config/openrouter');
 
-if (!process.env.OPENROUTER_API_KEY) {
-  console.error('Missing OPENROUTER_API_KEY. Set it in your environment.');
+// 🔁 DeepSeek config (replaces OpenRouter)
+const {
+  selectDeepseekModelForContext,
+  getDefaultDeepseekModel,
+} = require('../../config/deepseek');
+
+if (!process.env.DEEPSEEK_API_KEY) {
+  console.error('Missing DEEPSEEK_API_KEY. Set it in your environment.');
 }
 
 // Channel is email-scoped to follow a single user across orgs
@@ -13,21 +19,21 @@ const CHANNEL = (email, cid) => `ai:chat:email:${email}:${cid}`;
 
 /** Polished, business tone */
 const DEFAULT_SYSTEM_PROMPT =
-  "You are NOVA, a professional AI analytics assistant for NU Connect.\n" +
-  "Write in clear, polished business English. Use complete sentences. Be concise and actionable.\n" +
-  "You specialize ONLY in organizational analytics: events, finances, member engagement, and rankings.\n" +
-  "If asked something outside that scope, redirect politely to analytics topics.\n" +
-  "Analysis checklist:\n" +
-  "• Confirm the data you’re using (pageData first, then any extra DB context)\n" +
-  "• Use specific numbers, organization names, and trends\n" +
-  "• Summarize findings, then give 2–4 concrete recommendations\n" +
-  "Formatting:\n" +
-  "• Use short headings where helpful\n" +
-  "• Use ₱ for Philippine Peso and round for readability\n";
+  'You are NOVA, a professional AI analytics assistant for NU Connect.\n' +
+  'Write in clear, polished business English. Use complete sentences. Be concise and actionable.\n' +
+  'You specialize ONLY in organizational analytics: events, finances, member engagement, and rankings.\n' +
+  'If asked something outside that scope, redirect politely to analytics topics.\n' +
+  'Analysis checklist:\n' +
+  '• Confirm the data you’re using (pageData first, then any extra DB context)\n' +
+  '• Use specific numbers, organization names, and trends\n' +
+  '• Summarize findings, then give 2–4 concrete recommendations\n' +
+  'Formatting:\n' +
+  '• Use short headings where helpful\n' +
+  '• Use ₱ for Philippine Peso and round for readability\n';
 
 /** Make sure final text doesn’t end mid-sentence */
 function finalizeAssistantText(text) {
-  if (!text) return "";
+  if (!text) return '';
   text = text.replace(/\n{3,}/g, '\n\n').trim();
   if (!/[.!?…]\s*$/.test(text)) text += '.';
   return text;
@@ -41,10 +47,14 @@ function buildContextAwareSystemPrompt(context) {
   prompt += '\n\n--- CURRENT CONTEXT ---\n';
 
   if (context.userRole === 'SDAO') {
-    prompt += 'User is an SDAO (Student Development and Activities Office) administrator with access to ALL organization data.\n';
-    prompt += 'Provide comprehensive analytics across all approved organizations in the system.\n';
-    prompt += 'Focus on system-wide trends, comparisons, and overall performance metrics.\n';
-    prompt += 'When asked about organizations, include data from ALL organizations in the system.\n';
+    prompt +=
+      'User is an SDAO (Student Development and Activities Office) administrator with access to ALL organization data.\n';
+    prompt +=
+      'Provide comprehensive analytics across all approved organizations in the system.\n';
+    prompt +=
+      'Focus on system-wide trends, comparisons, and overall performance metrics.\n';
+    prompt +=
+      'When asked about organizations, include data from ALL organizations in the system.\n';
   }
 
   if (context.currentOrganization === 'all') {
@@ -58,22 +68,33 @@ function buildContextAwareSystemPrompt(context) {
   }
 
   if (context.userOrganizations && context.userOrganizations.length > 1) {
-    prompt += `User has access to ${context.userOrganizations.length} organizations: ${context.userOrganizations.map(org => org.name || org.organization_name || org.organization_id).join(', ')}\n`;
+    prompt += `User has access to ${context.userOrganizations.length} organizations: ${context.userOrganizations
+      .map(
+        (org) =>
+          org.name ||
+          org.organization_name ||
+          org.organization_id
+      )
+      .join(', ')}\n`;
   }
 
   if (context.activeTab) {
     switch (context.activeTab) {
       case 'event':
-        prompt += 'User is currently on the EVENTS tab - focus on event analytics, attendance, registrations, and event performance.\n';
+        prompt +=
+          'User is currently on the EVENTS tab - focus on event analytics, attendance, registrations, and event performance.\n';
         break;
       case 'transaction':
-        prompt += 'User is currently on the FINANCIALS tab - focus on financial analytics, transactions, income, expenses, and budget insights.\n';
+        prompt +=
+          'User is currently on the FINANCIALS tab - focus on financial analytics, transactions, income, expenses, and budget insights.\n';
         break;
       case 'user':
-        prompt += 'User is currently on the USER ENGAGEMENT tab - focus on user activity, engagement metrics, and participation analytics.\n';
+        prompt +=
+          'User is currently on the USER ENGAGEMENT tab - focus on user activity, engagement metrics, and participation analytics.\n';
         break;
       case 'leaderboard':
-        prompt += 'User is currently on the LEADERBOARD tab - focus on rankings, performance comparisons, and competitive analytics.\n';
+        prompt +=
+          'User is currently on the LEADERBOARD tab - focus on rankings, performance comparisons, and competitive analytics.\n';
         break;
     }
   }
@@ -83,7 +104,8 @@ function buildContextAwareSystemPrompt(context) {
   }
 
   if (context.pageData && Object.keys(context.pageData).length > 0) {
-    prompt += 'IMPORTANT: Detailed analytics data is available in the context messages below. You have access to:\n';
+    prompt +=
+      'IMPORTANT: Detailed analytics data is available in the context messages below. You have access to:\n';
     if (context.pageData.events && context.pageData.events.length > 0) {
       prompt += `- EVENTS: Detailed analytics for ${context.pageData.events.length} organization(s)\n`;
     }
@@ -93,26 +115,36 @@ function buildContextAwareSystemPrompt(context) {
     if (context.pageData.users && context.pageData.users.length > 0) {
       prompt += `- USER ENGAGEMENT: Member engagement data for ${context.pageData.users.length} organization(s)\n`;
     }
-    if (context.pageData.totalRevenue) prompt += `- Total Revenue: ₱${context.pageData.totalRevenue}\n`;
-    if (context.pageData.totalExpenses) prompt += `- Total Expenses: ₱${context.pageData.totalExpenses}\n`;
-    if (context.pageData.totalEvents) prompt += `- Total Events: ${context.pageData.totalEvents}\n`;
-    if (context.pageData.totalParticipants) prompt += `- Total Participants: ${context.pageData.totalParticipants}\n`;
+    if (context.pageData.totalRevenue)
+      prompt += `- Total Revenue: ₱${context.pageData.totalRevenue}\n`;
+    if (context.pageData.totalExpenses)
+      prompt += `- Total Expenses: ₱${context.pageData.totalExpenses}\n`;
+    if (context.pageData.totalEvents)
+      prompt += `- Total Events: ${context.pageData.totalEvents}\n`;
+    if (context.pageData.totalParticipants)
+      prompt += `- Total Participants: ${context.pageData.totalParticipants}\n`;
   }
 
   if (context.queryType) {
     if (context.queryType === 'multi_org') {
       prompt += '\n--- MULTI-ORGANIZATION RESPONSE MODE ---\n';
-      prompt += 'Show data from ALL organizations the user has access to, separated by organization.\n';
+      prompt +=
+        'Show data from ALL organizations the user has access to, separated by organization.\n';
       prompt += 'Use this format:\n';
       prompt += '## Overall Summary\n[Brief overview across all organizations]\n\n';
       prompt += '## Organization Breakdown\n';
       if (context.userOrganizations) {
-        context.userOrganizations.forEach(org => {
-          prompt += `### ${org.name || org.organization_name || 'Organization ' + org.organization_id}\n`;
+        context.userOrganizations.forEach((org) => {
+          prompt += `### ${
+            org.name ||
+            org.organization_name ||
+            'Organization ' + org.organization_id
+          }\n`;
           prompt += '- [Specific metrics and insights]\n- [Key performance indicators]\n\n';
         });
       }
-      prompt += '## Key Insights\n- [Cross-organizational trends]\n- [Notable patterns or concerns]\n- [Recommendations]\n';
+      prompt +=
+        '## Key Insights\n- [Cross-organizational trends]\n- [Notable patterns or concerns]\n- [Recommendations]\n';
     } else {
       prompt += '\n--- CURRENT VIEW RESPONSE MODE ---\n';
       prompt += 'Focus on the specific data the user is currently viewing.\n';
@@ -121,36 +153,108 @@ function buildContextAwareSystemPrompt(context) {
 
   prompt += '\n--- INSTRUCTIONS ---\n';
   prompt += 'When responding:\n';
-  prompt += '1. Reference the specific organization or "all organizations" as appropriate\n';
-  prompt += '2. Focus your analysis on the current tab\'s data and metrics\n';
+  prompt +=
+    '1. Reference the specific organization or "all organizations" as appropriate\n';
+  prompt +=
+    "2. Focus your analysis on the current tab's data and metrics\n";
   prompt += '3. Provide actionable insights based on the visible data\n';
-  prompt += '4. Suggest improvements or next steps relevant to the user\'s role\n';
-  prompt += '5. If asked about status, trends, or recommendations, base your response on the current context\n';
-  prompt += '6. Be specific about numbers and metrics when available in the context\n';
-  prompt += '7. If asked about "organizations" or "my organizations", list the organizations the user has access to\n';
-  prompt += '8. IMPORTANT: Use the detailed analytics data provided in context messages, not just summary totals\n';
-  prompt += '9. When asked about events, refer to the specific event performance data, attendance trends, and feedback rates\n';
+  prompt +=
+    "4. Suggest improvements or next steps relevant to the user's role\n";
+  prompt +=
+    '5. If asked about status, trends, or recommendations, base your response on the current context\n';
+  prompt +=
+    '6. Be specific about numbers and metrics when available in the context\n';
+  prompt +=
+    '7. If asked about "organizations" or "my organizations", list the organizations the user has access to\n';
+  prompt +=
+    '8. IMPORTANT: Use the detailed analytics data provided in context messages, not just summary totals\n';
+  prompt +=
+    '9. When asked about events, refer to the specific event performance data, attendance trends, and feedback rates\n';
 
   return prompt;
 }
 
 function detectMultiOrgIntent(message, context) {
   if (context.userRole === 'SDAO') {
-    const specificViewKeywords = ['this event','this transaction','current page',"what I'm looking at",'this organization','current view','this data','this tab','current org',"what's shown here",'selected organization'];
-    const broadKeywords = ['overall','summary','all organizations','system-wide','across','total','combined','everything','complete picture','full view'];
+    const specificViewKeywords = [
+      'this event',
+      'this transaction',
+      'current page',
+      "what I'm looking at",
+      'this organization',
+      'current view',
+      'this data',
+      'this tab',
+      'current org',
+      "what's shown here",
+      'selected organization',
+    ];
+    const broadKeywords = [
+      'overall',
+      'summary',
+      'all organizations',
+      'system-wide',
+      'across',
+      'total',
+      'combined',
+      'everything',
+      'complete picture',
+      'full view',
+    ];
     const m = message.toLowerCase();
-    if (specificViewKeywords.some(k => m.includes(k))) return false;
-    return broadKeywords.some(k => m.includes(k));
+    if (specificViewKeywords.some((k) => m.includes(k))) return false;
+    return broadKeywords.some((k) => m.includes(k));
   }
-  const multiOrgKeywords = ['overall','total','across','all organizations','combined','our status','our performance','financial situation','how are we','current status','organization comparison','summary','all orgs','everything','complete picture','full view','aggregate'];
-  const organizationListKeywords = ['my organizations','see my organizations','organizations','what organizations','which organizations','list organizations','show organizations','organizations I have','organizations I can access','available organizations'];
-  const currentViewKeywords = ['this event','this transaction','current page',"what I'm looking at",'this organization','current view','this data','this tab','current org',"what's shown here"];
+  const multiOrgKeywords = [
+    'overall',
+    'total',
+    'across',
+    'all organizations',
+    'combined',
+    'our status',
+    'our performance',
+    'financial situation',
+    'how are we',
+    'current status',
+    'organization comparison',
+    'summary',
+    'all orgs',
+    'everything',
+    'complete picture',
+    'full view',
+    'aggregate',
+  ];
+  const organizationListKeywords = [
+    'my organizations',
+    'see my organizations',
+    'organizations',
+    'what organizations',
+    'which organizations',
+    'list organizations',
+    'show organizations',
+    'organizations I have',
+    'organizations I can access',
+    'available organizations',
+  ];
+  const currentViewKeywords = [
+    'this event',
+    'this transaction',
+    'current page',
+    "what I'm looking at",
+    'this organization',
+    'current view',
+    'this data',
+    'this tab',
+    'current org',
+    "what's shown here",
+  ];
   const m = message.toLowerCase();
-  if (currentViewKeywords.some(k => m.includes(k))) return false;
-  if (organizationListKeywords.some(k => m.includes(k))) return true;
-  if (multiOrgKeywords.some(k => m.includes(k))) return true;
+  if (currentViewKeywords.some((k) => m.includes(k))) return false;
+  if (organizationListKeywords.some((k) => m.includes(k))) return true;
+  if (multiOrgKeywords.some((k) => m.includes(k))) return true;
   if (context.instructions?.dataScope?.includes('all organizations')) return true;
-  const userOrgCount = context.userOrganizations?.length || context.dataScope?.organizationCount || 0;
+  const userOrgCount =
+    context.userOrganizations?.length || context.dataScope?.organizationCount || 0;
   return userOrgCount > 1;
 }
 
@@ -165,13 +269,18 @@ async function getAllOrganizationsData(activeTab, userRole) {
       WHERE status = 'Approved' 
       ORDER BY name
     `);
-    const orgIds = allOrgs.map(org => org.organization_id);
+    const orgIds = allOrgs.map((org) => org.organization_id);
     switch (activeTab) {
-      case 'event': return await getActivitiesForOrganizations(orgIds, userRole);
-      case 'transaction': return await getFinanceForOrganizations(orgIds, userRole);
-      case 'user': return await getMemberEngagementForOrganizations(orgIds, userRole);
-      case 'leaderboard': return await getLeaderboardForOrganizations(orgIds, userRole);
-      default: return await getAllDataForOrganizations(orgIds, userRole);
+      case 'event':
+        return await getActivitiesForOrganizations(orgIds, userRole);
+      case 'transaction':
+        return await getFinanceForOrganizations(orgIds, userRole);
+      case 'user':
+        return await getMemberEngagementForOrganizations(orgIds, userRole);
+      case 'leaderboard':
+        return await getLeaderboardForOrganizations(orgIds, userRole);
+      default:
+        return await getAllDataForOrganizations(orgIds, userRole);
     }
   } catch (error) {
     console.error('Error fetching all organizations data for SDAO:', error);
@@ -182,13 +291,18 @@ async function getAllOrganizationsData(activeTab, userRole) {
 async function getMultiOrgData(userOrganizations, activeTab, userRole) {
   if (!userOrganizations || userOrganizations.length === 0) return {};
   if (activeTab === 'finance') activeTab = 'transaction';
-  const orgIds = userOrganizations.map(org => org.organization_id || org.id);
+  const orgIds = userOrganizations.map((org) => org.organization_id || org.id);
   switch (activeTab) {
-    case 'event': return await getActivitiesForOrganizations(orgIds, userRole);
-    case 'transaction': return await getFinanceForOrganizations(orgIds, userRole);
-    case 'user': return await getMemberEngagementForOrganizations(orgIds, userRole);
-    case 'leaderboard': return await getLeaderboardForOrganizations(orgIds, userRole);
-    default: return await getAllDataForOrganizations(orgIds, userRole);
+    case 'event':
+      return await getActivitiesForOrganizations(orgIds, userRole);
+    case 'transaction':
+      return await getFinanceForOrganizations(orgIds, userRole);
+    case 'user':
+      return await getMemberEngagementForOrganizations(orgIds, userRole);
+    case 'leaderboard':
+      return await getLeaderboardForOrganizations(orgIds, userRole);
+    default:
+      return await getAllDataForOrganizations(orgIds, userRole);
   }
 }
 
@@ -196,7 +310,8 @@ async function getActivitiesForOrganizations(orgIds) {
   const data = {};
   try {
     for (const orgId of orgIds) {
-      const [events] = await db.query(`
+      const [events] = await db.query(
+        `
         SELECT e.*, o.name as organization_name,
                COUNT(ea.user_id) as registration_count
         FROM tbl_event e
@@ -206,9 +321,16 @@ async function getActivitiesForOrganizations(orgIds) {
         GROUP BY e.event_id
         ORDER BY e.start_date DESC
         LIMIT 50
-      `, [orgId]);
-      const totalRegistrations = events.reduce((s, e) => s + (parseInt(e.registration_count) || 0), 0);
-      const upcomingEvents = events.filter(e => new Date(e.start_date) > new Date()).length;
+      `,
+        [orgId]
+      );
+      const totalRegistrations = events.reduce(
+        (s, e) => s + (parseInt(e.registration_count) || 0),
+        0
+      );
+      const upcomingEvents = events.filter(
+        (e) => new Date(e.start_date) > new Date()
+      ).length;
       data[orgId] = {
         organizationName: events[0]?.organization_name || `Organization ${orgId}`,
         events,
@@ -216,8 +338,8 @@ async function getActivitiesForOrganizations(orgIds) {
           totalEvents: events.length,
           totalRegistrations,
           upcomingEvents,
-          completedEvents: events.length - upcomingEvents
-        }
+          completedEvents: events.length - upcomingEvents,
+        },
       };
     }
   } catch (error) {
@@ -230,7 +352,8 @@ async function getFinanceForOrganizations(orgIds) {
   const data = {};
   try {
     for (const orgId of orgIds) {
-      const [transactions] = await db.query(`
+      const [transactions] = await db.query(
+        `
         SELECT t.*, o.name as organization_name, tt.label as transaction_type_label
         FROM tbl_transaction t
         LEFT JOIN tbl_transaction_membership tm ON t.transaction_id = tm.transaction_id
@@ -244,24 +367,27 @@ async function getFinanceForOrganizations(orgIds) {
         ))
         ORDER BY t.transaction_date DESC
         LIMIT 100
-      `, [orgId, orgId]);
+      `,
+        [orgId, orgId]
+      );
 
       const revenue = transactions
-        .filter(t => t.transaction_type_label === 'Income')
+        .filter((t) => t.transaction_type_label === 'Income')
         .reduce((sum, t) => sum + parseFloat(t.amount || 0), 0);
       const expenses = transactions
-        .filter(t => t.transaction_type_label === 'Expense')
+        .filter((t) => t.transaction_type_label === 'Expense')
         .reduce((sum, t) => sum + parseFloat(t.amount || 0), 0);
 
       data[orgId] = {
-        organizationName: transactions[0]?.organization_name || `Organization ${orgId}`,
+        organizationName:
+          transactions[0]?.organization_name || `Organization ${orgId}`,
         transactions,
         summary: {
           totalRevenue: revenue,
           totalExpenses: expenses,
           netProfit: revenue - expenses,
-          transactionCount: transactions.length
-        }
+          transactionCount: transactions.length,
+        },
       };
     }
   } catch (error) {
@@ -274,30 +400,36 @@ async function getMemberEngagementForOrganizations(orgIds) {
   const data = {};
   try {
     for (const orgId of orgIds) {
-      const [members] = await db.query(`
+      const [members] = await db.query(
+        `
         SELECT om.*, u.f_name, u.l_name, u.email, o.name as organization_name
         FROM tbl_organization_members om
         LEFT JOIN tbl_user u ON om.user_id = u.user_id
         LEFT JOIN tbl_organization o ON om.organization_id = o.organization_id
         WHERE om.organization_id = ?
         ORDER BY om.created_at DESC
-      `, [orgId]);
-      const [eventParticipation] = await db.query(`
+      `,
+        [orgId]
+      );
+      const [eventParticipation] = await db.query(
+        `
         SELECT COUNT(DISTINCT ea.user_id) as active_participants
         FROM tbl_event_attendance ea
         JOIN tbl_event e ON ea.event_id = e.event_id
         WHERE e.organization_id = ? AND ea.status IN ('Registered', 'Attended')
-      `, [orgId]);
+      `,
+        [orgId]
+      );
       data[orgId] = {
         organizationName: members[0]?.organization_name || `Organization ${orgId}`,
         members,
         summary: {
           totalMembers: members.length,
           activeParticipants: eventParticipation[0]?.active_participants || 0,
-          executives: members.filter(m => m.member_type === 'Executive').length,
-          committees: members.filter(m => m.member_type === 'Committee').length,
-          regularMembers: members.filter(m => m.member_type === 'Member').length
-        }
+          executives: members.filter((m) => m.member_type === 'Executive').length,
+          committees: members.filter((m) => m.member_type === 'Committee').length,
+          regularMembers: members.filter((m) => m.member_type === 'Member').length,
+        },
       };
     }
   } catch (error) {
@@ -309,7 +441,8 @@ async function getMemberEngagementForOrganizations(orgIds) {
 async function getLeaderboardForOrganizations(orgIds) {
   const data = {};
   try {
-    const [orgRankings] = await db.query(`
+    const [orgRankings] = await db.query(
+      `
       SELECT o.organization_id, o.name, 
              COUNT(DISTINCT e.event_id) as total_events,
              COUNT(DISTINCT ea.user_id) as total_participants,
@@ -322,7 +455,9 @@ async function getLeaderboardForOrganizations(orgIds) {
       WHERE o.organization_id IN (${orgIds.map(() => '?').join(',')})
       GROUP BY o.organization_id, o.name
       ORDER BY total_participants DESC, total_events DESC
-    `, orgIds);
+    `,
+      orgIds
+    );
 
     for (let i = 0; i < orgRankings.length; i++) {
       const org = orgRankings[i];
@@ -333,8 +468,8 @@ async function getLeaderboardForOrganizations(orgIds) {
         metrics: {
           totalEvents: org.total_events,
           totalParticipants: org.total_participants,
-          totalRevenue: parseFloat(org.total_revenue || 0)
-        }
+          totalRevenue: parseFloat(org.total_revenue || 0),
+        },
       };
     }
   } catch (error) {
@@ -348,7 +483,7 @@ async function getAllDataForOrganizations(orgIds, userRole) {
     getActivitiesForOrganizations(orgIds, userRole),
     getFinanceForOrganizations(orgIds, userRole),
     getMemberEngagementForOrganizations(orgIds, userRole),
-    getLeaderboardForOrganizations(orgIds, userRole)
+    getLeaderboardForOrganizations(orgIds, userRole),
   ]);
   return { activities, finance, engagement, leaderboard };
 }
@@ -356,10 +491,12 @@ async function getAllDataForOrganizations(orgIds, userRole) {
 function validateContext(context) {
   if (!context) return { valid: true };
   const errors = [];
-  if (context.currentOrganization !== undefined &&
-      context.currentOrganization !== 'all' &&
-      typeof context.currentOrganization !== 'string' &&
-      typeof context.currentOrganization !== 'number') {
+  if (
+    context.currentOrganization !== undefined &&
+    context.currentOrganization !== 'all' &&
+    typeof context.currentOrganization !== 'string' &&
+    typeof context.currentOrganization !== 'number'
+  ) {
     errors.push('currentOrganization must be "all", a string, or a number');
   }
   const validTabs = ['event', 'transaction', 'user', 'leaderboard'];
@@ -387,7 +524,8 @@ const mapMessage = (row) => ({
 });
 
 function normalizeEntityId(raw) {
-  if (raw === '' || raw === 'null' || raw === 'undefined' || raw === undefined) return null;
+  if (raw === '' || raw === 'null' || raw === 'undefined' || raw === undefined)
+    return null;
   const n = Number(raw);
   return Number.isNaN(n) ? raw : n;
 }
@@ -399,13 +537,13 @@ async function getUserId(email, res) {
 
   if (!user) {
     console.error('No user found for email:', email);
-    if (res) return res.status(404).json({ message: "User not found for the provided email." });
-    throw new Error("User not found for the provided email.");
+    if (res) return res.status(404).json({ message: 'User not found for the provided email.' });
+    throw new Error('User not found for the provided email.');
   }
   if (!user.user_id) {
     console.error('User found but no user_id field:', user);
-    if (res) return res.status(404).json({ message: "User found but missing user_id field." });
-    throw new Error("User found but missing user_id field.");
+    if (res) return res.status(404).json({ message: 'User found but missing user_id field.' });
+    throw new Error('User found but missing user_id field.');
   }
   console.log('Returning user_id:', user.user_id);
   return user.user_id;
@@ -413,7 +551,8 @@ async function getUserId(email, res) {
 
 async function getUserOrganizations(userId) {
   try {
-    const [organizations] = await db.query(`
+    const [organizations] = await db.query(
+      `
       SELECT DISTINCT o.organization_id, o.name, o.status, o.category
       FROM tbl_organization o
       WHERE o.organization_id IN (
@@ -423,12 +562,99 @@ async function getUserOrganizations(userId) {
       )
       AND o.status = 'Approved'
       ORDER BY o.name
-    `, [userId, userId]);
+    `,
+      [userId, userId]
+    );
     return organizations;
   } catch (error) {
     console.error('Error fetching user organizations:', error);
     return [];
   }
+}
+
+/** Short, essential context message sent alongside the system prompt */
+function buildConciseContextMessage(enhancedContext, isMultiOrgQuery) {
+  const pd = enhancedContext?.pageData || {};
+  const counts = {
+    events: Array.isArray(pd.events) ? pd.events.length : 0,
+    transactions: Array.isArray(pd.transactions) ? pd.transactions.length : 0,
+    users: Array.isArray(pd.users) ? pd.users.length : 0,
+    leaderboards: Array.isArray(pd.leaderboards) ? pd.leaderboards.length : 0,
+  };
+  const totalBits = [];
+  if (typeof pd.totalRevenue === 'number')
+    totalBits.push(`Total Revenue: ₱${Math.round(pd.totalRevenue)}`);
+  if (typeof pd.totalExpenses === 'number')
+    totalBits.push(`Total Expenses: ₱${Math.round(pd.totalExpenses)}`);
+  if (typeof pd.totalEvents === 'number') totalBits.push(`Total Events: ${pd.totalEvents}`);
+  if (typeof pd.totalParticipants === 'number')
+    totalBits.push(`Total Participants: ${pd.totalParticipants}`);
+
+  const orgNames = enhancedContext?.userOrganizations
+    ?.slice(0, 5)
+    .map((o) => o.name || o.organization_name || `Org ${o.organization_id || ''}`)
+    .filter(Boolean);
+
+  const lines = [];
+  lines.push('Analytics data context:');
+  if (orgNames?.length)
+    lines.push(
+      `- Organizations (sample): ${orgNames.join(', ')}${
+        enhancedContext.userOrganizations.length > 5 ? '…' : ''
+      }`
+    );
+  if (enhancedContext?.currentOrganization && enhancedContext?.organizationInfo?.name) {
+    lines.push(`- Current Organization: ${enhancedContext.organizationInfo.name}`);
+  } else if (enhancedContext?.currentOrganization === 'all') {
+    lines.push('- Current Organization: All organizations');
+  }
+  if (enhancedContext?.activeTab) {
+    const tabLabel =
+      { event: 'Events', transaction: 'Financials', user: 'User Engagement', leaderboard: 'Leaderboard' }[
+        enhancedContext.activeTab
+      ] || enhancedContext.activeTab;
+    lines.push(`- Active Tab: ${tabLabel}`);
+  }
+  lines.push(
+    `- Data Snapshot: events[${counts.events}], transactions[${counts.transactions}], users[${counts.users}], leaderboards[${counts.leaderboards}]`
+  );
+  if (totalBits.length) lines.push(`- Summary Totals: ${totalBits.join(' | ')}`);
+  if (pd._dbMultiOrg) lines.push(`- Extra DB Context: available for cross-org comparison`);
+  lines.push('');
+  lines.push('Guidelines:');
+  lines.push('1) Use pageData first (current view).');
+  lines.push(`2) ${isMultiOrgQuery ? 'Compare across orgs briefly' : 'Focus on the current org/tab'}.`);
+  lines.push('3) Cite specific numbers & trends; keep it concise.');
+  lines.push('4) End with 2–4 actionable recommendations.');
+  return lines.join('\n');
+}
+
+/** Extract text from many streaming formats safely (OpenAI-compatible) */
+function extractDeltaText(json) {
+  const choice = json?.choices?.[0];
+  if (!choice) return '';
+
+  // OpenAI-like
+  if (typeof choice?.delta === 'string') return choice.delta;
+  if (typeof choice?.delta?.content === 'string') return choice.delta.content;
+
+  // Some providers send array content pieces
+  if (Array.isArray(choice?.delta?.content)) {
+    return choice.delta.content
+      .map((p) => (typeof p === 'string' ? p : p?.text ?? ''))
+      .join('');
+  }
+
+  // Text-only models
+  if (typeof choice?.text === 'string') return choice.text;
+
+  // Some send full message chunks
+  if (typeof choice?.message?.content === 'string') return choice.message.content;
+
+  // As a last resort, try a generic content field
+  if (typeof json?.content === 'string') return json.content;
+
+  return '';
 }
 
 async function getLastConversation(req, res) {
@@ -457,7 +683,9 @@ async function getLastConversation(req, res) {
 
     if (rows.length) {
       if (rows[0].has_corrupted_content > 0) {
-        await db.query(`UPDATE tbl_ai_conversation SET is_archived = 1 WHERE conversation_id = ?`, [rows[0].conversation_id]);
+        await db.query(`UPDATE tbl_ai_conversation SET is_archived = 1 WHERE conversation_id = ?`, [
+          rows[0].conversation_id,
+        ]);
         return res.status(404).json({});
       }
       return res.json({ conversationId: rows[0].conversation_id });
@@ -476,7 +704,7 @@ async function createConversation(req, res) {
     try {
       userId = await getUserId(email);
     } catch (error) {
-      return res.status(404).json({ message: "User not found for the provided email." });
+      return res.status(404).json({ message: 'User not found for the provided email.' });
     }
 
     let { entityType = 'general', systemPrompt = null, context = null } = req.body;
@@ -531,77 +759,6 @@ async function registerChannel(req, res) {
   }
 }
 
-/** Short, essential context message sent alongside the system prompt */
-function buildConciseContextMessage(enhancedContext, isMultiOrgQuery) {
-  const pd = enhancedContext?.pageData || {};
-  const counts = {
-    events: Array.isArray(pd.events) ? pd.events.length : 0,
-    transactions: Array.isArray(pd.transactions) ? pd.transactions.length : 0,
-    users: Array.isArray(pd.users) ? pd.users.length : 0,
-    leaderboards: Array.isArray(pd.leaderboards) ? pd.leaderboards.length : 0,
-  };
-  const totalBits = [];
-  if (typeof pd.totalRevenue === 'number') totalBits.push(`Total Revenue: ₱${Math.round(pd.totalRevenue)}`);
-  if (typeof pd.totalExpenses === 'number') totalBits.push(`Total Expenses: ₱${Math.round(pd.totalExpenses)}`);
-  if (typeof pd.totalEvents === 'number') totalBits.push(`Total Events: ${pd.totalEvents}`);
-  if (typeof pd.totalParticipants === 'number') totalBits.push(`Total Participants: ${pd.totalParticipants}`);
-
-  const orgNames = enhancedContext?.userOrganizations?.slice(0, 5)
-    .map(o => o.name || o.organization_name || `Org ${o.organization_id || ''}`)
-    .filter(Boolean);
-
-  const lines = [];
-  lines.push('Analytics data context:');
-  if (orgNames?.length) lines.push(`- Organizations (sample): ${orgNames.join(', ')}${enhancedContext.userOrganizations.length > 5 ? '…' : ''}`);
-  if (enhancedContext?.currentOrganization && enhancedContext?.organizationInfo?.name) {
-    lines.push(`- Current Organization: ${enhancedContext.organizationInfo.name}`);
-  } else if (enhancedContext?.currentOrganization === 'all') {
-    lines.push('- Current Organization: All organizations');
-  }
-  if (enhancedContext?.activeTab) {
-    const tabLabel = { event: 'Events', transaction: 'Financials', user: 'User Engagement', leaderboard: 'Leaderboard' }[enhancedContext.activeTab] || enhancedContext.activeTab;
-    lines.push(`- Active Tab: ${tabLabel}`);
-  }
-  lines.push(`- Data Snapshot: events[${counts.events}], transactions[${counts.transactions}], users[${counts.users}], leaderboards[${counts.leaderboards}]`);
-  if (totalBits.length) lines.push(`- Summary Totals: ${totalBits.join(' | ')}`);
-  if (pd._dbMultiOrg) lines.push(`- Extra DB Context: available for cross-org comparison`);
-  lines.push('');
-  lines.push('Guidelines:');
-  lines.push('1) Use pageData first (current view).');
-  lines.push(`2) ${isMultiOrgQuery ? 'Compare across orgs briefly' : 'Focus on the current org/tab'}.`);
-  lines.push('3) Cite specific numbers & trends; keep it concise.');
-  lines.push('4) End with 2–4 actionable recommendations.');
-  return lines.join('\n');
-}
-
-/** Extract text from many streaming formats safely */
-function extractDeltaText(json) {
-  const choice = json?.choices?.[0];
-  if (!choice) return '';
-
-  // OpenAI-like
-  if (typeof choice?.delta === 'string') return choice.delta;
-  if (typeof choice?.delta?.content === 'string') return choice.delta.content;
-
-  // Some providers send array content pieces
-  if (Array.isArray(choice?.delta?.content)) {
-    return choice.delta.content
-      .map(p => (typeof p === 'string' ? p : (p?.text ?? '')))
-      .join('');
-  }
-
-  // Text-only models
-  if (typeof choice?.text === 'string') return choice.text;
-
-  // Some send full message chunks
-  if (typeof choice?.message?.content === 'string') return choice.message.content;
-
-  // As a last resort, try a generic content field
-  if (typeof json?.content === 'string') return json.content;
-
-  return '';
-}
-
 async function sendMessage(req, res) {
   try {
     const email = req.user.email;
@@ -630,27 +787,32 @@ async function sendMessage(req, res) {
     let userOrgs;
     if (context?.userRole === 'SDAO') {
       try {
-        const [allOrgs] = await db.query(`
+        const [allOrgs] = await db.query(
+          `
           SELECT organization_id, name, status, category 
           FROM tbl_organization 
           WHERE status = 'Approved' 
           ORDER BY name
-        `);
+        `
+        );
         userOrgs = allOrgs;
       } catch (error) {
         console.error('Error fetching all organizations for SDAO:', error);
         userOrgs = [];
       }
     } else {
-      userOrgs = context?.userOrganizations?.length > 0 
-        ? context.userOrganizations 
-        : context?.dataScope?.availableOrganizations?.map(org => ({
-            organization_id: org.value,
-            name: org.label
-          })) || [];
+      userOrgs =
+        context?.userOrganizations?.length > 0
+          ? context.userOrganizations
+          : context?.dataScope?.availableOrganizations?.map((org) => ({
+              organization_id: org.value,
+              name: org.label,
+            })) || [];
     }
 
-    const isMultiOrgQuery = context ? detectMultiOrgIntent(content, { ...context, userOrganizations: userOrgs }) : false;
+    const isMultiOrgQuery = context
+      ? detectMultiOrgIntent(content, { ...context, userOrganizations: userOrgs })
+      : false;
 
     const pageData = context?.pageData && typeof context.pageData === 'object' ? context.pageData : {};
     let responseData = { ...pageData };
@@ -669,24 +831,26 @@ async function sendMessage(req, res) {
       ...context,
       userOrganizations: userOrgs,
       queryType: isMultiOrgQuery ? 'multi_org' : 'current_view',
-      responseData
+      responseData,
     };
 
     const [um] = await db.query(
       `INSERT INTO tbl_ai_message (conversation_id, role, user_id, content, meta)
        VALUES (?, 'user', ?, ?, ?)`,
       [
-        conversationId, 
-        userId, 
+        conversationId,
+        userId,
         content,
         JSON.stringify({
           context: enhancedContext,
           query_type: isMultiOrgQuery ? 'multi_org' : 'current_view',
-          organizations: userOrgs?.map(org => org.organization_id || org.value) || []
-        })
+          organizations: userOrgs?.map((org) => org.organization_id || org.value) || [],
+        }),
       ]
     );
-    await db.query(`UPDATE tbl_ai_conversation SET updated_at = NOW() WHERE conversation_id = ?`, [conversationId]);
+    await db.query(`UPDATE tbl_ai_conversation SET updated_at = NOW() WHERE conversation_id = ?`, [
+      conversationId,
+    ]);
 
     const userMsg = mapMessage({
       message_id: um.insertId,
@@ -697,11 +861,12 @@ async function sendMessage(req, res) {
     });
     publishToChannel(CHANNEL(email, conversationId), { operation: 'CREATE', data: [userMsg] });
 
-    const currentModel = getCurrentModel();
+    // Set placeholder assistant row immediately
+    const deepseekDefault = getDefaultDeepseekModel();
     const [am] = await db.query(
       `INSERT INTO tbl_ai_message (conversation_id, role, content, model)
        VALUES (?, 'assistant', '', ?)`,
-      [conversationId, `openrouter/${currentModel.model}`]
+      [conversationId, `deepseek/${deepseekDefault.model}`]
     );
 
     const assistantBase = {
@@ -710,7 +875,6 @@ async function sendMessage(req, res) {
       role: 'assistant',
       created_at: new Date(),
     };
-    // Publish placeholder immediately so the UI shows "thinking…"
     publishToChannel(CHANNEL(email, conversationId), {
       operation: 'CREATE',
       data: [mapMessage({ ...assistantBase, content: '' })],
@@ -732,10 +896,10 @@ async function sendMessage(req, res) {
     let systemPrompt = convRows[0].system_prompt || DEFAULT_SYSTEM_PROMPT;
     if (enhancedContext) {
       systemPrompt = buildContextAwareSystemPrompt(enhancedContext);
-      await db.query(
-        `UPDATE tbl_ai_conversation SET system_prompt = ? WHERE conversation_id = ?`,
-        [systemPrompt, conversationId]
-      );
+      await db.query(`UPDATE tbl_ai_conversation SET system_prompt = ? WHERE conversation_id = ?`, [
+        systemPrompt,
+        conversationId,
+      ]);
     }
 
     const messages = [{ role: 'system', content: systemPrompt }];
@@ -745,50 +909,56 @@ async function sendMessage(req, res) {
     messages.push({ role: 'system', content: conciseContext });
 
     if (history.length > 1) {
-      messages.push(...history.slice(0, -1).map(r => ({ role: r.role, content: r.content })));
+      messages.push(...history.slice(0, -1).map((r) => ({ role: r.role, content: r.content })));
     }
     messages.push({ role: 'user', content });
 
-    const modelConfig = selectModelForContext(enhancedContext) || {
-      model: 'google/gemini-2.0-flash-exp',
-      temperature: 0.2,
-      max_tokens: 1600,
-      top_p: 1
+    // Pick DeepSeek model config
+    const modelConfig = selectDeepseekModelForContext(enhancedContext);
+    const requestBody = {
+      model: modelConfig.model,
+      messages,
+      stream: true,
+      temperature: modelConfig.temperature ?? 0.2,
+      max_tokens: modelConfig.max_tokens ?? 1600,
+      top_p: modelConfig.top_p ?? 1,
     };
 
+    // Respond immediately (stream will be pushed over SSE channel)
     res.status(202).json({ ok: true });
 
-    const openRouterResp = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    // Call DeepSeek (OpenAI-compatible) with streaming
+    const deepseekResp = await fetch('https://api.deepseek.com/chat/completions', {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+        Authorization: `Bearer ${process.env.DEEPSEEK_API_KEY}`,
         'Content-Type': 'application/json',
-        'HTTP-Referer': process.env.SITE_URL || 'http://localhost:3000',
-        'X-Title': 'NU Connect NOVA Assistant',
+        // (no Referer/Title headers required)
       },
-      body: JSON.stringify({
-        model: modelConfig.model,
-        messages,
-        stream: true,
-        temperature: modelConfig.temperature ?? 0.2,
-        max_tokens: modelConfig.max_tokens ?? 1600,
-        top_p: modelConfig.top_p ?? 1
-      }),
+      body: JSON.stringify(requestBody),
     });
 
-    if (!openRouterResp.ok || !openRouterResp.body) {
-      const errText = await openRouterResp.text().catch(() => '');
-      console.error('OpenRouter API error:', errText);
-      await db.query(`UPDATE tbl_ai_message SET content = ? WHERE message_id = ?`, ['I apologize, but I encountered an error. Please try again.', am.insertId]);
+    if (!deepseekResp.ok || !deepseekResp.body) {
+      const errText = await deepseekResp.text().catch(() => '');
+      console.error('DeepSeek API error:', errText);
+      await db.query(`UPDATE tbl_ai_message SET content = ? WHERE message_id = ?`, [
+        'I apologize, but I encountered an error. Please try again.',
+        am.insertId,
+      ]);
       publishToChannel(CHANNEL(email, conversationId), {
         operation: 'UPDATE',
-        data: [mapMessage({ ...assistantBase, content: 'I apologize, but I encountered an error. Please try again.' })],
+        data: [
+          mapMessage({
+            ...assistantBase,
+            content: 'I apologize, but I encountered an error. Please try again.',
+          }),
+        ],
       });
       return;
     }
 
-    /** ----------- ROBUST SSE PARSER (fixes chopped words) ----------- */
-    const reader = openRouterResp.body.getReader();
+    /** ----------- ROBUST SSE PARSER (keeps your original fix) ----------- */
+    const reader = deepseekResp.body.getReader();
     const decoder = new TextDecoder();
     let assistantText = '';
     let lastPublish = 0;
@@ -816,13 +986,23 @@ async function sendMessage(req, res) {
           const dataStr = trimmed.slice(5).trim();
           if (dataStr === '[DONE]') {
             // Finalize and save
-            if (assistantText.includes('nums =') || assistantText.includes('两数之和') || assistantText.includes('def run_formula')) {
-              assistantText = "I encountered a formatting error. Please ask your analytics question again.";
+            if (
+              assistantText.includes('nums =') ||
+              assistantText.includes('两数之和') ||
+              assistantText.includes('def run_formula')
+            ) {
+              assistantText =
+                'I encountered a formatting error. Please ask your analytics question again.';
             }
             assistantText = finalizeAssistantText(assistantText);
 
-            await db.query(`UPDATE tbl_ai_message SET content = ? WHERE message_id = ?`, [assistantText, am.insertId]);
-            await db.query(`UPDATE tbl_ai_conversation SET updated_at = NOW() WHERE conversation_id = ?`, [conversationId]);
+            await db.query(`UPDATE tbl_ai_message SET content = ? WHERE message_id = ?`, [
+              assistantText,
+              am.insertId,
+            ]);
+            await db.query(`UPDATE tbl_ai_conversation SET updated_at = NOW() WHERE conversation_id = ?`, [
+              conversationId,
+            ]);
             publishToChannel(CHANNEL(email, conversationId), {
               operation: 'UPDATE',
               data: [mapMessage({ ...assistantBase, content: assistantText })],
@@ -839,7 +1019,7 @@ async function sendMessage(req, res) {
             if (typeof delta === 'string' && delta.length) {
               assistantText += delta;
               const now = Date.now();
-              if (now - lastPublish > 60) { // publish at ~16 fps
+              if (now - lastPublish > 60) {
                 lastPublish = now;
                 publishToChannel(CHANNEL(email, conversationId), {
                   operation: 'UPDATE',
@@ -848,9 +1028,7 @@ async function sendMessage(req, res) {
               }
             }
           } catch {
-            // If this line was an incomplete JSON segment, it would have remained in buffer.
-            // Because we split by \n\n, incomplete segments won’t be processed here.
-            // So errors here are safe to ignore (malformed keepalives, etc.).
+            // Ignore malformed keepalives/etc.
           }
         }
       }
@@ -858,7 +1036,10 @@ async function sendMessage(req, res) {
 
     // If the stream ended without a [DONE], still push what we got
     assistantText = finalizeAssistantText(assistantText);
-    await db.query(`UPDATE tbl_ai_message SET content = ? WHERE message_id = ?`, [assistantText, am.insertId]);
+    await db.query(`UPDATE tbl_ai_message SET content = ? WHERE message_id = ?`, [
+      assistantText,
+      am.insertId,
+    ]);
     publishToChannel(CHANNEL(email, conversationId), {
       operation: 'UPDATE',
       data: [mapMessage({ ...assistantBase, content: assistantText })],
@@ -884,5 +1065,5 @@ module.exports = {
       console.error(e);
       return res.status(500).json({ error: 'Failed to fetch user organizations' });
     }
-  }
+  },
 };

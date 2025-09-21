@@ -9284,10 +9284,20 @@ BEGIN
 
     -- Log the action
     CALL LogAction(
-        v_action_by_user_id,
+        p_action_by_email,
         CONCAT('Promoted ', v_user_name, ' to executive role "', p_role_title, '" in ', v_organization_name),
+        'EXECUTIVE_MEMBER_PROMOTION',
+        JSON_OBJECT(
+            'organization_id', p_organization_id,
+            'cycle_number', v_current_cycle,
+            'user_id', v_user_id,
+            'role_title', p_role_title,
+            'rank_level', p_rank_level,
+            'organization_name', v_organization_name,
+            'user_name', v_user_name
+        ),
         CONCAT('/organization/', p_organization_id),
-        'executive_member_promotion'
+        NULL
     );
 
     -- Return the created executive member data (using current cycle)
@@ -9457,10 +9467,20 @@ BEGIN
 
     -- Log the action
     CALL LogAction(
-        v_action_by_user_id,
+        p_action_by_email,
         CONCAT('Updated executive member ', v_user_name, ' to role "', p_role_title, '" in ', v_organization_name),
+        'EXECUTIVE_MEMBER_UPDATE',
+        JSON_OBJECT(
+            'organization_id', p_organization_id,
+            'cycle_number', v_current_cycle,
+            'user_id', v_user_id,
+            'role_title', p_role_title,
+            'rank_level', p_rank_level,
+            'organization_name', v_organization_name,
+            'user_name', v_user_name
+        ),
         CONCAT('/organization/', p_organization_id),
-        'executive_member_update'
+        NULL
     );
 
     -- Return the updated executive member data (using current cycle)
@@ -11339,10 +11359,19 @@ BEGIN
 
     -- Log the action
     CALL LogAction(
-        v_action_by_user_id,
+        p_action_by_email,
         CONCAT('Added ', v_user_name, ' as member to ', v_organization_name),
+        'ORGANIZATION_MEMBER_ADD',
+        JSON_OBJECT(
+            'organization_id', @org_id,
+            'cycle_number', @current_cycle,
+            'user_id', v_user_id,
+            'member_type', 'Member',
+            'organization_name', v_organization_name,
+            'user_name', v_user_name
+        ),
         CONCAT('/organization/', @org_id),
-        'organization_member_add'
+        NULL
     );
 
             SELECT 
