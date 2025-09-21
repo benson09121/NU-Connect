@@ -1066,10 +1066,22 @@ CREATE DEFINER='admin'@'%' PROCEDURE LogAction(
 )
 BEGIN
     DECLARE v_user_id VARCHAR(200);
+    DECLARE v_error_message TEXT;
+    
+    -- Look up user by email
     SELECT user_id INTO v_user_id FROM tbl_user WHERE email = p_user_email LIMIT 1;
-    IF v_user_id IS NULL THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='User email not found for logging';
+    
+    -- If system email and user not found, use the system user ID directly
+    IF v_user_id IS NULL AND p_user_email = 'system@nu-dasma.edu.ph' THEN
+        SET v_user_id = 'sys-system';
     END IF;
+    
+    -- Final check - if still no user found, signal error
+    IF v_user_id IS NULL THEN
+        SET v_error_message = CONCAT('User email not found for logging: ', COALESCE(p_user_email, 'NULL'));
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = v_error_message;
+    END IF;
+    
     INSERT INTO tbl_logs(user_id, action_type, type, meta_data, redirect_url, file_path)
     VALUES (v_user_id, p_action, p_type, p_meta_data, p_redirect_url, p_file_path);
 END$$
@@ -1489,8 +1501,8 @@ BEGIN
     -- Log the action
     CALL LogAction(
         p_user_email,
-        CONCAT('Created event transaction for event ', p_event_id),
-        'EVENT_TRANSACTION_CREATE',
+        'Successfully created event payment transaction',
+        'Event Payment',
         JSON_OBJECT(
             'transaction_id', v_transaction_id,
             'amount', p_amount,
@@ -1743,8 +1755,8 @@ BEGIN
         -- Log the action
         CALL LogAction(
             v_user_email,
-            CONCAT('Created SDAO event: ', p_title),
-            'event',
+            CONCAT('Created new SDAO event: ', p_title),
+            'Event Management',
             JSON_OBJECT(
                 'event_id', v_event_id,
                 'title', p_title,
@@ -1757,8 +1769,8 @@ BEGIN
 
         -- Notify all users
         CALL CreateNotification(
-            CONCAT('New SDAO Event: ', p_title),
-            CONCAT('A new SDAO event "', p_title, '" has been created and is now available.'),
+            CONCAT('New Event: ', p_title),
+            CONCAT('A new event "', p_title, '" has been created and is now available for registration.'),
             CONCAT('/events/', v_event_id),
             'event',
             v_event_id,
@@ -1955,8 +1967,9 @@ BEGIN
 
     CALL LogAction(
         v_user_email,
-        CONCAT('Archived SDAO event ID ', p_event_id, IF(p_reason IS NOT NULL, CONCAT(' (Reason: ', p_reason, ')'), '')),
-        'event',
+        CONCAT('Archived event "', (SELECT title FROM tbl_event WHERE event_id = p_event_id), '"', 
+               IF(p_reason IS NOT NULL, CONCAT(' - Reason: ', p_reason), '')),
+        'Event Management',
         JSON_OBJECT('event_id', p_event_id, 'archived_at', NOW(), 'reason', p_reason),
         CONCAT('/events/', p_event_id),
         NULL
@@ -1995,8 +2008,9 @@ BEGIN
 
     CALL LogAction(
         v_user_email,
-        CONCAT('Unarchived SDAO event ID ', p_event_id, IF(p_reason IS NOT NULL AND p_reason != '', CONCAT(' (Reason: ', p_reason, ')'), '')),
-        'event',
+        CONCAT('Restored event "', (SELECT title FROM tbl_event WHERE event_id = p_event_id), '"',
+               IF(p_reason IS NOT NULL AND p_reason != '', CONCAT(' - Reason: ', p_reason), '')),
+        'Event Management',
         JSON_OBJECT('event_id', p_event_id, 'unarchived_at', NOW(), 'reason', p_reason),
         CONCAT('/events/', p_event_id),
         NULL
@@ -2085,8 +2099,8 @@ BEGIN
 
     CALL LogAction(
         v_user_email,
-        CONCAT('Updated SDAO event ID ', p_event_id),
-        'event',
+        CONCAT('Updated event "', p_title, '"'),
+        'Event Management',
         JSON_OBJECT('event_id', p_event_id, 'updated_at', NOW()),
         CONCAT('/events/', p_event_id),
         NULL
@@ -2123,8 +2137,8 @@ BEGIN
 
     CALL LogAction(
         v_user_email,
-        CONCAT('Deleted SDAO event ID ', p_event_id, IF(p_reason IS NOT NULL, CONCAT(' (Reason: ', p_reason, ')'), '')),
-        'event',
+        CONCAT('Permanently deleted event', IF(p_reason IS NOT NULL, CONCAT(' - Reason: ', p_reason), '')),
+        'Event Management',
         JSON_OBJECT('event_id', p_event_id, 'deleted_at', NOW(), 'reason', p_reason),
         '/events',
         NULL
@@ -2658,7 +2672,7 @@ BEGIN
             GROUP_CONCAT(
                 CASE 
                     WHEN om.member_type = 'Executive' THEN er.role_title
-                    WHEN cm.role IS NOT NULL THEN CONCAT('Committee ', cm.role)
+                    WHEN cr.role_name IS NOT NULL THEN CONCAT('Committee ', cr.role_name)
                     ELSE om.member_type
                 END
                 SEPARATOR ', '
@@ -2678,6 +2692,8 @@ BEGIN
             FROM tbl_committee 
             WHERE organization_id = o.organization_id
         )
+    LEFT JOIN tbl_committee_role cr 
+        ON cm.committee_role_id = cr.committee_role_id
     WHERE om.user_id = p_user_id
        OR cm.user_id = p_user_id
     GROUP BY o.organization_id, o.name, o.logo
@@ -2721,8 +2737,8 @@ BEGIN
     -- Log the action
     CALL LogAction(
         v_user_email,
-        CONCAT('Uploaded/Updated certificate template for event ', p_event_id),
-        'certificate',
+        'Updated certificate template',
+        'Certificate Management',
         JSON_OBJECT('event_id', p_event_id, 'template_path', p_template_path),
         CONCAT('/events/', p_event_id),
         p_template_path
@@ -2761,7 +2777,7 @@ BEGIN
     -- Log the action
     CALL LogAction(
         v_user_email,
-        CONCAT('Deleted certificate template for event ', p_event_id),
+        'Removed certificate template',
         'certificate',
         JSON_OBJECT('event_id', p_event_id, 'template_path', v_template_path),
         CONCAT('/events/', p_event_id),
@@ -3490,7 +3506,7 @@ BEGIN
         -- Log the update using LogAction
         CALL LogAction(
             p_created_by_email,
-            CONCAT('Updated managed account for ', p_email),
+            'Updated managed account access',
             'account',
             JSON_OBJECT('role_name', p_role_name, 'program_id', p_program_id, 'target_email', p_email),
             NULL,
@@ -3515,7 +3531,7 @@ BEGIN
         -- Log the creation using LogAction
         CALL LogAction(
             p_created_by_email,
-            CONCAT('Created managed account for ', p_email),
+            'Created new managed account',
             'account',
             JSON_OBJECT('role_name', p_role_name, 'program_id', p_program_id, 'target_email', p_email),
             NULL,
@@ -3611,7 +3627,7 @@ BEGIN
     -- Log the update using LogAction
     CALL LogAction(
         p_updated_by_email,
-        CONCAT('Updated managed account for ', v_email),
+        'Updated account permissions',
         'account',
         JSON_OBJECT(
             'role_name', p_role_name, 
@@ -3680,7 +3696,7 @@ BEGIN
         -- Log the archiving using LogAction
         CALL LogAction(
             p_archived_by_email,
-            CONCAT('Archived managed account for ', p_email),
+            'Removed account access',
             'account',
             JSON_OBJECT('reason', COALESCE(p_reason, 'Manual archive'), 'target_email', p_email),
             NULL,
@@ -4164,13 +4180,39 @@ BEGIN
             LEAVE approval_loop;
         END IF;
 
-        SET v_approver_id = (
-            SELECT user_id
-            FROM tbl_user
-            WHERE role_id = v_role_id
-              AND status = 'Active'
-            LIMIT 1
-        );
+        -- For the first step (adviser role), handle differently based on application type
+        IF v_first_step THEN
+            -- For NEW applications: Use the actual adviser who submitted the application (p_initiated_by)
+            -- For RENEWAL applications: Use the specific adviser of the organization
+            IF v_application_type = 'new' THEN
+                SET v_approver_id = p_initiated_by; -- Use the adviser who submitted
+            ELSE
+                -- For renewal, use the specific adviser of the organization being renewed
+                SET v_approver_id = (
+                    SELECT o.adviser_id
+                    FROM tbl_application a
+                    JOIN tbl_organization o ON a.organization_id = o.organization_id
+                    WHERE a.application_id = p_application_id
+                      AND o.adviser_id IS NOT NULL
+                      AND EXISTS (
+                          SELECT 1 FROM tbl_user u 
+                          WHERE u.user_id = o.adviser_id 
+                            AND u.role_id = v_role_id 
+                            AND u.status = 'Active'
+                      )
+                    LIMIT 1
+                );
+            END IF;
+        ELSE
+            -- For subsequent steps, use the standard role-based selection
+            SET v_approver_id = (
+                SELECT user_id
+                FROM tbl_user
+                WHERE role_id = v_role_id
+                  AND status = 'Active'
+                LIMIT 1
+            );
+        END IF;
 
         IF v_approver_id IS NOT NULL THEN
             IF NOT EXISTS (
@@ -4180,6 +4222,8 @@ BEGIN
                   AND ap.approval_role_id = v_role_id
             ) THEN
                 IF v_first_step THEN
+                    -- For NEW applications: Auto-approve the adviser who submitted
+                    -- For RENEWAL applications: Set as pending for adviser to approve
                     INSERT INTO tbl_approval_process (
                         application_id,
                         period_id,
@@ -4194,7 +4238,7 @@ BEGIN
                         v_approver_id,
                         v_role_id,
                         v_application_type,
-                        'Approved',
+                        CASE WHEN v_application_type = 'new' THEN 'Approved' ELSE 'Pending' END,
                         v_hierarchy_order
                     );
                     SET v_first_step = FALSE;
@@ -5911,6 +5955,50 @@ BEGIN
         SET status = 'Approved',
             organization_id = v_new_org_id
         WHERE application_id = p_application_id;
+
+        -- Send invitation emails to all officers
+        BEGIN
+            DECLARE done INT DEFAULT FALSE;
+            DECLARE v_officer_email VARCHAR(255);
+            DECLARE v_officer_name VARCHAR(255);
+            
+            DECLARE email_cursor CURSOR FOR
+                SELECT DISTINCT u.email, CONCAT(u.f_name, ' ', u.l_name) as full_name
+                FROM tbl_application_executives ae
+                JOIN tbl_user u ON ae.proposed_user_id = u.user_id
+                WHERE ae.application_id = p_application_id
+                  AND u.email IS NOT NULL 
+                  AND u.email != ''
+                  AND u.status = 'Pending';
+
+            DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = TRUE;
+
+            OPEN email_cursor;
+            email_loop: LOOP
+                FETCH email_cursor INTO v_officer_email, v_officer_name;
+                IF done THEN
+                    LEAVE email_loop;
+                END IF;
+
+                -- Log invitation attempt for audit trail
+                CALL LogAction(
+                    'system@nu-dasma.edu.ph',
+                    'Sent officer invitation email',
+                    'user_invitation',
+                    JSON_OBJECT(
+                        'organization_name', v_org_name,
+                        'recipient_email', v_officer_email,
+                        'recipient_name', v_officer_name,
+                        'application_id', p_application_id,
+                        'organization_id', v_new_org_id
+                    ),
+                    NULL,
+                    NULL
+                );
+
+            END LOOP email_loop;
+            CLOSE email_cursor;
+        END;
     END IF;
 
     -- Commit transaction
@@ -6125,12 +6213,13 @@ BEGIN
     END IF;
 
     -- Log the approval
-    INSERT INTO tbl_logs (user_id, action_type, redirect_url, type)
-    VALUES (
+    CALL LogAction(
         p_approver_id, 
-        CONCAT('Approved registration for event ', p_event_id), 
+        CONCAT('Approved registration for "', v_event_title, '" by ', v_user_email), 
+        'Attendance Approval',
+        NULL,
         CONCAT('/event-attendance/', p_event_id), 
-        'Attendance Approval'
+        NULL
     );
 
     -- Send notification to user
@@ -6210,12 +6299,13 @@ BEGIN
     END IF;
 
     -- Log the rejection
-    INSERT INTO tbl_logs (user_id, action_type, meta_data, type)
-    VALUES (
+    CALL LogAction(
         p_approver_id, 
-        CONCAT('Rejected registration for event ', p_event_id), 
-        JSON_OBJECT('user_id', p_user_id, 'reason', p_reason),
-        'Attendance Rejection'
+        CONCAT('Rejected registration for "', v_event_title, '" by ', v_user_email, ' - Reason: ', p_reason), 
+        'Attendance Rejection',
+        NULL,
+        CONCAT('/event-attendance/', p_event_id), 
+        NULL
     );
 
     -- Send notification to user
@@ -7712,7 +7802,7 @@ BEGIN
             SELECT email INTO v_next_approver_email FROM tbl_user WHERE user_id = v_next_approver_id LIMIT 1;
             CALL CreateNotification(
                 'Event Application Approval Needed',
-                CONCAT('You have a pending event application to review (Application ID: ', p_event_application_id, ').'),
+                'You have a pending event application that requires your review and approval.',
                 NULL,
                 'approval',
                 p_event_application_id,
@@ -8486,12 +8576,19 @@ BEGIN
     DECLARE v_req_name VARCHAR(255);
     DECLARE v_req_type ENUM('pre-event', 'post-event');
     DECLARE v_file_path VARCHAR(255);
+    DECLARE v_user_email VARCHAR(100);  -- Add user email variable
 
     DECLARE done INT DEFAULT FALSE;
     DECLARE del_req_id INT;
     DECLARE del_req_name VARCHAR(255);
     DECLARE del_cursor CURSOR FOR SELECT requirement_id FROM tmp_existing_ids;
     DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = TRUE;
+
+    -- Get user email for logging
+    SELECT email INTO v_user_email
+    FROM tbl_user
+    WHERE user_id = p_user_id
+    LIMIT 1;
 
     -- 1. Collect all current requirement_ids
     DROP TEMPORARY TABLE IF EXISTS tmp_existing_ids;
@@ -8516,13 +8613,14 @@ BEGIN
                 v_req_name, v_req_type, v_file_path, p_user_id
             );
 
-            -- Log add
-            INSERT INTO tbl_logs (user_id, action_type, type, meta_data)
-            VALUES (
-                p_user_id,
+            -- Log add using LogAction
+            CALL LogAction(
+                v_user_email,
                 CONCAT('Added event requirement: ', v_req_name),
                 'event_requirement',
-                JSON_OBJECT('requirement_name', v_req_name, 'is_applicable_to', v_req_type)
+                JSON_OBJECT('requirement_name', v_req_name, 'is_applicable_to', v_req_type),
+                NULL,
+                NULL
             );
         ELSE
             -- Update existing requirement
@@ -8533,13 +8631,14 @@ BEGIN
                 updated_at = CURRENT_TIMESTAMP
             WHERE requirement_id = v_req_id;
 
-            -- Log update
-            INSERT INTO tbl_logs (user_id, action_type, type, meta_data)
-            VALUES (
-                p_user_id,
+            -- Log update using LogAction
+            CALL LogAction(
+                v_user_email,
                 CONCAT('Updated event requirement: ', v_req_name),
                 'event_requirement',
-                JSON_OBJECT('requirement_id', v_req_id, 'requirement_name', v_req_name, 'is_applicable_to', v_req_type)
+                JSON_OBJECT('requirement_id', v_req_id, 'requirement_name', v_req_name, 'is_applicable_to', v_req_type),
+                NULL,
+                NULL
             );
         END IF;
 
@@ -8564,13 +8663,14 @@ BEGIN
 
         DELETE FROM tbl_event_application_requirement WHERE requirement_id = del_req_id;
 
-        -- Log deletion
-        INSERT INTO tbl_logs (user_id, action_type, type, meta_data)
-        VALUES (
-            p_user_id,
+        -- Log deletion using LogAction
+        CALL LogAction(
+            v_user_email,
             CONCAT('Deleted event requirement: ', del_req_name),
             'event_requirement',
-            JSON_OBJECT('requirement_id', del_req_id, 'requirement_name', del_req_name)
+            JSON_OBJECT('requirement_id', del_req_id, 'requirement_name', del_req_name),
+            NULL,
+            NULL
         );
     END LOOP;
     CLOSE del_cursor;
@@ -8994,6 +9094,8 @@ BEGIN
     DECLARE v_member_id INT;
     DECLARE v_current_cycle INT;
     DECLARE v_executive_in_other_org INT;
+    DECLARE v_user_name VARCHAR(200);
+    DECLARE v_organization_name VARCHAR(200);
 
     -- Get current cycle number for the organization
     SELECT MAX(cycle_number) INTO v_current_cycle
@@ -9054,6 +9156,15 @@ BEGIN
         SIGNAL SQLSTATE '45000' 
         SET MESSAGE_TEXT = 'User not found. User must be registered first before becoming an executive.';
     END IF;
+
+    -- Get user name and organization name for user-friendly logging
+    SELECT CONCAT(u.f_name, ' ', u.l_name) INTO v_user_name 
+    FROM tbl_user u 
+    WHERE u.user_id = v_user_id;
+    
+    SELECT o.name INTO v_organization_name 
+    FROM tbl_organization o 
+    WHERE o.organization_id = p_organization_id;
 
     -- Check if user is already an active executive in a different organization
     SELECT COUNT(*) INTO v_executive_in_other_org
@@ -9146,27 +9257,11 @@ BEGIN
     WHERE member_id = v_member_id;
 
     -- Log the action
-    INSERT INTO tbl_logs (
-        user_id, 
-        action_type, 
-        type, 
-        meta_data,
-        timestamp
-    ) VALUES (
+    CALL LogAction(
         v_action_by_user_id,
-        CONCAT('Promoted member to executive: ', v_user_id, ' (', p_email, ') as ', p_role_title),
-        'executive_member_promotion',
-        JSON_OBJECT(
-            'organization_id', p_organization_id, 
-            'cycle_number', v_current_cycle,
-            'user_id', v_user_id, 
-            'executive_role_id', v_executive_role_id,
-            'role_title', p_role_title,
-            'rank_level', p_rank_level,
-            'program_id', v_program_id,
-            'member_id', v_member_id
-        ),
-        CURRENT_TIMESTAMP
+        CONCAT('Promoted ', v_user_name, ' to executive role "', p_role_title, '" in ', v_organization_name),
+        CONCAT('/organization/', p_organization_id),
+        'executive_member_promotion'
     );
 
     -- Return the created executive member data (using current cycle)
@@ -9206,6 +9301,8 @@ BEGIN
     DECLARE v_program_id INT;
     DECLARE v_action_by_user_id VARCHAR(200);
     DECLARE v_current_cycle INT;
+    DECLARE v_user_name VARCHAR(200);
+    DECLARE v_organization_name VARCHAR(200);
 
     -- Get current cycle number for the organization
     SELECT MAX(cycle_number) INTO v_current_cycle
@@ -9249,6 +9346,15 @@ BEGIN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'Executive member not found';
     END IF;
+
+    -- Get user name and organization name for user-friendly logging
+    SELECT CONCAT(u.f_name, ' ', u.l_name) INTO v_user_name 
+    FROM tbl_user u 
+    WHERE u.user_id = v_user_id;
+    
+    SELECT o.name INTO v_organization_name 
+    FROM tbl_organization o 
+    WHERE o.organization_id = p_organization_id;
 
     -- Get role_id for 'Student'
     SELECT role_id INTO v_role_id
@@ -9324,26 +9430,11 @@ BEGIN
     END IF;
 
     -- Log the action
-    INSERT INTO tbl_logs (
-        user_id,
-        action_type,
-        type,
-        meta_data,
-        timestamp
-    ) VALUES (
+    CALL LogAction(
         v_action_by_user_id,
-        CONCAT('Updated executive member: ', v_user_id, ' (', p_email, ') as ', p_role_title),
-        'executive_member_update',
-        JSON_OBJECT(
-            'organization_id', p_organization_id,
-            'cycle_number', v_current_cycle,
-            'user_id', v_user_id,
-            'executive_role_id', v_executive_role_id,
-            'role_title', p_role_title,
-            'rank_level', p_rank_level,
-            'program_id', v_program_id
-        ),
-        CURRENT_TIMESTAMP
+        CONCAT('Updated executive member ', v_user_name, ' to role "', p_role_title, '" in ', v_organization_name),
+        CONCAT('/organization/', p_organization_id),
+        'executive_member_update'
     );
 
     -- Return the updated executive member data (using current cycle)
@@ -9378,6 +9469,8 @@ BEGIN
     DECLARE v_executive_role_id INT;
     DECLARE v_archived_by VARCHAR(200);
     DECLARE v_current_cycle INT;
+    DECLARE v_user_name VARCHAR(255);  -- Add user name variable
+    DECLARE v_org_name VARCHAR(255);   -- Add organization name variable
 
     -- Get current cycle number for the organization
     SELECT MAX(cycle_number) INTO v_current_cycle
@@ -9389,8 +9482,9 @@ BEGIN
         SET MESSAGE_TEXT = 'No renewal cycle found for organization';
     END IF;
 
-    -- Get user_id of executive member
-    SELECT user_id INTO v_user_id
+    -- Get user_id and name of executive member
+    SELECT user_id, CONCAT(f_name, ' ', l_name) 
+    INTO v_user_id, v_user_name
     FROM tbl_user
     WHERE email = p_email
     LIMIT 1;
@@ -9399,6 +9493,12 @@ BEGIN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'Executive member not found';
     END IF;
+
+    -- Get organization name
+    SELECT name INTO v_org_name
+    FROM tbl_organization
+    WHERE organization_id = p_organization_id
+    LIMIT 1;
 
     -- Get member_id and executive_role_id (using current cycle)
     SELECT member_id, executive_role_id INTO v_member_id, v_executive_role_id
@@ -9465,25 +9565,23 @@ BEGIN
     DELETE FROM tbl_organization_members
     WHERE member_id = v_member_id;
 
-    -- Log the action
-    INSERT INTO tbl_logs (
-        user_id,
-        action_type,
-        type,
-        meta_data,
-        timestamp
-    ) VALUES (
-        v_archived_by,
-        CONCAT('Archived executive member: ', v_user_id, ' (', p_email, ') from org ', p_organization_id),
-        'executive_member_archive',
+    -- Log the action using LogAction stored procedure
+    CALL LogAction(
+        p_action_by_email,  -- p_user_email
+        CONCAT('Archived executive member: ', COALESCE(v_user_name, 'Unknown User'), ' from ', COALESCE(v_org_name, 'Unknown Organization')),  -- p_action
+        'executive_member_archive',  -- p_type
         JSON_OBJECT(
             'organization_id', p_organization_id,
+            'organization_name', v_org_name,
             'cycle_number', v_current_cycle,
             'user_id', v_user_id,
+            'user_name', v_user_name,
+            'user_email', p_email,
             'member_id', v_member_id,
             'executive_role_id', v_executive_role_id
-        ),
-        CURRENT_TIMESTAMP
+        ),  -- p_meta_data
+        NULL,  -- p_redirect_url
+        NULL   -- p_file_path
     );
 END$$
 DELIMITER ;
@@ -9508,14 +9606,18 @@ BEGIN
     DECLARE v_organization_exists INT;
     DECLARE v_committee_exists INT;
     DECLARE v_new_committee_id INT;
-
-
+    DECLARE v_organization_name VARCHAR(200);
     DECLARE v_current_cycle INT;
 
     -- Get current cycle for the organization
     SELECT MAX(cycle_number) INTO v_current_cycle
     FROM tbl_renewal_cycle
     WHERE organization_id = p_org_id;
+
+    -- If no cycle found, default to 1
+    IF v_current_cycle IS NULL THEN
+        SET v_current_cycle = 1;
+    END IF;
 
     -- Validate organization exists and is active
     SELECT COUNT(*) INTO v_organization_exists 
@@ -9528,15 +9630,21 @@ BEGIN
         SET MESSAGE_TEXT = 'Organization not found or not active';
     END IF;
 
+    -- Get organization name for user-friendly logging
+    SELECT name INTO v_organization_name 
+    FROM tbl_organization 
+    WHERE organization_id = p_org_id;
+
+    -- Check for duplicate committee name (case-insensitive and trimmed)
     SELECT COUNT(*) INTO v_committee_exists
     FROM tbl_committee
     WHERE organization_id = p_org_id
     AND cycle_number = v_current_cycle
-    AND name = p_committee_name;
+    AND LOWER(TRIM(name)) = LOWER(TRIM(p_committee_name));
 
     IF v_committee_exists > 0 THEN
         SIGNAL SQLSTATE '45000' 
-        SET MESSAGE_TEXT = 'Committee with this name already exists';
+        SET MESSAGE_TEXT = 'A committee with this name already exists in this organization';
     END IF;
 
     SELECT user_id INTO v_action_by_user_id 
@@ -9563,24 +9671,20 @@ BEGIN
 
     SET v_new_committee_id = LAST_INSERT_ID();
 
+    -- Create default committee roles (Committee Head, Committee Officer)
+    INSERT INTO tbl_committee_role (committee_id, role_name)
+    VALUES 
+        (v_new_committee_id, 'Committee Head'),
+        (v_new_committee_id, 'Committee Officer');
+
     -- Log the action
-    INSERT INTO tbl_logs (
-        user_id, 
-        action_type, 
-        type, 
-        meta_data,
-        timestamp
-    ) VALUES (
-        v_action_by_user_id,
-        CONCAT('Created committee: ', p_committee_name),
+    CALL LogAction(
+        p_action_by_email,
+        CONCAT('Created new committee "', p_committee_name, '" in ', v_organization_name),
         'committee_creation',
-        JSON_OBJECT(
-            'organization_id', p_org_id,
-            'cycle_number', v_current_cycle,
-            'committee_id', v_new_committee_id,
-            'committee_name', p_committee_name
-        ),
-        CURRENT_TIMESTAMP
+        NULL,
+        CONCAT('/organization/', p_org_id),
+        NULL
     );
 
     -- Return the new committee ID
@@ -9608,6 +9712,7 @@ BEGIN
     DECLARE v_cycle_number INT;
     DECLARE v_current_name VARCHAR(100);
     DECLARE v_current_description TEXT;
+    DECLARE v_organization_name VARCHAR(200);
 
     -- Check if committee exists and get current values
    SELECT  
@@ -9627,6 +9732,11 @@ BEGIN
         SIGNAL SQLSTATE '45000' 
         SET MESSAGE_TEXT = 'Committee not found';
     END IF;
+
+    -- Get organization name for user-friendly logging
+    SELECT name INTO v_organization_name 
+    FROM tbl_organization 
+    WHERE organization_id = v_organization_id;
 
     -- Check if new name already exists for this org/cycle
     IF p_new_name IS NOT NULL AND p_new_name <> v_current_name THEN
@@ -9661,29 +9771,15 @@ BEGIN
     WHERE committee_id = p_committee_id;
 
     -- Log the action
-    INSERT INTO tbl_logs (
-        user_id, 
-        action_type, 
-        type, 
-        meta_data,
-        timestamp
-    ) VALUES (
+    CALL LogAction(
         v_action_by_user_id,
-        CONCAT('Updated committee: ', v_current_name, 
+        CONCAT('Updated committee "', v_current_name, '"', 
                CASE WHEN p_new_name IS NOT NULL AND p_new_name <> v_current_name 
-                    THEN CONCAT(' to ', p_new_name) 
-                    ELSE '' END),
-        'committee_update',
-        JSON_OBJECT(
-            'committee_id', p_committee_id,
-            'old_name', v_current_name,
-            'new_name', COALESCE(p_new_name, v_current_name),
-            'old_description', v_current_description,
-            'new_description', COALESCE(p_new_description, v_current_description),
-            'organization_id', v_organization_id,
-            'cycle_number', v_cycle_number
-        ),
-        CURRENT_TIMESTAMP
+                    THEN CONCAT(' to "', p_new_name, '"') 
+                    ELSE '' END,
+               ' in ', v_organization_name),
+        CONCAT('/organization/', v_organization_id),
+        'committee_update'
     );
     
     SELECT 
@@ -9716,6 +9812,60 @@ BEGIN
     DECLARE v_created_at TIMESTAMP;
     DECLARE v_member_count INT;
     DECLARE v_members_removed_from_org INT DEFAULT 0;  -- New: Count members removed from tbl_organization_members
+    DECLARE v_error_message TEXT;  -- Variable to store concatenated error messages
+
+    -- Error handler for foreign key constraint violations
+    DECLARE EXIT HANDLER FOR SQLSTATE '23000'
+    BEGIN
+        ROLLBACK;
+        GET DIAGNOSTICS CONDITION 1
+            @errno = MYSQL_ERRNO, @text = MESSAGE_TEXT;
+        
+        IF @errno = 1451 THEN  -- Cannot delete or update a parent row: a foreign key constraint fails
+            -- Check if it's related to committee roles/permissions
+            IF @text LIKE '%tbl_committee_role_permission%' OR @text LIKE '%committee_role_id%' THEN
+                SIGNAL SQLSTATE '45000' 
+                SET MESSAGE_TEXT = 'Cannot archive committee: This committee has permissions assigned to its roles. Please remove all committee member permissions before archiving this committee.';
+            ELSEIF @text LIKE '%tbl_committee_role%' OR @text LIKE '%committee_id%' THEN
+                SIGNAL SQLSTATE '45000' 
+                SET MESSAGE_TEXT = 'Cannot archive committee: This committee has roles that are referenced by other records. Please ensure all committee members are removed first.';
+            ELSE
+                SIGNAL SQLSTATE '45000' 
+                SET MESSAGE_TEXT = 'Cannot archive committee: This committee is referenced by other records in the system. Please remove all dependent records first.';
+            END IF;
+        ELSEIF @errno = 1452 THEN  -- Cannot add or update a child row: a foreign key constraint fails
+            SIGNAL SQLSTATE '45000' 
+            SET MESSAGE_TEXT = 'Cannot archive committee: Invalid reference to organization or user data.';
+        ELSE
+            -- Format any other database errors for user-friendly display  
+            IF @text IS NOT NULL THEN
+                SET v_error_message = CONCAT('Database error while archiving committee: ', @text);
+            ELSEIF @errno IS NOT NULL THEN
+                SET v_error_message = CONCAT('Database error while archiving committee: MySQL Error ', @errno);
+            ELSE
+                SET v_error_message = 'Database error while archiving committee: Unknown error occurred';
+            END IF;
+            SIGNAL SQLSTATE '45000' 
+            SET MESSAGE_TEXT = v_error_message;
+        END IF;
+    END;
+
+    -- General error handler for other SQL errors
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        GET DIAGNOSTICS CONDITION 1
+            @errno = MYSQL_ERRNO, @text = MESSAGE_TEXT;
+        IF @text IS NOT NULL THEN
+            SET v_error_message = CONCAT('Error archiving committee: ', @text);
+        ELSEIF @errno IS NOT NULL THEN
+            SET v_error_message = CONCAT('Error archiving committee (Code: ', @errno, ')');
+        ELSE
+            SET v_error_message = 'Error archiving committee: Unknown database error occurred';
+        END IF;
+        SIGNAL SQLSTATE '45000' 
+        SET MESSAGE_TEXT = v_error_message;
+    END;
 
     -- Check if committee exists
     SELECT organization_id, cycle_number, name, description, created_at
@@ -9988,6 +10138,9 @@ BEGIN
     DECLARE v_role_name VARCHAR(50);
     DECLARE v_web_access_permission_id INT;
     DECLARE v_existing_permissions_count INT;
+    DECLARE v_user_name VARCHAR(200);
+    DECLARE v_committee_name VARCHAR(200);
+    DECLARE v_organization_name VARCHAR(200);
 
     -- committee -> org + cycle
     SELECT organization_id, cycle_number
@@ -10039,6 +10192,19 @@ BEGIN
             CURRENT_TIMESTAMP
         );
     END IF;
+
+    -- Get user name, committee name, and organization name for user-friendly logging
+    SELECT COALESCE(CONCAT(u.f_name, ' ', u.l_name), u.email) INTO v_user_name 
+    FROM tbl_user u 
+    WHERE u.user_id = v_user_id;
+    
+    SELECT c.name INTO v_committee_name 
+    FROM tbl_committee c 
+    WHERE c.committee_id = p_committee_id;
+    
+    SELECT o.name INTO v_organization_name 
+    FROM tbl_organization o 
+    WHERE o.organization_id = v_organization_id;
 
     -- prevent duplicate committee membership
     SELECT COUNT(*)
@@ -10148,29 +10314,44 @@ BEGIN
             (organization_id, cycle_number, user_id, org_version_id, member_type, status, joined_at)
         VALUES
             (v_organization_id, v_cycle_number, v_user_id, v_org_version_id, 'Committee', 'Active', CURRENT_TIMESTAMP);
+    ELSE
+        -- Update existing member to Committee type if they were a regular member
+        UPDATE tbl_organization_members 
+        SET member_type = 'Committee', 
+            status = 'Active',
+            org_version_id = v_org_version_id
+        WHERE organization_id = v_organization_id
+          AND cycle_number = v_cycle_number
+          AND user_id = v_user_id;
     END IF;
 
     -- log action (aligned to tbl_logs schema)
-    INSERT INTO tbl_logs (
-        user_id, action_type, type, meta_data
-    ) VALUES (
-        v_action_by_user_id,
-        'COMMITTEE_MEMBER_ADD',
+    CALL LogAction(
+        p_action_by_email,
+        CONCAT('Added ', v_user_name, ' as ', v_role_name, ' to committee "', v_committee_name, '" in ', v_organization_name),
         'committee_member_add',
-        JSON_OBJECT(
-            'committee_id', p_committee_id,
-            'user_id', v_user_id,
-            'committee_role', v_role_name,
-            'organization_id', v_organization_id,
-            'cycle_number', v_cycle_number,
-            'permissions_assigned', (
-                SELECT COUNT(*) FROM tbl_committee_role_permission 
-                WHERE committee_role_id = v_committee_role_id
-            )
-        )
+        NULL,
+        CONCAT('/organization/', v_organization_id),
+        NULL
     );
 
     -- return the newly added member row with enhanced information
+    -- Debug: Check if the query will return results
+    IF NOT EXISTS (
+        SELECT 1 FROM tbl_committee c
+        JOIN tbl_committee_members cm ON c.committee_id = cm.committee_id
+        JOIN tbl_user u ON cm.user_id = u.user_id
+        JOIN tbl_organization_members om ON om.user_id = u.user_id
+         AND om.organization_id = v_organization_id
+         AND om.cycle_number = v_cycle_number
+        WHERE c.organization_id = v_organization_id
+          AND c.cycle_number = v_cycle_number
+          AND cm.committee_member_id = v_new_member_id
+    ) THEN
+        SIGNAL SQLSTATE '45000' 
+            SET MESSAGE_TEXT = 'Failed to retrieve committee member data after creation';
+    END IF;
+
     SELECT 
         c.committee_id,
         c.name AS committee_name,
@@ -10657,6 +10838,64 @@ BEGIN
     DECLARE v_member_id_to_archive INT;
     DECLARE v_member_id_source VARCHAR(30);
     DECLARE v_is_only_committee_member INT;  -- New: Check if user has other roles
+    DECLARE v_error_message TEXT;  -- Variable to store concatenated error messages
+    DECLARE v_user_name VARCHAR(255);  -- Add user name variable
+    DECLARE v_committee_name VARCHAR(100);  -- Add committee name variable
+
+    -- Error handler for foreign key constraint violations
+    DECLARE EXIT HANDLER FOR SQLSTATE '23000'
+    BEGIN
+        ROLLBACK;
+        GET DIAGNOSTICS CONDITION 1
+            @errno = MYSQL_ERRNO, @text = MESSAGE_TEXT;
+        
+        IF @errno = 1451 THEN  -- Cannot delete or update a parent row: a foreign key constraint fails
+            -- Check if it's related to committee roles/permissions
+            IF @text LIKE '%tbl_committee_role_permission%' OR @text LIKE '%committee_role_id%' THEN
+                SIGNAL SQLSTATE '45000' 
+                SET MESSAGE_TEXT = 'Cannot archive committee member: This member has permissions that need to be transferred to another member first.';
+            ELSEIF @text LIKE '%tbl_committee_members%' OR @text LIKE '%committee_member_id%' THEN
+                SIGNAL SQLSTATE '45000' 
+                SET MESSAGE_TEXT = 'Cannot archive committee member: This member is referenced by other records in the system. Please remove all dependent records first.';
+            ELSE
+                SIGNAL SQLSTATE '45000' 
+                SET MESSAGE_TEXT = 'Cannot archive committee member: This member is referenced by other records in the system. Please remove all dependent records first.';
+            END IF;
+        ELSEIF @errno = 1452 THEN  -- Cannot add or update a child row: a foreign key constraint fails
+            SIGNAL SQLSTATE '45000' 
+            SET MESSAGE_TEXT = 'Cannot archive committee member: Invalid reference to user, committee, or organization data.';
+        ELSE
+            -- Format any other database errors for user-friendly display
+            IF @text IS NOT NULL THEN
+                SET v_error_message = CONCAT('Database error while archiving committee member: ', @text);
+            ELSEIF @errno IS NOT NULL THEN
+                SET v_error_message = CONCAT('Database error while archiving committee member: MySQL Error ', @errno);
+            ELSE
+                SET v_error_message = 'Database error while archiving committee member: Unknown error occurred';
+            END IF;
+            SIGNAL SQLSTATE '45000' 
+            SET MESSAGE_TEXT = v_error_message;
+        END IF;
+    END;
+
+    -- General error handler for other SQL errors
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        GET DIAGNOSTICS CONDITION 1
+            @errno = MYSQL_ERRNO, @text = MESSAGE_TEXT;
+        IF @text IS NOT NULL THEN
+            SET v_error_message = CONCAT('Error archiving committee member: ', @text);
+        ELSEIF @errno IS NOT NULL THEN
+            SET v_error_message = CONCAT('Error archiving committee member (Code: ', @errno, ')');
+        ELSE
+            SET v_error_message = 'Error archiving committee member: Unknown database error occurred';
+        END IF;
+        SIGNAL SQLSTATE '45000' 
+        SET MESSAGE_TEXT = v_error_message;
+    END;
+
+    START TRANSACTION;
 
     -- Get user_id of the action performer
     SELECT user_id INTO v_action_by_user_id
@@ -10669,20 +10908,26 @@ BEGIN
         SET MESSAGE_TEXT = 'Action performer not found';
     END IF;
 
-    -- Get current member info (role via tbl_committee_role)
+    -- Get current member info (role via tbl_committee_role) and user details
     SELECT cm.committee_id,
            cm.user_id,
            cr.role_name,
            c.organization_id,
-           c.cycle_number
+           c.cycle_number,
+           CONCAT(u.f_name, ' ', u.l_name),
+           c.name
     INTO v_committee_id,
          v_user_id,
          v_role_name,
          v_organization_id,
-         v_cycle_number
+         v_cycle_number,
+         v_user_name,
+         v_committee_name
     FROM tbl_committee_members cm
     JOIN tbl_committee c
       ON cm.committee_id = c.committee_id
+    JOIN tbl_user u
+      ON cm.user_id = u.user_id
     LEFT JOIN tbl_committee_role cr
       ON cr.committee_role_id = cm.committee_role_id
     WHERE cm.committee_member_id = p_committee_member_id
@@ -10783,12 +11028,14 @@ BEGIN
     -- Log the action using LogAction stored procedure
     CALL LogAction(
         p_action_by_email,  -- p_user_email
-        CONCAT('Archived committee member: ', v_user_id, ' from committee ', v_committee_id),  -- p_action
+        CONCAT('Archived committee member: ', COALESCE(v_user_name, 'Unknown User'), ' from ', COALESCE(v_committee_name, 'Unknown Committee')),  -- p_action
         'committee_member_archive',  -- p_type
         JSON_OBJECT(
             'committee_member_id', p_committee_member_id,
             'committee_id', v_committee_id,
             'user_id', v_user_id,
+            'user_name', v_user_name,
+            'committee_name', v_committee_name,
             'committee_role', v_role_name,
             'organization_id', v_organization_id,
             'cycle_number', v_cycle_number,
@@ -10800,6 +11047,8 @@ BEGIN
         NULL,  -- p_redirect_url
         NULL   -- p_file_path
     );
+
+    COMMIT;
 END $$
 DELIMITER ;
 
@@ -10880,7 +11129,6 @@ BEGIN
 END $$
 DELIMITER ;
 
-
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE RejectMembershipApplication(
     IN p_application_id INT,
@@ -10952,6 +11200,8 @@ BEGIN
     DECLARE v_program_id INT DEFAULT NULL;
     DECLARE v_user_exists INT DEFAULT 0;
     DECLARE v_user_id VARCHAR(200);
+    DECLARE v_user_name VARCHAR(200);
+    DECLARE v_organization_name VARCHAR(200);
 
     -- Get the user_id of the action performer
     SELECT user_id INTO v_action_by_user_id
@@ -11009,6 +11259,15 @@ BEGIN
         );
     END IF;
 
+    -- Get user name and organization name for user-friendly logging
+    SELECT COALESCE(CONCAT(u.f_name, ' ', u.l_name), u.email) INTO v_user_name 
+    FROM tbl_user u 
+    WHERE u.user_id = v_user_id;
+    
+    SELECT name INTO v_organization_name 
+    FROM tbl_organization 
+    WHERE name = p_org_name;
+
     -- Check if renewal cycle exists
     IF NOT EXISTS (
         SELECT 1 FROM tbl_renewal_cycle WHERE organization_id = @org_id AND cycle_number = @current_cycle
@@ -11053,27 +11312,11 @@ BEGIN
     );
 
     -- Log the action
-    INSERT INTO tbl_logs (
-        user_id,
-        action,
-        type,
-        meta_data,
-        timestamp
-    ) VALUES (
+    CALL LogAction(
         v_action_by_user_id,
-        CONCAT('Added organization member: ', v_user_id, ' to org ', @org_id, ' cycle ', @current_cycle),
-        'organization_member_add',
-        JSON_OBJECT(
-            'organization_id', @org_id,
-            'cycle_number', @current_cycle,
-            'user_id', v_user_id,
-            'email', p_email,
-            'member_type', 'Member',
-            'status', 'Active',
-            'program_id', v_program_id,
-            'program_name', p_program_name
-        ),
-        NOW()
+        CONCAT('Added ', v_user_name, ' as member to ', v_organization_name),
+        CONCAT('/organization/', @org_id),
+        'organization_member_add'
     );
 
             SELECT 
@@ -11218,6 +11461,8 @@ BEGIN
     DECLARE v_executive_role_id INT;
     DECLARE v_committee_id INT;
     DECLARE v_committee_role ENUM('Committee Head', 'Committee Officer');
+    DECLARE v_user_name VARCHAR(255);  -- Add user name variable
+    DECLARE v_org_name VARCHAR(255);   -- Add organization name variable
     
     -- Get user_id of the archiver
     SELECT user_id INTO v_archived_by
@@ -11230,7 +11475,7 @@ BEGIN
         SET MESSAGE_TEXT = 'Archiving user not found';
     END IF;
 
-    -- Get member details
+    -- Get member details and user/organization names
     SELECT 
         om.organization_id,
         om.cycle_number,
@@ -11238,7 +11483,9 @@ BEGIN
         om.member_type,
         om.executive_role_id,
         NULL, -- committee_id (will be set below if applicable)
-        NULL  -- committee_role (will be set below if applicable)
+        NULL,  -- committee_role (will be set below if applicable)
+        CONCAT(u.f_name, ' ', u.l_name),
+        o.name
     INTO
         v_organization_id,
         v_cycle_number,
@@ -11246,8 +11493,12 @@ BEGIN
         v_member_type,
         v_executive_role_id,
         v_committee_id,
-        v_committee_role
+        v_committee_role,
+        v_user_name,
+        v_org_name
     FROM tbl_organization_members om
+    JOIN tbl_user u ON om.user_id = u.user_id
+    JOIN tbl_organization o ON om.organization_id = o.organization_id
     WHERE om.member_id = p_member_id;
 
     IF v_organization_id IS NULL THEN
@@ -11309,29 +11560,26 @@ BEGIN
     DELETE FROM tbl_organization_members
     WHERE member_id = p_member_id;
 
-    -- Log the action
-    INSERT INTO tbl_logs (
-        user_id,
-        action_type,
-        type,
-        meta_data,
-        timestamp
-    ) VALUES (
-        v_archived_by,
-        CONCAT('Archived organization member: ', v_user_id, ' (member_id ', p_member_id, ') from org ', v_organization_id),
-        'organization_member_archive',
+    -- Log the action using LogAction stored procedure
+    CALL LogAction(
+        p_archived_by_email,  -- p_user_email
+        CONCAT('Archived organization member: ', COALESCE(v_user_name, 'Unknown User'), ' from ', COALESCE(v_org_name, 'Unknown Organization')),  -- p_action
+        'organization_member_archive',  -- p_type
         JSON_OBJECT(
             'member_id', p_member_id,
             'organization_id', v_organization_id,
+            'organization_name', v_org_name,
             'cycle_number', v_cycle_number,
             'user_id', v_user_id,
+            'user_name', v_user_name,
             'member_type', v_member_type,
             'executive_role_id', v_executive_role_id,
             'committee_id', v_committee_id,
             'committee_role', v_committee_role,
             'reason', p_reason
-        ),
-        CURRENT_TIMESTAMP
+        ),  -- p_meta_data
+        NULL,  -- p_redirect_url
+        NULL   -- p_file_path
     );
 END $$
 DELIMITER ;
@@ -11354,6 +11602,8 @@ BEGIN
     DECLARE v_executive_role_id INT;
     DECLARE v_committee_id INT;
     DECLARE v_committee_role ENUM('Committee Head', 'Committee Officer');
+    DECLARE v_user_name VARCHAR(255);  -- Add user name variable
+    DECLARE v_org_name VARCHAR(255);   -- Add organization name variable
     
     -- Get user_id of the unarchiver
     SELECT user_id INTO v_unarchived_by
@@ -11366,16 +11616,18 @@ BEGIN
         SET MESSAGE_TEXT = 'Unarchiving user not found';
     END IF;
 
-    -- Get archived member details by archived_id (not member_id)
+    -- Get archived member details and user/organization names by archived_id
     SELECT 
-        archived_id,
-        organization_id,
-        cycle_number,
-        user_id,
-        member_type,
-        executive_role_id,
-        committee_id,
-        committee_role
+        aom.archived_id,
+        aom.organization_id,
+        aom.cycle_number,
+        aom.user_id,
+        aom.member_type,
+        aom.executive_role_id,
+        aom.committee_id,
+        aom.committee_role,
+        CONCAT(u.f_name, ' ', u.l_name),
+        o.name
     INTO
         v_archived_id,
         v_organization_id,
@@ -11384,9 +11636,13 @@ BEGIN
         v_member_type,
         v_executive_role_id,
         v_committee_id,
-        v_committee_role
-    FROM tbl_archived_organization_members
-    WHERE archived_id = p_archived_id  -- Changed from member_id to archived_id
+        v_committee_role,
+        v_user_name,
+        v_org_name
+    FROM tbl_archived_organization_members aom
+    JOIN tbl_user u ON aom.user_id = u.user_id
+    JOIN tbl_organization o ON aom.organization_id = o.organization_id
+    WHERE aom.archived_id = p_archived_id  -- Changed from member_id to archived_id
     LIMIT 1;
 
     IF v_organization_id IS NULL THEN
@@ -11404,7 +11660,8 @@ BEGIN
         SET MESSAGE_TEXT = 'Organization version does not match archived member cycle';
     END IF;
 
-    -- Restore to active members (now includes org_version_id)
+    -- Restore to active members as 'Member' type regardless of original role
+    -- Always restore as regular member, not executive or committee
     INSERT INTO tbl_organization_members (
         organization_id,
         cycle_number,
@@ -11413,16 +11670,16 @@ BEGIN
         executive_role_id,
         status,
         joined_at,
-        org_version_id  -- Added: Use the input org_version_id
+        org_version_id
     ) VALUES (
         v_organization_id,
         v_cycle_number,
         v_user_id,
-        v_member_type,
-        v_executive_role_id,
+        'Member',  -- Always restore as regular member
+        NULL,      -- No executive role for regular members
         'Active',
         CURRENT_TIMESTAMP,
-        p_org_version_id  -- Added: Passed in as parameter
+        p_org_version_id
     );
 
     -- Remove from archived members
@@ -11432,14 +11689,17 @@ BEGIN
     -- Log the action using LogAction
     CALL LogAction(
         p_unarchived_by_email,
-        CONCAT('Unarchived organization member: ', v_user_id, ' (archived_id ', p_archived_id, ') back to org ', v_organization_id),
+        CONCAT('Unarchived organization member: ', COALESCE(v_user_name, 'Unknown User'), ' restored as Member to ', COALESCE(v_org_name, 'Unknown Organization')),
         'organization_member_unarchive',
         JSON_OBJECT(
             'archived_id', p_archived_id,
             'organization_id', v_organization_id,
+            'organization_name', v_org_name,
             'cycle_number', v_cycle_number,
             'user_id', v_user_id,
-            'member_type', v_member_type,
+            'user_name', v_user_name,
+            'original_member_type', v_member_type,
+            'restored_as', 'Member',
             'reason', p_reason
         ),
         CONCAT('/organizations/', v_organization_id, '/members'),
@@ -12181,7 +12441,7 @@ BEGIN
 
     CALL LogAction(
         p_user_email,
-        CONCAT('Archived program ID ', p_program_id, COALESCE(CONCAT(' — reason: ', p_reason), '')),
+        CONCAT('Archived program ID ', p_program_id, COALESCE(CONCAT(' - reason: ', p_reason), '')),
         'Program.Archive',
         JSON_OBJECT('program_id', p_program_id, 'reason', p_reason),
         NULL, NULL
@@ -12469,16 +12729,16 @@ BEGIN
 
     /* Build human-friendly notification title/message */
     IF v_application_status IS NOT NULL AND LOWER(v_application_status) = 'approved' THEN
-        SET v_title = CONCAT('Application Approved — ', v_org_name);
-        SET v_message = CONCAT('Good news — the ', v_application_type, ' application for "', v_org_name, '" has completed all approval steps.');
+        SET v_title = CONCAT('Application Approved - ', v_org_name);
+        SET v_message = CONCAT('Good news - the ', v_application_type, ' application for "', v_org_name, '" has completed all approval steps.');
     ELSEIF v_step_status = 'Approved' THEN
-        SET v_title = CONCAT('Approval Progress — ', v_org_name);
+        SET v_title = CONCAT('Approval Progress - ', v_org_name);
         SET v_message = CONCAT('Step ', v_step, ' for "', v_org_name, '" was approved. ', v_remaining_steps, ' step(s) remaining. You can view details here: ', v_url);
     ELSEIF v_step_status = 'Rejected' OR (v_application_status IS NOT NULL AND LOWER(v_application_status) = 'rejected') THEN
-        SET v_title = CONCAT('Application Rejected — ', v_org_name);
+        SET v_title = CONCAT('Application Rejected - ', v_org_name);
         SET v_message = CONCAT('The ', v_application_type, ' application for "', v_org_name, '" was rejected at step ', v_step, '. Please review the comments and next steps: ', v_url);
     ELSE
-        SET v_title = CONCAT('Application Update — ', v_org_name);
+        SET v_title = CONCAT('Application Update - ', v_org_name);
         SET v_message = CONCAT('Status update for "', v_org_name, '": ', COALESCE(v_application_status,'Updated'), '. Current step: ', COALESCE(CAST(v_step AS CHAR), 'N/A'), '. See details: ', v_url);
     END IF;
 
@@ -12496,7 +12756,7 @@ BEGIN
         );
     END IF;
 
-    /* Log action — LogAction(p_user_email, p_action, p_type, p_meta_data, p_redirect_url, p_file_path) */
+    /* Log action - LogAction(p_user_email, p_action, p_type, p_meta_data, p_redirect_url, p_file_path) */
     CALL LogAction(
         (SELECT email FROM tbl_user WHERE user_id = v_approver_id LIMIT 1),
         CONCAT('Approval step updated for ', v_org_name, ': ', v_title),
@@ -14219,7 +14479,7 @@ BEGIN
   /* ===== Single SELECT (CTEs visible here) ===== */
   SELECT *
   FROM (
-    /* 1) SDAO/System — only when no org filter */
+    /* 1) SDAO/System - only when no org filter */
     SELECT
       NULL AS organization_id,
       'SDAO' AS organization_name,
@@ -14256,7 +14516,7 @@ BEGIN
 
     UNION ALL
 
-    /* 2) All Organizations — only when no org filter */
+    /* 2) All Organizations - only when no org filter */
     SELECT
       -1 AS organization_id,
       'All Organizations' AS organization_name,
@@ -14293,7 +14553,7 @@ BEGIN
 
     UNION ALL
 
-    /* 3) Per-organization rows — all orgs when NULL, or single org when set */
+    /* 3) Per-organization rows - all orgs when NULL, or single org when set */
     SELECT
       ol.organization_id,
       ol.organization_name,
@@ -14549,6 +14809,12 @@ BEGIN
 
     START TRANSACTION;
 
+    -- Ensure committee roles exist for this committee (Committee Head, Committee Officer)
+    INSERT IGNORE INTO tbl_committee_role (committee_id, role_name)
+    VALUES 
+        (p_committee_id, 'Committee Head'),
+        (p_committee_id, 'Committee Officer');
+
     -- Get the committee_role_id for the given committee and role type
     SELECT committee_role_id INTO v_committee_role_id
     FROM tbl_committee_role
@@ -14625,6 +14891,30 @@ BEGIN
 
 END$$
 DELIMITER ;
+
+-- Procedure to fix existing committees that might not have their default roles
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE FixCommitteeRoles()
+BEGIN
+    -- Insert missing committee roles for all existing committees
+    INSERT IGNORE INTO tbl_committee_role (committee_id, role_name)
+    SELECT c.committee_id, 'Committee Head'
+    FROM tbl_committee c
+    WHERE c.status != 'Archived'
+    UNION ALL
+    SELECT c.committee_id, 'Committee Officer'
+    FROM tbl_committee c
+    WHERE c.status != 'Archived';
+    
+    -- Return count of committees fixed
+    SELECT 
+        COUNT(DISTINCT c.committee_id) as committees_processed,
+        'Committee roles created/verified for all active committees' as message
+    FROM tbl_committee c
+    WHERE c.status != 'Archived';
+END$$
+DELIMITER ;
+
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetMemberPermissionOverrides(
     IN p_organization_id INT,
@@ -14845,6 +15135,8 @@ BEGIN
     DECLARE v_counter INT DEFAULT 0;
     DECLARE v_array_length INT;
     DECLARE v_permission_obj JSON;
+    DECLARE v_user_name VARCHAR(200);
+    DECLARE v_organization_name VARCHAR(200);
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
         ROLLBACK;
@@ -14882,6 +15174,15 @@ BEGIN
     IF v_user_id IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'User not found';
     END IF;
+
+    -- Get user name and organization name for user-friendly logging
+    SELECT CONCAT(u.f_name, ' ', u.l_name) INTO v_user_name 
+    FROM tbl_user u 
+    WHERE u.user_id = v_user_id;
+    
+    SELECT o.name INTO v_organization_name 
+    FROM tbl_organization o 
+    WHERE o.organization_id = p_organization_id;
 
     -- Get member_id from organization members
     SELECT member_id INTO v_member_id
@@ -14934,25 +15235,19 @@ BEGIN
     END WHILE;
 
     -- Log the action
-    INSERT INTO tbl_logs (
-        user_id,
-        action_type,
-        type,
-        meta_data,
-        timestamp
-    ) VALUES (
-        v_action_by_user_id,
-        CONCAT('Added permission overrides for member: ', p_email),
+    CALL LogAction(
+        p_action_by_email,
+        CONCAT('Added permission overrides for ', v_user_name, ' in ', v_organization_name),
         'member_permission_override_add',
         JSON_OBJECT(
-            'organization_id', p_organization_id,
-            'cycle_number', v_cycle_number,
-            'member_id', v_member_id,
             'user_id', v_user_id,
-            'permissions_count', v_array_length,
-            'target_email', p_email
+            'user_name', v_user_name,
+            'organization_id', p_organization_id,
+            'organization_name', v_organization_name,
+            'permissions_count', v_array_length
         ),
-        CURRENT_TIMESTAMP
+        CONCAT('/organization/', p_organization_id),
+        NULL
     );
 
     COMMIT;
@@ -15054,6 +15349,8 @@ BEGIN
     DECLARE v_array_length INT;
     DECLARE v_permission_obj JSON;
     DECLARE v_user_id VARCHAR(200);
+    DECLARE v_user_name VARCHAR(200);
+    DECLARE v_organization_name VARCHAR(200);
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
         ROLLBACK;
@@ -15095,6 +15392,15 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Member not found or not active in this organization';
     END IF;
 
+    -- Get user name and organization name for user-friendly logging
+    SELECT CONCAT(u.f_name, ' ', u.l_name) INTO v_user_name 
+    FROM tbl_user u 
+    WHERE u.user_id = v_user_id;
+    
+    SELECT o.name INTO v_organization_name 
+    FROM tbl_organization o 
+    WHERE o.organization_id = p_organization_id;
+
     -- Delete existing permission overrides for this member
     DELETE FROM tbl_member_permission_override 
     WHERE member_id = p_member_id;
@@ -15129,24 +15435,20 @@ BEGIN
     END WHILE;
 
     -- Log the action
-    INSERT INTO tbl_logs (
-        user_id,
-        action_type,
-        type,
-        meta_data,
-        timestamp
-    ) VALUES (
-        v_action_by_user_id,
-        CONCAT('Updated permission overrides for member_id: ', p_member_id),
+    CALL LogAction(
+        p_action_by_email,
+        CONCAT('Updated permission overrides for ', v_user_name, ' in ', v_organization_name),
         'member_permission_override_update',
         JSON_OBJECT(
-            'organization_id', p_organization_id,
-            'cycle_number', v_cycle_number,
             'member_id', p_member_id,
             'user_id', v_user_id,
+            'user_name', v_user_name,
+            'organization_id', p_organization_id,
+            'organization_name', v_organization_name,
             'permissions_count', v_array_length
         ),
-        CURRENT_TIMESTAMP
+        CONCAT('/organization/', p_organization_id),
+        NULL
     );
 
     COMMIT;
@@ -15243,6 +15545,7 @@ BEGIN
     DECLARE v_member_email VARCHAR(100);
     DECLARE v_member_name VARCHAR(255);
     DECLARE v_override_count INT DEFAULT 0;
+    DECLARE v_organization_name VARCHAR(200);
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
         ROLLBACK;
@@ -15285,6 +15588,11 @@ BEGIN
     IF v_user_id IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Member not found or not active in this organization';
     END IF;
+
+    -- Get organization name for user-friendly logging
+    SELECT name INTO v_organization_name 
+    FROM tbl_organization 
+    WHERE organization_id = p_organization_id;
 
     -- Check if member has any permission overrides
     SELECT COUNT(*) INTO v_override_count
@@ -15373,26 +15681,20 @@ BEGIN
     WHERE member_id = p_member_id;
 
     -- Log the action
-    INSERT INTO tbl_logs (
-        user_id,
-        action_type,
-        type,
-        meta_data,
-        timestamp
-    ) VALUES (
-        v_action_by_user_id,
-        CONCAT('Removed all permission overrides for member: ', v_member_name, ' (', v_member_email, ')'),
+    CALL LogAction(
+        p_action_by_email,
+        CONCAT('Removed all permission overrides for ', v_member_name, ' in ', v_organization_name),
         'member_permission_override_remove',
         JSON_OBJECT(
-            'organization_id', p_organization_id,
-            'cycle_number', v_cycle_number,
             'member_id', p_member_id,
             'user_id', v_user_id,
-            'removed_overrides_count', v_override_count,
-            'target_email', v_member_email,
-            'target_name', v_member_name
+            'member_name', v_member_name,
+            'organization_id', p_organization_id,
+            'organization_name', v_organization_name,
+            'overrides_removed', v_override_count
         ),
-        CURRENT_TIMESTAMP
+        CONCAT('/organization/', p_organization_id),
+        NULL
     );
 
     COMMIT;
@@ -18098,6 +18400,18 @@ VALUES("Student",0,null),
 ("SDAO",1,5),
 ("Dean",1,3),
 ("Academic Director",1,4);
+
+-- Create system user for automated logging
+INSERT INTO tbl_user (user_id, f_name, l_name, email, role_id, status, created_at)
+VALUES (
+    'sys-system',
+    'System',
+    'User',
+    'system@nu-dasma.edu.ph',
+    (SELECT role_id FROM tbl_role WHERE LOWER(role_name) = 'sdao' LIMIT 1),
+    'Active',
+    CURRENT_TIMESTAMP
+);
 
 INSERT INTO tbl_permission(permission_name, scope)
 VALUES("CREATE_EVENT","Organization"),

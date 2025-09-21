@@ -409,6 +409,7 @@ async function archiveCommittee({
         return rows[0];
     } catch (error) {
         console.error('[archiveCommittee] SQL/Error:', error.sqlMessage || error.message, error);
+        // Pass through the original error to preserve the SQL message
         throw error;
     } finally {
         connection.release();
@@ -486,6 +487,8 @@ async function archiveCommitteeMember({
         );
         return rows[0];
     } catch (error) {
+        console.error('[archiveCommitteeMember] SQL/Error:', error.sqlMessage || error.message, error);
+        // Pass through the original error to preserve the SQL message
         throw error;
     } finally {
         connection.release();
@@ -1453,5 +1456,29 @@ module.exports = {
     processMembershipApproval,
     processMembershipRejection,
     approveLeaveApplication,
-    rejectLeaveApplication
+    rejectLeaveApplication,
+    getApplicationOfficers
 };
+
+async function getApplicationOfficers(application_id) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query(`
+            SELECT 
+                ae.proposed_user_id as user_id,
+                ae.proposed_name as name,
+                ae.proposed_email as email,
+                u.status,
+                ae.proposed_title as title
+            FROM tbl_application_executives ae
+            LEFT JOIN tbl_user u ON ae.proposed_user_id = u.user_id
+            WHERE ae.application_id = ?
+        `, [application_id]);
+        return rows;
+    } catch (error) {
+        console.error('Error getting application officers:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
