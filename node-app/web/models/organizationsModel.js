@@ -1457,7 +1457,8 @@ module.exports = {
     processMembershipRejection,
     approveLeaveApplication,
     rejectLeaveApplication,
-    getApplicationOfficers
+    getApplicationOfficers,
+    updateOrganizationPaymentType
 };
 
 async function getApplicationOfficers(application_id) {
@@ -1477,6 +1478,38 @@ async function getApplicationOfficers(application_id) {
         return rows;
     } catch (error) {
         console.error('Error getting application officers:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function updateOrganizationPaymentType(organization_id, paymentData) {
+    const connection = await pool.getConnection();
+    try {
+        const { membership_fee_type, membership_fee_amount } = paymentData;
+        
+        const [rows] = await connection.query(`
+            UPDATE tbl_organization 
+            SET membership_fee_type = ?, 
+                membership_fee_amount = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE organization_id = ?
+        `, [membership_fee_type, membership_fee_amount, organization_id]);
+        
+        if (rows.affectedRows === 0) {
+            throw new Error('Organization not found');
+        }
+        
+        return { 
+            success: true, 
+            affectedRows: rows.affectedRows,
+            organization_id,
+            membership_fee_type,
+            membership_fee_amount
+        };
+    } catch (error) {
+        console.error('Error updating organization payment type:', error);
         throw error;
     } finally {
         connection.release();

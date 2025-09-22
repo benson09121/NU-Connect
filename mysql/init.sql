@@ -18519,7 +18519,8 @@ VALUES("CREATE_EVENT","Organization"),
 ("MANAGE_TRANSACTIONS","Organization"),
 ("MANAGE_SDAO_EVENT","SDAO"),
 ("MANAGE_COLLEGES","SDAO"),
-("SCAN_QR", "Organization");
+("SCAN_QR", "Organization"),
+("MANAGE_TERM_PAYMENTS", "Organization");
 
 INSERT INTO tbl_role_permission (role_id, permission_id) 
 VALUES
@@ -18692,5 +18693,561 @@ INSERT INTO tbl_rank_permission(rank_id, permission_id) VALUES
 (1,22),
 (1,29),
 (1,31),
-(1,34);
+(1,34),
+(1,35);
+
+-- =====================================
+-- TERM PAYMENT SYSTEM TABLES
+-- =====================================
+
+-- Academic Terms Table
+CREATE TABLE tbl_academic_term (
+    term_id INT PRIMARY KEY AUTO_INCREMENT,
+    term_name VARCHAR(100) NOT NULL UNIQUE,
+    term_description TEXT NULL,
+    academic_year VARCHAR(20) NULL, -- e.g., '2024-2025', '2025'
+    start_date DATE NOT NULL,
+    end_date DATE NOT NULL,
+    is_active BOOLEAN DEFAULT FALSE,
+    status ENUM('Draft', 'Active', 'Completed', 'Archived') DEFAULT 'Draft',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    created_by VARCHAR(200) NOT NULL,
+    FOREIGN KEY (created_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE
+);
+
+-- Term Payment Configuration per Organization
+CREATE TABLE tbl_organization_term_config (
+    config_id INT PRIMARY KEY AUTO_INCREMENT,
+    organization_id INT NOT NULL,
+    org_version_id INT NOT NULL,
+    term_id INT NOT NULL,
+    payment_amount DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+    payment_type ENUM('Per Term', 'Per Event', 'Annual') DEFAULT 'Per Term',
+    due_date DATE NULL,
+    grace_period_days INT DEFAULT 0,
+    late_fee_amount DECIMAL(10,2) DEFAULT 0.00,
+    is_mandatory BOOLEAN DEFAULT TRUE,
+    status ENUM('Active', 'Inactive', 'Suspended') DEFAULT 'Active',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    created_by VARCHAR(200) NOT NULL,
+    FOREIGN KEY (organization_id) REFERENCES tbl_organization(organization_id) ON DELETE CASCADE,
+    FOREIGN KEY (org_version_id) REFERENCES tbl_organization_version(org_version_id) ON DELETE CASCADE,
+    FOREIGN KEY (term_id) REFERENCES tbl_academic_term(term_id) ON DELETE CASCADE,
+    FOREIGN KEY (created_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
+    UNIQUE KEY unique_org_term (organization_id, org_version_id, term_id)
+);
+
+-- Individual Member Term Payments
+CREATE TABLE tbl_membership_term_payment (
+    payment_id INT PRIMARY KEY AUTO_INCREMENT,
+    application_id INT NOT NULL,
+    term_id INT NOT NULL,
+    organization_id INT NOT NULL,
+    org_version_id INT NOT NULL,
+    user_id VARCHAR(200) NOT NULL,
+    payment_amount DECIMAL(10,2) NOT NULL,
+    payment_status ENUM('Pending', 'Partial', 'Paid', 'Overdue', 'Waived', 'Cancelled') DEFAULT 'Pending',
+    payment_method ENUM('Cash', 'Bank Transfer', 'Online Payment', 'Cheque', 'Upload Proof') NULL,
+    transaction_reference VARCHAR(255) NULL,
+    transaction_id INT NULL,  -- Links to tbl_transaction for main transaction system
+    payment_date TIMESTAMP NULL,
+    due_date DATE NOT NULL,
+    late_fee_applied DECIMAL(10,2) DEFAULT 0.00,
+    notes TEXT NULL,
+    receipt_url VARCHAR(500) NULL,
+    verified_by VARCHAR(200) NULL,
+    verified_at TIMESTAMP NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (application_id) REFERENCES tbl_membership_application(application_id) ON DELETE CASCADE,
+    FOREIGN KEY (term_id) REFERENCES tbl_academic_term(term_id) ON DELETE CASCADE,
+    FOREIGN KEY (organization_id) REFERENCES tbl_organization(organization_id) ON DELETE CASCADE,
+    FOREIGN KEY (org_version_id) REFERENCES tbl_organization_version(org_version_id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
+    FOREIGN KEY (verified_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
+    FOREIGN KEY (transaction_id) REFERENCES tbl_transaction(transaction_id) ON DELETE SET NULL,
+    UNIQUE KEY unique_member_term_payment (application_id, term_id, organization_id),
+    INDEX idx_payment_status (payment_status),
+    INDEX idx_payment_date (payment_date),
+    INDEX idx_due_date (due_date),
+    INDEX idx_user_payments (user_id, payment_status),
+    INDEX idx_org_payments (organization_id, term_id, payment_status)
+);
+
+-- Payment History and Audit Trail
+CREATE TABLE tbl_term_payment_history (
+    history_id INT PRIMARY KEY AUTO_INCREMENT,
+    payment_id INT NOT NULL,
+    previous_status ENUM('Pending', 'Partial', 'Paid', 'Overdue', 'Waived', 'Cancelled') NULL,
+    new_status ENUM('Pending', 'Partial', 'Paid', 'Overdue', 'Waived', 'Cancelled') NOT NULL,
+    amount_change DECIMAL(10,2) DEFAULT 0.00,
+    action_type ENUM('STATUS_UPDATE', 'AMOUNT_UPDATE', 'PAYMENT_RECEIVED', 'LATE_FEE_APPLIED', 'VERIFICATION', 'CANCELLATION') NOT NULL,
+    notes TEXT NULL,
+    changed_by VARCHAR(200) NOT NULL,
+    changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (payment_id) REFERENCES tbl_membership_term_payment(payment_id) ON DELETE CASCADE,
+    FOREIGN KEY (changed_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
+    INDEX idx_payment_history (payment_id, changed_at),
+    INDEX idx_action_type (action_type, changed_at)
+);
+
+-- Additional Term Payments Table (for alternative payment tracking)
+CREATE TABLE tbl_term_payments (
+    payment_id INT AUTO_INCREMENT PRIMARY KEY,
+    membership_id INT NULL,
+    term_id INT NOT NULL,
+    organization_id INT NOT NULL,
+    user_id VARCHAR(200) NOT NULL,
+    payment_amount DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+    payment_status ENUM('Pending', 'Paid', 'Overdue', 'Cancelled') DEFAULT 'Pending',
+    payment_method VARCHAR(50) NULL, -- 'Cash', 'GCash', 'Bank Transfer', etc.
+    transaction_reference VARCHAR(100) NULL,
+    payment_date TIMESTAMP NULL,
+    due_date DATE NOT NULL,
+    late_fee_applied DECIMAL(10,2) DEFAULT 0.00,
+    notes TEXT NULL,
+    receipt_path VARCHAR(255) NULL,
+    verified_by VARCHAR(200) NULL,
+    verified_at TIMESTAMP NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    
+    FOREIGN KEY (term_id) REFERENCES tbl_academic_term(term_id) ON DELETE CASCADE,
+    FOREIGN KEY (organization_id) REFERENCES tbl_organization(organization_id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES tbl_user(user_id) ON DELETE CASCADE,
+    FOREIGN KEY (verified_by) REFERENCES tbl_user(user_id) ON DELETE SET NULL,
+    
+    INDEX idx_term_payments_user_org (user_id, organization_id),
+    INDEX idx_term_payments_term (term_id),
+    INDEX idx_term_payments_status (payment_status),
+    INDEX idx_term_payments_due_date (due_date)
+);
+
+-- Views for better data access
+CREATE VIEW vw_term_payment_overview AS
+SELECT 
+    mtp.payment_id,
+    mtp.application_id,
+    mtp.user_id,
+    CONCAT(u.f_name, ' ', u.l_name) as member_name,
+    u.email as member_email,
+    o.name as organization_name,
+    ov.name as version_name,
+    at.term_name,
+    at.start_date as term_start,
+    at.end_date as term_end,
+    mtp.payment_amount,
+    mtp.payment_status,
+    mtp.payment_method,
+    mtp.transaction_reference,
+    mtp.transaction_id,
+    t.receipt_no,
+    t.transaction_date,
+    mtp.payment_date,
+    mtp.due_date,
+    mtp.late_fee_applied,
+    mtp.notes,
+    mtp.receipt_url,
+    mtp.verified_by,
+    mtp.verified_at,
+    mtp.created_at,
+    mtp.updated_at,
+    CASE 
+        WHEN mtp.payment_status = 'Paid' THEN 'On Time'
+        WHEN mtp.payment_status = 'Overdue' THEN 'Overdue'
+        WHEN mtp.due_date < CURDATE() AND mtp.payment_status = 'Pending' THEN 'Past Due'
+        ELSE 'Current'
+    END as payment_timing_status
+FROM tbl_membership_term_payment mtp
+JOIN tbl_user u ON mtp.user_id = u.user_id
+JOIN tbl_organization o ON mtp.organization_id = o.organization_id
+JOIN tbl_organization_version ov ON mtp.org_version_id = ov.org_version_id
+JOIN tbl_academic_term at ON mtp.term_id = at.term_id
+LEFT JOIN tbl_transaction t ON mtp.transaction_id = t.transaction_id;
+
+-- Stored Procedures for Term Payment Management
+
+DELIMITER //
+
+-- Create Term Payment for a member
+CREATE PROCEDURE CreateTermPayment(
+    IN p_application_id INT,
+    IN p_term_id INT,
+    IN p_organization_id INT,
+    IN p_org_version_id INT,
+    IN p_user_id VARCHAR(200),
+    IN p_payment_amount DECIMAL(10,2)
+)
+BEGIN
+    DECLARE v_due_date DATE;
+    
+    -- Get due date from organization configuration or use term end date
+    SELECT 
+        COALESCE(otc.due_date, at.end_date) INTO v_due_date
+    FROM tbl_academic_term at
+    LEFT JOIN tbl_organization_term_config otc ON at.term_id = otc.term_id 
+        AND otc.organization_id = p_organization_id 
+        AND otc.org_version_id = p_org_version_id
+    WHERE at.term_id = p_term_id;
+    
+    INSERT INTO tbl_membership_term_payment (
+        application_id, term_id, organization_id, org_version_id, 
+        user_id, payment_amount, due_date
+    ) VALUES (
+        p_application_id, p_term_id, p_organization_id, p_org_version_id,
+        p_user_id, p_payment_amount, v_due_date
+    );
+    
+    SELECT LAST_INSERT_ID() as payment_id;
+END //
+
+-- Process Payment Transaction with Transaction System Integration
+CREATE PROCEDURE ProcessTermPaymentTransaction(
+    IN p_payment_id INT,
+    IN p_payment_method VARCHAR(50),
+    IN p_transaction_reference VARCHAR(255)
+)
+BEGIN
+    DECLARE v_user_id VARCHAR(200);
+    DECLARE v_organization_id INT;
+    DECLARE v_org_version_id INT;
+    DECLARE v_payment_amount DECIMAL(10,2);
+    DECLARE v_payer_name VARCHAR(255);
+    DECLARE v_transaction_type_id INT;
+    DECLARE v_payment_type_id INT;
+    DECLARE v_category_id INT;
+    DECLARE v_transaction_id INT;
+    DECLARE v_cycle_number INT;
+    DECLARE v_receipt_no VARCHAR(100);
+    DECLARE v_series_key VARCHAR(100);
+    DECLARE v_prefix VARCHAR(50);
+    DECLARE v_type_char CHAR(1);
+    DECLARE v_yyyymm VARCHAR(6);
+    DECLARE v_org_token VARCHAR(10);
+    DECLARE v_pad_len INT DEFAULT 6;
+
+    -- Get payment details
+    SELECT 
+        mtp.user_id, 
+        mtp.organization_id, 
+        mtp.org_version_id, 
+        mtp.payment_amount,
+        CONCAT(u.first_name, ' ', u.last_name) as payer_name
+    INTO 
+        v_user_id, 
+        v_organization_id, 
+        v_org_version_id, 
+        v_payment_amount,
+        v_payer_name
+    FROM tbl_membership_term_payment mtp
+    JOIN tbl_user u ON mtp.user_id = u.user_id
+    WHERE mtp.payment_id = p_payment_id;
+
+    -- Get current renewal cycle for the organization
+    SELECT cycle_number INTO v_cycle_number
+    FROM tbl_renewal_cycle 
+    WHERE organization_id = v_organization_id 
+    AND is_active = TRUE 
+    LIMIT 1;
+
+    -- Get transaction type ID for INCOME
+    SELECT transaction_type_id INTO v_transaction_type_id 
+    FROM tbl_transaction_type 
+    WHERE code = 'INCOME' LIMIT 1;
+
+    -- Get payment type ID based on method
+    SELECT payment_type_id INTO v_payment_type_id 
+    FROM tbl_payment_type 
+    WHERE code = UPPER(p_payment_method) LIMIT 1;
+    
+    -- If payment type not found, use default
+    IF v_payment_type_id IS NULL THEN 
+        SELECT payment_type_id INTO v_payment_type_id 
+        FROM tbl_payment_type 
+        WHERE code = 'CASH' LIMIT 1;
+    END IF;
+
+    -- Get category ID for Membership Fees
+    SELECT category_id INTO v_category_id 
+    FROM tbl_financial_category 
+    WHERE code = 'MEMBERSHIP_FEES' 
+      AND active = TRUE 
+    LIMIT 1;
+    
+    -- If specific membership category not found, try any income category
+    IF v_category_id IS NULL THEN
+        SELECT category_id INTO v_category_id 
+        FROM tbl_financial_category 
+        WHERE kind = 'INCOME' 
+          AND active = TRUE 
+        LIMIT 1;
+    END IF;
+
+    -- Generate receipt number for transaction
+    SET v_type_char = 'I'; -- Income
+    SET v_yyyymm = DATE_FORMAT(NOW(), '%Y%m');
+    SET v_org_token = CONCAT('ORG', LPAD(v_organization_id, 3, '0'));
+    SET v_prefix = CONCAT(v_type_char, '-', v_yyyymm, '-', v_org_token, '-');
+    SET v_series_key = v_prefix;
+    CALL NextReceiptNo(v_series_key, v_prefix, v_pad_len, v_receipt_no);
+
+    -- Create main transaction record
+    INSERT INTO tbl_transaction (
+        user_id, payer_name, payee_name, payment_description, amount,
+        transaction_type_id, payment_type_id, category_id, org_version_id, status, 
+        transaction_date, receipt_no, proof_image
+    ) VALUES (
+        v_user_id, v_payer_name, 'NU Connect', 'Term Membership Fee', v_payment_amount,
+        v_transaction_type_id, v_payment_type_id, v_category_id, v_org_version_id, 'Completed', 
+        NOW(), v_receipt_no, NULL
+    );
+
+    SET v_transaction_id = LAST_INSERT_ID();
+
+    -- Link to organization (membership transaction)
+    INSERT INTO tbl_transaction_membership (transaction_id, organization_id, cycle_number)
+    VALUES (v_transaction_id, v_organization_id, COALESCE(v_cycle_number, 1));
+
+    -- Update term payment record with transaction details
+    UPDATE tbl_membership_term_payment 
+    SET 
+        payment_status = 'Paid',
+        payment_method = p_payment_method,
+        transaction_reference = COALESCE(p_transaction_reference, v_receipt_no),
+        payment_date = CURRENT_TIMESTAMP,
+        transaction_id = v_transaction_id
+    WHERE payment_id = p_payment_id;
+    
+    -- Log the payment history
+    INSERT INTO tbl_term_payment_history (
+        payment_id, previous_status, new_status, action_type, changed_by
+    ) VALUES (
+        p_payment_id, 'Pending', 'Paid', 'PAYMENT_RECEIVED', 'SYSTEM'
+    );
+
+    -- Return transaction details
+    SELECT 
+        v_transaction_id as transaction_id,
+        v_receipt_no as receipt_no,
+        'Term payment processed and transaction created' as message;
+END //
+
+-- Get Member Term Payment History
+CREATE PROCEDURE GetMemberTermPaymentHistory(
+    IN p_user_id VARCHAR(200),
+    IN p_organization_id INT
+)
+BEGIN
+    SELECT * FROM vw_term_payment_overview 
+    WHERE user_id = p_user_id 
+    AND organization_id = p_organization_id
+    ORDER BY term_start DESC, created_at DESC;
+END //
+
+-- Generate Term Payments for Organization
+CREATE PROCEDURE GenerateTermPaymentsForOrganization(
+    IN p_organization_id INT,
+    IN p_org_version_id INT,
+    IN p_term_id INT
+)
+BEGIN
+    DECLARE v_payment_amount DECIMAL(10,2) DEFAULT 0.00;
+    
+    -- Get payment amount from organization configuration
+    SELECT payment_amount INTO v_payment_amount
+    FROM tbl_organization_term_config
+    WHERE organization_id = p_organization_id 
+    AND org_version_id = p_org_version_id
+    AND term_id = p_term_id;
+    
+    -- Create payments for all active members
+    INSERT INTO tbl_membership_term_payment (
+        application_id, term_id, organization_id, org_version_id,
+        user_id, payment_amount, due_date
+    )
+    SELECT 
+        ma.application_id,
+        p_term_id,
+        p_organization_id,
+        p_org_version_id,
+        ma.user_id,
+        v_payment_amount,
+        COALESCE(otc.due_date, at.end_date)
+    FROM tbl_membership_application ma
+    JOIN tbl_academic_term at ON at.term_id = p_term_id
+    LEFT JOIN tbl_organization_term_config otc ON otc.organization_id = p_organization_id 
+        AND otc.org_version_id = p_org_version_id
+        AND otc.term_id = p_term_id
+    WHERE ma.organization_id = p_organization_id
+    AND ma.status = 'Approved'
+    AND NOT EXISTS (
+        SELECT 1 FROM tbl_membership_term_payment mtp 
+        WHERE mtp.application_id = ma.application_id 
+        AND mtp.term_id = p_term_id
+    );
+END //
+
+-- Get Term Payment Analytics
+CREATE PROCEDURE GetTermPaymentAnalytics(
+    IN p_organization_id INT,
+    IN p_term_id INT
+)
+BEGIN
+    SELECT 
+        COUNT(*) as total_members,
+        SUM(CASE WHEN payment_status = 'Paid' THEN 1 ELSE 0 END) as paid_count,
+        SUM(CASE WHEN payment_status = 'Pending' THEN 1 ELSE 0 END) as pending_count,
+        SUM(CASE WHEN payment_status = 'Overdue' THEN 1 ELSE 0 END) as overdue_count,
+        SUM(payment_amount) as total_expected,
+        SUM(CASE WHEN payment_status = 'Paid' THEN payment_amount ELSE 0 END) as total_collected,
+        ROUND(SUM(CASE WHEN payment_status = 'Paid' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) as payment_rate,
+        AVG(DATEDIFF(payment_date, created_at)) as avg_payment_days
+    FROM tbl_membership_term_payment
+    WHERE organization_id = p_organization_id
+    AND term_id = p_term_id;
+END //
+
+-- Procedures for tbl_term_payments table
+
+-- Get user term payments by user and organization
+CREATE PROCEDURE GetUserTermPayments(
+    IN p_user_id VARCHAR(200),
+    IN p_organization_id INT
+)
+BEGIN
+    SELECT 
+        tp.payment_id,
+        tp.membership_id,
+        tp.term_id,
+        tp.organization_id,
+        tp.user_id,
+        tp.payment_amount,
+        tp.payment_status,
+        tp.payment_method,
+        tp.transaction_reference,
+        tp.payment_date,
+        tp.due_date,
+        tp.late_fee_applied,
+        tp.notes,
+        tp.receipt_path,
+        tp.verified_by,
+        tp.verified_at,
+        tp.created_at,
+        tp.updated_at,
+        t.term_name,
+        t.start_date as term_start,
+        t.end_date as term_end,
+        o.name as organization_name
+    FROM tbl_term_payments tp
+    JOIN tbl_academic_term t ON tp.term_id = t.term_id
+    JOIN tbl_organization o ON tp.organization_id = o.organization_id
+    WHERE tp.user_id = p_user_id 
+    AND tp.organization_id = p_organization_id
+    ORDER BY tp.due_date DESC;
+END //
+
+-- Update payment receipt
+CREATE PROCEDURE UpdateTermPaymentReceipt(
+    IN p_payment_id INT,
+    IN p_receipt_path VARCHAR(255),
+    IN p_notes TEXT,
+    IN p_user_id VARCHAR(200)
+)
+BEGIN
+    UPDATE tbl_term_payments 
+    SET 
+        receipt_path = p_receipt_path,
+        notes = p_notes,
+        payment_status = 'Pending',
+        updated_at = NOW()
+    WHERE payment_id = p_payment_id 
+    AND user_id = p_user_id;
+    
+    SELECT ROW_COUNT() as affected_rows;
+END //
+
+-- Update payment status
+CREATE PROCEDURE UpdateTermPaymentStatus(
+    IN p_payment_id INT,
+    IN p_payment_status VARCHAR(50),
+    IN p_verified_by VARCHAR(200)
+)
+BEGIN
+    DECLARE v_payment_date TIMESTAMP DEFAULT NULL;
+    
+    -- Set payment_date if status is being set to 'Paid'
+    IF p_payment_status = 'Paid' THEN
+        SET v_payment_date = NOW();
+    END IF;
+    
+    UPDATE tbl_term_payments 
+    SET 
+        payment_status = p_payment_status,
+        payment_date = v_payment_date,
+        verified_by = p_verified_by,
+        verified_at = NOW(),
+        updated_at = NOW()
+    WHERE payment_id = p_payment_id;
+    
+    SELECT ROW_COUNT() as affected_rows;
+END //
+
+-- Get current active term
+CREATE PROCEDURE GetCurrentActiveTerm()
+BEGIN
+    SELECT 
+        term_id,
+        term_name,
+        term_description,
+        start_date,
+        end_date,
+        is_active,
+        status,
+        created_at
+    FROM tbl_academic_term
+    WHERE is_active = TRUE
+    AND status = 'Active'
+    ORDER BY start_date DESC
+    LIMIT 1;
+END //
+
+DELIMITER ;
+
+-- Insert sample academic terms
+INSERT INTO tbl_academic_term (term_name, term_description, start_date, end_date, is_active, status, created_by, academic_year) VALUES
+('Fall 2024', 'Fall Semester 2024', '2024-08-15', '2024-12-15', FALSE, 'Completed', 'sys-system', '2024-2025'),
+('Spring 2025', 'Spring Semester 2025', '2025-01-15', '2025-05-15', FALSE, 'Completed', 'sys-system', '2024-2025'),
+('Fall 2025', 'Fall Semester 2025', '2025-08-15', '2025-12-15', TRUE, 'Active', 'sys-system', '2025-2026'),
+('Spring 2026', 'Spring Semester 2026', '2026-01-15', '2026-05-15', FALSE, 'Draft', 'sys-system', '2025-2026');
+
+-- Insert default transaction types
+INSERT INTO tbl_transaction_type (code, label) VALUES
+('INCOME', 'Income'),
+('EXPENSE', 'Expense');
+
+-- Insert default payment types
+INSERT INTO tbl_payment_type (code, label, method_group) VALUES
+('CASH', 'Cash', 'physical'),
+('BANK_TRANSFER', 'Bank Transfer', 'electronic'),
+('ONLINE_PAYMENT', 'Online Payment', 'electronic'),
+('CHEQUE', 'Cheque', 'physical'),
+('UPLOAD_PROOF', 'Upload Proof', 'verification');
+
+-- Insert default financial categories
+INSERT INTO tbl_financial_category (code, label, kind, active) VALUES
+('MEMBERSHIP_FEES', 'Membership Fees', 'INCOME', TRUE),
+('EVENT_FEE', 'Event Fee', 'INCOME', TRUE),
+('DONATION', 'Donation', 'INCOME', TRUE),
+('SPONSORSHIP', 'Sponsorship', 'INCOME', TRUE),
+('OFFICE_SUPPLIES', 'Office Supplies', 'EXPENSE', TRUE),
+('VENUE_RENTAL', 'Venue Rental', 'EXPENSE', TRUE);
+
+-- Link categories to transaction types
+INSERT INTO tbl_transaction_type_category (transaction_type_id, category_id)
+SELECT tt.transaction_type_id, fc.category_id
+FROM tbl_transaction_type tt, tbl_financial_category fc
+WHERE (tt.code = 'INCOME' AND fc.kind = 'INCOME')
+   OR (tt.code = 'EXPENSE' AND fc.kind = 'EXPENSE');
 
