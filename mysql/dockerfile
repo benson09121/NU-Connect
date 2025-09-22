@@ -1,9 +1,10 @@
 FROM mysql:8.4
 
-# Copy initialization script
-COPY init.sql /docker-entrypoint-initdb.d/
+# Copy initialization scripts
+COPY init.sql /docker-entrypoint-initdb.d/01-init.sql
+COPY term_payments_mobile.sql /docker-entrypoint-initdb.d/02-term-payments-mobile.sql
 
 # COPY my.cnf /etc/my.cnf
 
 # Set permissions (optional)
-RUN chmod +x /docker-entrypoint-initdb.d/init.sql
+RUN chmod +x /docker-entrypoint-initdb.d/*.sql

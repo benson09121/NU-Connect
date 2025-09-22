@@ -36,6 +36,7 @@ const facebookScraperRoutes = require('./mobile/routes/facebookScraper');
 const eventRoutes = require('./mobile/routes/events');
 const organizationRoutes = require('./mobile/routes/organization');
 const notification = require('./mobile/routes/notification');
+const termPaymentsMobile = require('./mobile/routes/termPayments');
 
 // Import Routes on Web
 const authRoutesWeb = require('./web/routes/auth');
@@ -54,6 +55,7 @@ const transactionsRoutes = require('./web/routes/transactions');
 const publicRoutes = require('./web/routes/public');
 const analytics = require('./web/routes/analytics');
 const novaRoutes = require('./web/routes/nova');
+const termPaymentRoutes = require('./web/routes/termPaymentRoutes');
 
 
 // Routes on Mobile
@@ -64,6 +66,7 @@ app.use('/api/facebook-scraper', facebookScraperRoutes);
 app.use('/api/mobile', eventRoutes);
 app.use('/api/mobile', organizationRoutes);
 app.use('/api/mobile', notification);
+app.use('/api/mobile', termPaymentsMobile);
 // Routes on Web
 app.use('/api/web', authRoutesWeb);
 app.use('/api/web', permissionRoutesWeb);
@@ -80,6 +83,8 @@ app.use('/api/web', notificationsRoutes);
 app.use('/api/web', transactionsRoutes);
 app.use('/api/web', analytics);
 app.use('/api/web', novaRoutes);
+app.use('/api/web', termPaymentRoutes);
+app.use('/api/web/term-payments', termPaymentRoutes); // Temporary fallback for old path
 app.use('/api/web/public', publicRoutes);
 
 
