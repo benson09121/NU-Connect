@@ -1458,7 +1458,8 @@ module.exports = {
     approveLeaveApplication,
     rejectLeaveApplication,
     getApplicationOfficers,
-    updateOrganizationPaymentType
+    updateOrganizationPaymentType,
+    updateOrganizationTermOption
 };
 
 async function getApplicationOfficers(application_id) {
@@ -1513,5 +1514,29 @@ async function updateOrganizationPaymentType(organization_id, paymentData) {
         throw error;
     } finally {
         connection.release();
+    }
+}
+
+async function updateOrganizationTermOption(organization_id, organization_version_id, term_option) {
+    let connection;
+    
+    try {
+        connection = await pool.getConnection();
+        
+        // Call the stored procedure UpdateOrganizationTermOption
+        const [rows] = await connection.query(
+            'CALL UpdateOrganizationTermOption(?, ?, ?)',
+            [organization_id, organization_version_id, term_option]
+        );
+        
+        return rows[0][0]; // Return the result from the stored procedure
+        
+    } catch (error) {
+        console.error('Error updating organization term option:', error);
+        throw error;
+    } finally {
+        if (connection) {
+            connection.release();
+        }
     }
 }

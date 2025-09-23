@@ -19,7 +19,10 @@ class TermModel {
             connection.release();
         }
     }
+}
 
+// 2. Term Payment Model
+class TermPaymentModel {
     // Get all terms
     static async getAllTerms() {
         const connection = await pool.getConnection();
@@ -95,7 +98,16 @@ class TermModel {
                 termId
             ]);
             
-            return result.affectedRows > 0;
+            if (result.affectedRows > 0) {
+                // Return the updated term data
+                const [updatedTerm] = await connection.query(`
+                    SELECT * FROM tbl_academic_term WHERE term_id = ?
+                `, [termId]);
+                
+                return updatedTerm[0];
+            }
+            
+            return null;
         } catch (error) {
             console.error('Error updating term:', error);
             throw error;
@@ -108,6 +120,15 @@ class TermModel {
     static async deleteTerm(termId) {
         const connection = await pool.getConnection();
         try {
+            // First check if there are any payment records for this term
+            const [paymentCheck] = await connection.query(`
+                SELECT COUNT(*) as count FROM tbl_term_payments WHERE term_id = ?
+            `, [termId]);
+            
+            if (paymentCheck[0].count > 0) {
+                throw new Error('Cannot delete term. Payment records exist for this term.');
+            }
+            
             const [result] = await connection.query(`
                 DELETE FROM tbl_academic_term WHERE term_id = ?
             `, [termId]);
@@ -145,8 +166,9 @@ class TermPaymentModel {
     static async createTermPayment(paymentData) {
         const connection = await pool.getConnection();
         try {
-            const [rows] = await connection.query('CALL CreateTermPayment(?, ?, ?, ?, ?, ?)', [
+            const [rows] = await connection.query('CALL CreateTermPayment(?, ?, ?, ?, ?, ?, ?)', [
                 paymentData.organization_id,
+                paymentData.organization_version_id,
                 paymentData.cycle_number,
                 paymentData.user_id,
                 paymentData.term_id,
@@ -195,7 +217,7 @@ class TermPaymentModel {
                     t.amount,
                     pt.label as payment_method,
                     fc.label as category
-                FROM tbl_membership_term_payment mtp
+                FROM tbl_term_payments mtp
                 LEFT JOIN tbl_transaction t ON mtp.transaction_id = t.transaction_id
                 LEFT JOIN tbl_payment_type pt ON t.payment_type_id = pt.payment_type_id
                 LEFT JOIN tbl_financial_category fc ON t.category_id = fc.category_id
@@ -218,13 +240,14 @@ class TermPaymentModel {
             await connection.beginTransaction();
 
             // First create the term payment
-            const [paymentResult] = await connection.query('CALL CreateTermPayment(?, ?, ?, ?, ?, ?)', [
-                paymentData.applicationId,
-                paymentData.termId,
+            const [paymentResult] = await connection.query('CALL CreateTermPayment(?, ?, ?, ?, ?, ?, ?)', [
                 paymentData.organizationId,
                 paymentData.orgVersionId,
+                paymentData.applicationId,
                 paymentData.userId,
-                paymentData.paymentAmount
+                paymentData.termId,
+                paymentData.paymentAmount,
+                new Date() // due_date
             ]);
 
             const paymentId = paymentResult[0][0].payment_id;
@@ -290,7 +313,7 @@ class TermPaymentModel {
     }
 
     // Get payments for organization
-    static async getPaymentsByOrganization(organizationId, termId = null, status = null) {
+    static async getPaymentsByOrganization(organizationId, organizationVersionId = null, termId = null, status = null) {
         const connection = await pool.getConnection();
         try {
             let query = `
@@ -298,6 +321,11 @@ class TermPaymentModel {
                 WHERE organization_id = ?
             `;
             const params = [organizationId];
+
+            if (organizationVersionId) {
+                query += ' AND organization_version_id = ?';
+                params.push(organizationVersionId);
+            }
 
             if (termId) {
                 query += ' AND term_id = ?';
@@ -326,7 +354,7 @@ class TermPaymentModel {
         const connection = await pool.getConnection();
         try {
             const [result] = await connection.query(`
-                UPDATE tbl_membership_term_payment 
+                UPDATE tbl_term_payments 
                 SET payment_status = ?, updated_at = CURRENT_TIMESTAMP
                 WHERE payment_id = ?
             `, [status, paymentId]);
@@ -352,12 +380,84 @@ class TermPaymentModel {
         }
     }
 
+    // Admin approval/rejection with verified_by and notes
+    static async approveRejectPayment(paymentId, status, verifiedBy, notes) {
+        const connection = await pool.getConnection();
+        try {
+            await connection.beginTransaction();
+
+            // Update term payment with verification details
+            const [termResult] = await connection.query(`
+                UPDATE tbl_term_payments 
+                SET payment_status = ?, 
+                    verified_by = ?, 
+                    verified_at = CURRENT_TIMESTAMP,
+                    notes = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE payment_id = ?
+            `, [status, verifiedBy, notes, paymentId]);
+
+            if (termResult.affectedRows === 0) {
+                throw new Error('Term payment not found');
+            }
+
+            // Get the related transaction_id for updating transaction status
+            const [paymentData] = await connection.query(`
+                SELECT transaction_id FROM tbl_term_payments WHERE payment_id = ?
+            `, [paymentId]);
+
+            if (paymentData.length > 0) {
+                const transactionId = paymentData[0].transaction_id;
+                
+                // Update related transaction status
+                const transactionStatus = status === 'Paid' ? 'Completed' : 
+                                        status === 'Rejected' ? 'Failed' : 'Pending';
+                
+                await connection.query(`
+                    UPDATE tbl_transaction 
+                    SET status = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE transaction_id = ?
+                `, [transactionStatus, transactionId]);
+            }
+
+            // Log the action using email lookup
+            const [verifierData] = await connection.query(`
+                SELECT email FROM tbl_user WHERE user_id = ?
+            `, [verifiedBy]);
+            
+            const verifierEmail = verifierData.length > 0 ? verifierData[0].email : 'system@nu-dasma.edu.ph';
+            
+            await connection.query('CALL LogAction(?, ?, ?, ?, ?, ?)', [
+                verifierEmail,
+                `${status === 'Paid' ? 'Approved' : 'Rejected'} term payment with notes: ${notes || 'No notes'}`,
+                'TERM_PAYMENT_ADMIN_ACTION',
+                JSON.stringify({ 
+                    payment_id: paymentId, 
+                    new_status: status, 
+                    verified_by: verifiedBy,
+                    notes: notes 
+                }),
+                null,
+                null
+            ]);
+
+            await connection.commit();
+            return termResult.affectedRows > 0;
+        } catch (error) {
+            await connection.rollback();
+            console.error('Error in approveRejectPayment:', error);
+            throw error;
+        } finally {
+            connection.release();
+        }
+    }
+
     // Delete payment (admin only)
     static async deletePayment(paymentId) {
         const connection = await pool.getConnection();
         try {
             const [result] = await connection.query(`
-                DELETE FROM tbl_membership_term_payment 
+                DELETE FROM tbl_term_payments 
                 WHERE payment_id = ? AND payment_status = 'Pending'
             `, [paymentId]);
             
@@ -378,36 +478,130 @@ class TermPaymentModel {
     static async getPaymentsByUserAndOrganization(userId, organizationId) {
         const connection = await pool.getConnection();
         try {
-            const [rows] = await connection.query(`
+            // Step 1: Check if there's an active term
+            const [activeTermRows] = await connection.query(`
+                SELECT term_id, term_name, start_date, end_date
+                FROM tbl_academic_term 
+                WHERE is_active = TRUE AND status = 'Active'
+                ORDER BY start_date DESC 
+                LIMIT 1
+            `);
+            
+            if (activeTermRows.length === 0) {
+                console.log('No active term found');
+                return []; // No active term = no payments needed
+            }
+            
+            const activeTerm = activeTermRows[0];
+            console.log(`Active term found: ${activeTerm.term_name} (ID: ${activeTerm.term_id})`);
+            
+            // Step 2: Check if organization is Per Term and user is active member
+            const [membershipCheck] = await connection.query(`
                 SELECT 
-                    tp.payment_id,
-                    tp.membership_id,
-                    tp.term_id,
-                    tp.organization_id,
-                    tp.user_id,
-                    tp.payment_amount as amount_due,
-                    tp.payment_status,
-                    tp.payment_method,
-                    tp.transaction_reference,
-                    tp.payment_date,
-                    tp.due_date,
-                    tp.late_fee_applied,
-                    tp.notes,
-                    tp.receipt_path,
-                    tp.created_at,
-                    tp.updated_at,
-                    t.term_name,
-                    t.start_date as term_start,
-                    t.end_date as term_end,
-                    o.name as organization_name
-                FROM tbl_term_payments tp
-                JOIN tbl_academic_term t ON tp.term_id = t.term_id
-                JOIN tbl_organization o ON tp.organization_id = o.organization_id
-                WHERE tp.user_id = ? AND tp.organization_id = ?
-                ORDER BY tp.due_date DESC
+                    o.membership_fee_type,
+                    o.membership_fee_amount,
+                    o.name as organization_name,
+                    o.current_org_version_id,
+                    om.status as member_status
+                FROM tbl_organization o
+                LEFT JOIN tbl_organization_members om ON o.organization_id = om.organization_id AND om.user_id = ?
+                WHERE o.organization_id = ?
             `, [userId, organizationId]);
             
-            return rows;
+            if (membershipCheck.length === 0 || membershipCheck[0].membership_fee_type !== 'Per Term') {
+                console.log('Organization not found or not Per Term type');
+                return []; // Not a Per Term organization
+            }
+            
+            const orgInfo = membershipCheck[0];
+            if (orgInfo.member_status !== 'Active') {
+                console.log('User is not an active member');
+                return []; // User is not an active member
+            }
+            
+            // Step 3: Check if user has payment record for the active term
+            const [existingPayments] = await connection.query(`
+                SELECT 
+                    mtp.payment_id,
+                    mtp.user_id,
+                    mtp.organization_id,
+                    mtp.org_version_id,
+                    mtp.term_id,
+                    mtp.transaction_id,
+                    mtp.payment_status,
+                    mtp.due_date,
+                    mtp.verified_by,
+                    mtp.verified_at,
+                    mtp.notes,
+                    mtp.created_at,
+                    mtp.updated_at,
+                    -- Get transaction details
+                    t.amount as payment_amount,
+                    t.payment_description,
+                    t.proof_image as receipt_url,
+                    t.receipt_no,
+                    t.status as transaction_status,
+                    t.transaction_date as payment_date,
+                    -- Term details
+                    ? as term_name,
+                    ? as term_start,
+                    ? as term_end,
+                    -- Organization details
+                    ? as organization_name
+                FROM tbl_term_payments mtp
+                JOIN tbl_transaction t ON mtp.transaction_id = t.transaction_id
+                WHERE mtp.user_id = ? AND mtp.organization_id = ? AND mtp.term_id = ?
+                ORDER BY mtp.created_at DESC
+            `, [
+                activeTerm.term_name, 
+                activeTerm.start_date, 
+                activeTerm.end_date, 
+                orgInfo.organization_name,
+                userId, 
+                organizationId, 
+                activeTerm.term_id
+            ]);
+            
+            // Step 4: If no payment record exists, create a virtual pending payment for UI display
+            if (existingPayments.length === 0) {
+                console.log(`No payment record found for active term. User needs to pay.`);
+                
+                // Calculate due date (30 days after term starts)
+                const termStartDate = new Date(activeTerm.start_date);
+                const dueDate = new Date(termStartDate);
+                dueDate.setDate(dueDate.getDate() + 30);
+                
+                // Return a virtual payment record that indicates payment is needed
+                return [{
+                    payment_id: 0, // Virtual ID (will be created when user submits payment)
+                    user_id: userId,
+                    organization_id: parseInt(organizationId),
+                    org_version_id: orgInfo.current_org_version_id,
+                    term_id: activeTerm.term_id,
+                    transaction_id: null,
+                    payment_status: 'NEEDS_PAYMENT', // Special status to indicate payment needed
+                    due_date: dueDate.toISOString().split('T')[0],
+                    verified_by: null,
+                    verified_at: null,
+                    notes: null,
+                    created_at: new Date().toISOString(),
+                    updated_at: new Date().toISOString(),
+                    payment_amount: orgInfo.membership_fee_amount,
+                    payment_description: `Term Membership Fee - ${orgInfo.organization_name} (${activeTerm.term_name})`,
+                    receipt_url: null,
+                    receipt_no: null,
+                    transaction_status: null,
+                    payment_date: null,
+                    term_name: activeTerm.term_name,
+                    term_start: activeTerm.start_date,
+                    term_end: activeTerm.end_date,
+                    organization_name: orgInfo.organization_name
+                }];
+            }
+            
+            console.log(`Found ${existingPayments.length} existing payment records for active term`);
+            return existingPayments;
+            
         } catch (error) {
             console.error('Error fetching payments by user and organization:', error);
             throw error;
@@ -420,15 +614,15 @@ class TermPaymentModel {
     static async updatePaymentReceipt(paymentId, filename, notes, userId) {
         const connection = await pool.getConnection();
         try {
+            // Use the new term payment table
             const [result] = await connection.query(`
                 UPDATE tbl_term_payments 
                 SET 
-                    receipt_path = ?,
-                    notes = ?,
+                    receipt_url = ?,
                     payment_status = 'Pending',
                     updated_at = NOW()
                 WHERE payment_id = ? AND user_id = ?
-            `, [filename, notes, paymentId, userId]);
+            `, [filename, paymentId, userId]);
             
             if (result.affectedRows === 0) {
                 throw new Error('Payment not found or access denied');
@@ -501,7 +695,7 @@ class TermPaymentModel {
     }
 
     // Get payment submissions for organization management (with user details)
-    static async getOrganizationPaymentSubmissions(organizationId) {
+    static async getOrganizationPaymentSubmissions(organizationId, organizationVersionId = null) {
         const connection = await pool.getConnection();
         try {
             const [rows] = await connection.query(`
@@ -510,26 +704,32 @@ class TermPaymentModel {
                     tp.user_id,
                     tp.term_id,
                     tp.organization_id,
-                    tp.payment_amount as amount_due,
+                    tp.organization_version_id,
+                    t.amount as amount_due,
                     tp.payment_status,
-                    tp.payment_date,
-                    tp.receipt_path as screenshot_path,
-                    tp.notes,
+                    tp.verified_at as payment_date,
                     tp.created_at as submitted_at,
                     tp.updated_at,
+                    tp.notes,
                     u.f_name as first_name,
                     u.l_name as last_name,
                     CONCAT(u.f_name, ' ', u.l_name) as submitter_name,
                     u.email as submitter_email,
                     at.term_name,
-                    YEAR(at.start_date) as academic_year
+                    YEAR(at.start_date) as academic_year,
+                    t.proof_image as receipt_url,
+                    pt.label as payment_method,
+                    t.transaction_id
                 FROM tbl_term_payments tp
                 LEFT JOIN tbl_user u ON tp.user_id = u.user_id
                 LEFT JOIN tbl_academic_term at ON tp.term_id = at.term_id
+                LEFT JOIN tbl_transaction t ON tp.transaction_id = t.transaction_id
+                LEFT JOIN tbl_payment_type pt ON t.payment_type_id = pt.payment_type_id
                 WHERE tp.organization_id = ?
-                AND tp.receipt_path IS NOT NULL
+                AND (? IS NULL OR tp.organization_version_id = ?)
+                AND tp.transaction_id IS NOT NULL
                 ORDER BY tp.created_at DESC
-            `, [organizationId]);
+            `, [organizationId, organizationVersionId, organizationVersionId]);
             
             return rows;
         } catch (error) {
@@ -556,11 +756,9 @@ class TermPaymentModel {
                 UPDATE tbl_term_payments 
                 SET 
                     payment_status = ?,
-                    verified_by = ?,
-                    verified_at = NOW(),
                     updated_at = NOW()
                 WHERE payment_id = ?
-            `, [dbStatus, updatedBy, paymentId]);
+            `, [dbStatus, paymentId]);
             
             if (result.affectedRows === 0) {
                 return null;
@@ -724,21 +922,22 @@ class TermPaymentAnalyticsModel {
         try {
             let query = `
                 SELECT 
-                    COUNT(DISTINCT mtp.organization_id) as active_organizations,
-                    COUNT(DISTINCT mtp.user_id) as total_paying_members,
+                    COUNT(DISTINCT tp.organization_id) as active_organizations,
+                    COUNT(DISTINCT tp.user_id) as total_paying_members,
                     COUNT(*) as total_payments,
-                    SUM(CASE WHEN mtp.payment_status = 'Paid' THEN 1 ELSE 0 END) as paid_payments,
-                    SUM(CASE WHEN mtp.payment_status = 'Pending' THEN 1 ELSE 0 END) as pending_payments,
-                    SUM(CASE WHEN mtp.payment_status = 'Overdue' THEN 1 ELSE 0 END) as overdue_payments,
-                    SUM(CASE WHEN mtp.payment_status = 'Paid' THEN mtp.payment_amount ELSE 0 END) as total_revenue,
-                    SUM(CASE WHEN mtp.payment_status != 'Paid' THEN mtp.payment_amount ELSE 0 END) as outstanding_amount,
-                    AVG(mtp.payment_amount) as average_payment_amount
-                FROM tbl_membership_term_payment mtp
+                    SUM(CASE WHEN tp.payment_status = 'Paid' THEN 1 ELSE 0 END) as paid_payments,
+                    SUM(CASE WHEN tp.payment_status = 'Pending' THEN 1 ELSE 0 END) as pending_payments,
+                    SUM(CASE WHEN tp.payment_status = 'Rejected' THEN 1 ELSE 0 END) as overdue_payments,
+                    SUM(CASE WHEN tp.payment_status = 'Paid' THEN t.amount ELSE 0 END) as total_revenue,
+                    SUM(CASE WHEN tp.payment_status != 'Paid' THEN t.amount ELSE 0 END) as outstanding_amount,
+                    AVG(t.amount) as average_payment_amount
+                FROM tbl_term_payments tp
+                LEFT JOIN tbl_transaction t ON tp.transaction_id = t.transaction_id
             `;
             const params = [];
 
             if (termId) {
-                query += ' WHERE mtp.term_id = ?';
+                query += ' WHERE tp.term_id = ?';
                 params.push(termId);
             }
 
@@ -761,15 +960,16 @@ class TermPaymentAnalyticsModel {
                     YEAR(at.start_date) as academic_year,
                     at.term_name,
                     COUNT(*) as total_payments,
-                    SUM(CASE WHEN mtp.payment_status = 'Paid' THEN 1 ELSE 0 END) as paid_payments,
-                    SUM(CASE WHEN mtp.payment_status = 'Paid' THEN mtp.payment_amount ELSE 0 END) as revenue
-                FROM tbl_membership_term_payment mtp
-                JOIN tbl_academic_term at ON mtp.term_id = at.term_id
+                    SUM(CASE WHEN tp.payment_status = 'Paid' THEN 1 ELSE 0 END) as paid_payments,
+                    SUM(CASE WHEN tp.payment_status = 'Paid' THEN t.amount ELSE 0 END) as revenue
+                FROM tbl_term_payments tp
+                JOIN tbl_academic_term at ON tp.term_id = at.term_id
+                LEFT JOIN tbl_transaction t ON tp.transaction_id = t.transaction_id
             `;
             const params = [];
 
             if (organizationId) {
-                query += ' WHERE mtp.organization_id = ?';
+                query += ' WHERE tp.organization_id = ?';
                 params.push(organizationId);
             }
 

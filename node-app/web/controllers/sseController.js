@@ -4,10 +4,14 @@ const sessionSubscriptions = new Map();
 
 // Publish updates to any Redis channel
 function publishToChannel(channel, data) {
-    redisClient.publish(channel, JSON.stringify({
-        ...data,
-        timestamp: Date.now()
-    }));
+    console.log(`🟢 [BACKEND-SSE-DEBUG] Publishing to channel: ${channel}, data:`, data);
+    
+    // Fix: Don't spread arrays, preserve them as arrays
+    const payload = Array.isArray(data) 
+        ? { data, timestamp: Date.now() }
+        : { ...data, timestamp: Date.now() };
+    
+    redisClient.publish(channel, JSON.stringify(payload));
 }
 
 // Handle SSE connections
@@ -51,10 +55,20 @@ async function handleSSEConnection(req, res) {
         try {
             const eventData = JSON.parse(message);
             
+            // Debug organization channels specifically
+            if (channel && (channel.includes('organization') || channel.includes('orghub'))) {
+                console.log(`🔴 [BACKEND-SSE-DEBUG] Received message for org channel: ${channel}, subscribed: ${sessionSubscriptions.get(sessionId)?.channels.has(channel)}, data:`, eventData);
+            }
+            
             // Only send if client is subscribed to this channel
             if (sessionSubscriptions.get(sessionId)?.channels.has(channel)) {
                 res.write(`event: ${channel}\n`);
                 res.write(`data: ${JSON.stringify(eventData)}\n\n`);
+                
+                // Debug what we're sending to client
+                if (channel && (channel.includes('organization') || channel.includes('orghub'))) {
+                    console.log(`🔴 [BACKEND-SSE-DEBUG] Sent to client - channel: ${channel}, data:`, eventData);
+                }
             }
         } catch (err) {
             console.error('Error processing message:', err);
@@ -77,6 +91,11 @@ async function handleSSEConnection(req, res) {
 function subscribeToChannel(sessionId, channel) {
     const session = sessionSubscriptions.get(sessionId);
     if (!session || session.channels.has(channel)) return false;
+    
+    // Debug organization channels specifically
+    if (channel && (channel.includes('organization') || channel.includes('orghub'))) {
+        console.log(`🟡 [BACKEND-SSE-DEBUG] Subscribing session ${sessionId} to org channel: ${channel}`);
+    }
     
     session.subscriber.subscribe(channel);
     session.channels.add(channel);

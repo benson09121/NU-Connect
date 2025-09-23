@@ -36,7 +36,15 @@ router.get(
 
 router.get('/requirement-event-template', middleware.validateAzureJWT, requirementController.getEventRequirementTemplate);
 router.get('/requirement-periods-applications', middleware.validateAzureJWT, middleware.hasPermission("MANAGE_REQUIREMENTS"), requirementController.getAllPeriodsWithApplications);
-router.get('/requirement-active-period-simple', middleware.validateAzureJWT, middleware.hasPermission(["MANAGE_REQUIREMENTS","VIEW_APPLICATION"]), requirementController.getActiveApplicationPeriodSimple);
+// Test route without auth
+router.get('/test-simple', (req, res) => {
+  res.json({ message: 'Test route working', timestamp: new Date().toISOString() });
+});
+// Test route with only JWT validation (no permissions)
+router.get('/test-auth-only', middleware.validateAzureJWT, (req, res) => {
+  res.json({ message: 'Auth test working', user: req.user, timestamp: new Date().toISOString() });
+});
+router.get('/requirement-active-period-simple', middleware.validateAzureJWT, requirementController.getActiveApplicationPeriodSimple);
 router.get('/requirement-active-period', middleware.validateAzureJWT, middleware.hasPermission(["MANAGE_REQUIREMENTS","VIEW_APPLICATION"]), requirementController.getActiveApplicationPeriod);
 router.get('/requirements/template', middleware.validateAzureJWT, middleware.hasPermission(["MANAGE_REQUIREMENTS", "APPLY_ORGANIZATION"]), requirementController.downloadTemplate);
 router.post('/requirement-period', middleware.validateAzureJWT, middleware.hasPermission("MANAGE_REQUIREMENTS"), requirementController.addApplicationPeriod);

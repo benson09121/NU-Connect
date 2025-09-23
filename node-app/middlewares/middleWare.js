@@ -5,21 +5,26 @@ const jwksClient = require("jwks-rsa");
 const userModel = require("../web/models/userModel");
 
 const authMiddleware = async (req, res, next) => {
+  console.log('DEBUG AUTH: authMiddleware called for:', req.method, req.url);
   const token = req.headers["authorization"]?.split(" ")[1];
-  console.log("Auth Middleware - Token:", token);
+  console.log("DEBUG AUTH: Token:", token ? `${token.substring(0, 20)}...` : 'No token');
   if (!token) {
+    console.log("DEBUG AUTH: No token provided, returning 401");
     return res.status(401).json({ message: "No token provided" });
   }
 
   jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
     if (err) {
+      console.log("DEBUG AUTH: Token verification failed:", err.message);
       return res.status(401).json({ message: "Invalid token" });
     }
     // Adjust for new decoded structure
     const userInfo = decoded.result?.[0]?.user_info;
     if (!userInfo) {
+      console.log("DEBUG AUTH: Invalid token structure, decoded:", decoded);
       return res.status(401).json({ message: "Invalid token structure" });
     }
+    console.log("DEBUG AUTH: Token verified successfully for user:", userInfo.email);
     req.user = {
       email: userInfo.email,
       first_name: userInfo.f_name,

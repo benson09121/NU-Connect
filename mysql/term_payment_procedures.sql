@@ -4,7 +4,7 @@
 
 DELIMITER $$
 
--- 1. Get current active term
+-- 1. Get current active term using date ranges
 CREATE DEFINER='admin'@'%' PROCEDURE GetCurrentActiveTerm()
 BEGIN
     SELECT 
@@ -14,9 +14,11 @@ BEGIN
         start_date,
         end_date,
         is_active,
-        created_at
+        created_at,
+        DATE(NOW()) BETWEEN start_date AND end_date as is_current_term
     FROM tbl_academic_term 
-    WHERE is_active = TRUE 
+    WHERE DATE(NOW()) BETWEEN start_date AND end_date
+    ORDER BY start_date DESC
     LIMIT 1;
 END$$
 

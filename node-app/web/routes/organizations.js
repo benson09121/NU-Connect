@@ -12,6 +12,8 @@ router.get('/organizations-by-status', middleware.validateAzureJWT, middleware.h
 router.post('/organizations', middleware.validateAzureJWT, organizationsController.createOrganizationApplication);
 router.get('/organizations', middleware.validateAzureJWT, organizationsController.getOrganizations);
 router.get('/organization-details', middleware.validateAzureJWT, organizationsController.getOrganizationDetails);
+// Mobile helper endpoint
+router.get('/organizations/:organizationId/current-version', middleware.validateAzureJWT, organizationsController.getCurrentOrganizationVersion);
 router.get('/organizations_officer', middleware.validateAzureJWT, organizationsController.getOrganizationOfficers);
 router.get('/organization-dashboard', middleware.validateAzureJWT, organizationsController.getOrganizationDashboardStats);
 router.get(
@@ -34,6 +36,9 @@ router.get('/getOrganizationLogo', middleware.validateAzureJWT, organizationsCon
 router.get('/getOrganizationLogoApplication', middleware.validateAzureJWT, organizationsController.getOrganizationLogoApplication);
 router.get('/check-org-name', middleware.validateAzureJWT, organizationsController.checkOrganizationName);
 router.post('/check-org-emails', middleware.validateAzureJWT, organizationsController.checkOrganizationEmails);
+
+// Term option settings for organizations
+router.post('/update-term-option', middleware.validateAzureJWT, organizationsController.updateOrganizationTermOption);
 
 router.post('/archive-organization', middleware.validateAzureJWT, middleware.hasPermission("ARCHIVE_ORGANIZATION"), organizationsController.archiveOrganization);
 router.post('/unarchive-organization', middleware.validateAzureJWT, middleware.hasPermission("ARCHIVE_ORGANIZATION"), organizationsController.unarchiveOrganization);

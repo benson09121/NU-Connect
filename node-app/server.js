@@ -21,6 +21,25 @@ app.use(fileUpload({
     preserveExtension: true,
     createParentPath: true,
 }));
+
+// Debug middleware to log all file uploads
+app.use((req, res, next) => {
+    if (req.files && Object.keys(req.files).length > 0) {
+        console.log('[GLOBAL FILE DEBUG] File upload detected:');
+        console.log('  - URL:', req.url);
+        console.log('  - Method:', req.method);
+        console.log('  - Files:');
+        Object.keys(req.files).forEach(key => {
+            const file = req.files[key];
+            console.log(`    ${key}:`, {
+                name: file.name,
+                mimetype: file.mimetype,
+                size: file.size
+            });
+        });
+    }
+    next();
+});
 app.use(cors({
     origin: "http://localhost:5173",
     methods: ['GET', 'POST', 'PUT', 'DELETE'],
