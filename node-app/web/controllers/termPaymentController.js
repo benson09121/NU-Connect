@@ -4,11 +4,8 @@
 
 const {
     TermModel,
-    TermPaymentModel,
-    OrganizationTermConfigModel,
-    TermPaymentAnalyticsModel,
-    TermPaymentUtilsModel
-} = require('../models/termPaymentModel');
+    TermPaymentModel
+} = require('../models/simplifiedTermPaymentModel');
 
 // Import SSE functionality for real-time updates
 const { subscribeToChannel, publishToChannel } = require('./sseController');
@@ -99,11 +96,12 @@ class TermPaymentController {
 
             // Publish to SSE for real-time updates
             try {
-                await publishToChannel('term-payments', {
-                    type: 'TERM_CREATED',
-                    data: newTerm
-                });
-                console.log('Published term creation to SSE channel');
+                // Fetch the updated terms list and publish it
+                const updatedTerms = await TermModel.getAllTerms();
+                // Ensure it's an array before publishing
+                const termsArray = Array.isArray(updatedTerms) ? updatedTerms : [];
+                await publishToChannel('term-payments', termsArray);
+                console.log('Published updated terms list to SSE channel:', termsArray.length, 'terms');
             } catch (sseError) {
                 console.error('Failed to publish to SSE:', sseError);
                 // Don't fail the request if SSE fails
@@ -130,9 +128,9 @@ class TermPaymentController {
             const { termId } = req.params;
             const termData = req.body;
 
-            const updated = await TermModel.updateTerm(termId, termData);
+            const updatedTerm = await TermModel.updateTerm(termId, termData);
 
-            if (!updated) {
+            if (!updatedTerm) {
                 return res.status(404).json({
                     success: false,
                     message: 'Term not found'
@@ -141,18 +139,20 @@ class TermPaymentController {
 
             // Publish to SSE for real-time updates
             try {
-                await publishToChannel('term-payments', {
-                    type: 'TERM_UPDATED',
-                    data: { termId, ...termData }
-                });
-                console.log('Published term update to SSE channel');
+                // Fetch the updated terms list and publish it
+                const updatedTerms = await TermModel.getAllTerms();
+                // Ensure it's an array before publishing
+                const termsArray = Array.isArray(updatedTerms) ? updatedTerms : [];
+                await publishToChannel('term-payments', termsArray);
+                console.log('Published updated terms list to SSE channel:', termsArray.length, 'terms');
             } catch (sseError) {
                 console.error('Failed to publish to SSE:', sseError);
             }
 
             res.json({
                 success: true,
-                message: 'Term updated successfully'
+                message: 'Term updated successfully',
+                data: updatedTerm
             });
         } catch (error) {
             console.error('Error in updateTerm:', error);
@@ -174,17 +174,18 @@ class TermPaymentController {
             if (!deleted) {
                 return res.status(404).json({
                     success: false,
-                    message: 'Term not found or cannot be deleted (has payment records)'
+                    message: 'Term not found'
                 });
             }
 
             // Publish to SSE for real-time updates
             try {
-                await publishToChannel('term-payments', {
-                    type: 'TERM_DELETED',
-                    data: { termId }
-                });
-                console.log('Published term deletion to SSE channel');
+                // Fetch the updated terms list and publish it
+                const updatedTerms = await TermModel.getAllTerms();
+                // Ensure it's an array before publishing
+                const termsArray = Array.isArray(updatedTerms) ? updatedTerms : [];
+                await publishToChannel('term-payments', termsArray);
+                console.log('Published updated terms list to SSE channel:', termsArray.length, 'terms');
             } catch (sseError) {
                 console.error('Failed to publish to SSE:', sseError);
             }
@@ -195,6 +196,16 @@ class TermPaymentController {
             });
         } catch (error) {
             console.error('Error in deleteTerm:', error);
+            
+            // Check if it's a foreign key constraint error
+            if (error.message.includes('Payment records exist')) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Cannot delete term. Payment records exist for this term.',
+                    error: error.message
+                });
+            }
+            
             res.status(500).json({
                 success: false,
                 message: 'Failed to delete term',
@@ -210,18 +221,19 @@ class TermPaymentController {
     // Create term payment
     static async createTermPayment(req, res) {
         try {
-            const { organization_id, cycle_number, user_id, term_id, amount_due, due_date } = req.body;
+            const { organization_id, organization_version_id, cycle_number, user_id, term_id, amount_due, due_date } = req.body;
 
             // Validation
-            if (!organization_id || !cycle_number || !user_id || !term_id || !amount_due || !due_date) {
+            if (!organization_id || !organization_version_id || !cycle_number || !user_id || !term_id || !amount_due || !due_date) {
                 return res.status(400).json({
                     success: false,
-                    message: 'All fields are required: organization_id, cycle_number, user_id, term_id, amount_due, due_date'
+                    message: 'All fields are required: organization_id, organization_version_id, cycle_number, user_id, term_id, amount_due, due_date'
                 });
             }
 
             const paymentData = {
                 organization_id,
+                organization_version_id,
                 cycle_number,
                 user_id,
                 term_id,
@@ -413,10 +425,11 @@ class TermPaymentController {
     static async getOrganizationPayments(req, res) {
         try {
             const { organizationId } = req.params;
-            const { term_id, status } = req.query;
+            const { organization_version_id, term_id, status } = req.query;
 
             const payments = await TermPaymentModel.getPaymentsByOrganization(
                 organizationId, 
+                organization_version_id,
                 term_id, 
                 status
             );
@@ -844,10 +857,10 @@ class TermPaymentController {
     static async getOrganizationPaymentSubmissions(req, res) {
         try {
             const { organizationId } = req.params;
-            const { sessionId } = req.query;
+            const { organization_version_id, sessionId } = req.query;
             
             // Get payments with user details for this organization
-            const payments = await TermPaymentModel.getOrganizationPaymentSubmissions(organizationId);
+            const payments = await TermPaymentModel.getOrganizationPaymentSubmissions(organizationId, organization_version_id);
             
             // Subscribe to real-time updates if sessionId provided
             if (sessionId) {

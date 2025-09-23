@@ -5,6 +5,7 @@
 const express = require('express');
 const router = express.Router();
 const TermPaymentController = require('../controllers/termPaymentController');
+const SimplifiedTermPaymentController = require('../controllers/simplifiedTermPaymentController');
 
 // Middleware - Authentication required for all routes
 const { validateAzureJWT, hasPermission } = require('../../middlewares/middleWare');
@@ -258,14 +259,14 @@ router.post('/payments', validatePaymentCreation);
  * @desc    Get term payment submissions for organization (for presidents)
  * @access  Private (Azure authentication required, no permission check)
  */
-router.get('/submissions/:organizationId', TermPaymentController.getOrganizationPaymentSubmissions);
+router.get('/submissions/:organizationId', SimplifiedTermPaymentController.getOrganizationPaymentSubmissions);
 
 /**
  * @route   PUT /api/term-payments/:paymentId/status
  * @desc    Update term payment status (approve/reject)
  * @access  Private (Azure authentication required, no permission check)
  */
-router.put('/:paymentId/status', TermPaymentController.updatePaymentStatus);
+router.put('/:paymentId/status', SimplifiedTermPaymentController.updatePaymentStatus);
 
 // ===================
 // ERROR HANDLING MIDDLEWARE

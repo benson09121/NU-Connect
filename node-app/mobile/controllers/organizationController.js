@@ -106,6 +106,43 @@ async function submitOrganizationApplication(req, res) {
             if (req.files && req.files.file && paymentData.payment_proof) {
                 const uploadedFile = req.files.file;
                 
+                console.log('[DEBUG] Payment proof file validation:', {
+                    fileName: uploadedFile.name,
+                    mimetype: uploadedFile.mimetype,
+                    size: uploadedFile.size
+                });
+                
+                // Validate file type (similar to term payment validation)
+                const allowedTypes = [
+                    'image/jpeg', 
+                    'image/jpg',      // Some mobile apps incorrectly use this
+                    'image/pjpeg',    // Progressive JPEG (IE)
+                    'image/png', 
+                    'application/pdf'
+                ];
+                const maxSize = 5 * 1024 * 1024; // 5MB
+                
+                // Also check file extension as a backup
+                const fileExt = uploadedFile.name.toLowerCase().split('.').pop();
+                const allowedExtensions = ['jpg', 'jpeg', 'png', 'pdf'];
+                
+                const mimeTypeValid = allowedTypes.includes(uploadedFile.mimetype);
+                const extensionValid = allowedExtensions.includes(fileExt);
+                
+                if (!mimeTypeValid && !extensionValid) {
+                    console.log(`[DEBUG] Payment proof file rejected - invalid type. MIME: ${uploadedFile.mimetype}, Extension: ${fileExt}`);
+                    return res.status(400).json({ 
+                        message: `Invalid payment proof file type. Only JPEG, PNG, and PDF files are allowed. Received MIME type: ${uploadedFile.mimetype}, Extension: ${fileExt}` 
+                    });
+                }
+                
+                if (uploadedFile.size > maxSize) {
+                    console.log(`[DEBUG] Payment proof file rejected - size too large: ${uploadedFile.size} bytes`);
+                    return res.status(400).json({ 
+                        message: 'Payment proof file size must be less than 5MB' 
+                    });
+                }
+                
                 // Create directory if it doesn't exist
                 const uploadDir = `/app/organizations/${org_id}/${organization_version_id}/transactions`;
                 if (!fs.existsSync(uploadDir)) {
@@ -122,7 +159,7 @@ async function submitOrganizationApplication(req, res) {
                 
                 // Move the uploaded file
                 await uploadedFile.mv(uploadPath);
-                console.log('File uploaded to:', uploadPath);
+                console.log('Payment proof file uploaded to:', uploadPath);
             }
 
             // Create membership transaction

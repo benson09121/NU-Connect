@@ -52,6 +52,22 @@ async function registerEvent(req, res) {
             return res.status(400).json({ message: 'Already registered for this event' });
         }
 
+        // Get event details including payment and term option information
+        const eventDetails = await eventModel.getSpecificEvent(event_id, user.user_id);
+        if (!eventDetails) {
+            return res.status(404).json({ message: 'Event not found' });
+        }
+
+        // Check if user can register based on term payment requirements
+        if (!eventDetails.can_join_if_unpaid && !eventDetails.is_paid_on_term) {
+            return res.status(403).json({ 
+                message: 'Term payment required to register for this event. Please pay your term fees first.',
+                requiresTermPayment: true,
+                organizationId: eventDetails.organization_id,
+                organizationVersionId: eventDetails.organization_version_id
+            });
+        }
+
         // Check if this is a paid event with payment data
         if (req.body.payment_method && req.body.paid_amount) {
             // Handle paid event with transaction
@@ -60,7 +76,6 @@ async function registerEvent(req, res) {
             // Handle file upload if there's a payment proof file
             if (req.files && req.files.file && req.body.payment_proof) {
                 const uploadedFile = req.files.file;
-                const eventDetails = await eventModel.getSpecificEvent(event_id, user.user_id);
                 
                 // Create directory if it doesn't exist
                 const uploadDir = `/app/organizations/${eventDetails.organization_id}/${eventDetails.organization_version_id}/events/${event_id}/transactions`;
@@ -78,7 +93,6 @@ async function registerEvent(req, res) {
             }
 
             const payer = user.f_name + ' ' + user.l_name;
-            const eventDetails = await eventModel.getSpecificEvent(event_id, user.user_id);
             
             // Create event transaction
             const transactionResult = await eventModel.createEventTransaction(

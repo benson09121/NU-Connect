@@ -4,6 +4,8 @@ const path = require('path');
 const { subscribeToChannel, publishToChannel } = require('./sseController');
 const organizationsModel = require('../models/organizationsModel');
 const userCacheModel = require('../models/userCacheModel');
+const { TermPaymentModel } = require('../models/simplifiedTermPaymentModel');
+const pool = require('../../config/db');
 
 // Helper function for unified organization hub channel
 const getOrgHubChannel = (orgId, orgVersionId) => `orghub_${orgId}_${orgVersionId}`;
@@ -42,9 +44,10 @@ const handleRealtimeEndpoint = async (req, res, dataFetcher, entity) => {
     // Always fetch and return data immediately
     const data = await dataFetcher(org_id, org_version_id);
     
-    // If sessionId is provided, the client wants real-time updates
-    // The RealTimeContext will handle the subscription when it calls this endpoint
-    // We just need to return the data
+    // If sessionId is provided, set up the subscription for real-time updates
+    if (sessionId) {
+      subscribeToChannel(sessionId, `${entity}_${org_id}_${org_version_id}`);
+    }
     
     res.json(data);
   } catch (error) {
@@ -54,7 +57,7 @@ const handleRealtimeEndpoint = async (req, res, dataFetcher, entity) => {
 
 async function getOrganizationHubData(req, res) {
   try {
-    const { org_id, org_version_id } = req.query;
+    const { org_id, org_version_id, sessionId } = req.query;
     
     if (!org_id || !org_version_id) {
       return res.status(400).json({ error: 'org_id and org_version_id are required' });
@@ -68,7 +71,8 @@ async function getOrganizationHubData(req, res) {
       committeeMembers,
       pendingMembers,
       archivedMembers,
-      leaveApplications
+      leaveApplications,
+      termPayments
     ] = await Promise.all([
       organizationsModel.getOrganizationOfficers(org_id, org_version_id).catch(() => []),
       organizationsModel.getOrganizationMembers(org_id, org_version_id).catch(() => []),
@@ -76,8 +80,32 @@ async function getOrganizationHubData(req, res) {
       organizationsModel.getAllCommitteeMembers(org_id, org_version_id).catch(() => []),
       organizationsModel.getPendingOrganizationMembers(org_id, org_version_id).catch(() => []),
       organizationsModel.getArchivedOrganizationMembers(org_id, org_version_id).catch(() => []),
-      organizationsModel.getLeaveApplications(org_id, org_version_id).catch(() => [])
+      organizationsModel.getLeaveApplications(org_id, org_version_id).catch(() => []),
+      TermPaymentModel.getOrganizationPaymentSubmissions(org_id, org_version_id).catch(() => [])
     ]);
+    
+    // If sessionId is provided, set up subscriptions for all organization channels
+    if (sessionId) {
+      console.log(`🟡 [BACKEND-SSE-DEBUG] Setting up organization subscriptions for session: ${sessionId}`);
+      subscribeToChannel(sessionId, `orghub_${org_id}_${org_version_id}`);
+      subscribeToChannel(sessionId, `organization_officers_${org_id}_${org_version_id}`);
+      subscribeToChannel(sessionId, `organization_members_${org_id}_${org_version_id}`);
+      subscribeToChannel(sessionId, `organization_committees_${org_id}_${org_version_id}`);
+      subscribeToChannel(sessionId, `organization_committeeMembers_${org_id}_${org_version_id}`);
+      subscribeToChannel(sessionId, `organization_pendingMembers_${org_id}_${org_version_id}`);
+      subscribeToChannel(sessionId, `organization_archivedMembers_${org_id}_${org_version_id}`);
+      subscribeToChannel(sessionId, `organization_leaveApplications_${org_id}_${org_version_id}`);
+      subscribeToChannel(sessionId, `term_payment_submissions_${org_id}`);
+      console.log(`🟡 [BACKEND-SSE-DEBUG] All organization subscriptions set up for session: ${sessionId}`);
+      
+      // Publish initial term payments data to SSE channel
+      try {
+        publishToChannel(`term_payment_submissions_${org_id}`, termPayments);
+        console.log(`🟢 Published initial term payments to SSE channel: ${termPayments.length} payments`);
+      } catch (sseError) {
+        console.error('🔴 Failed to publish initial term payments to SSE:', sseError);
+      }
+    }
     
     // Return all data at once
     res.json({
@@ -87,7 +115,8 @@ async function getOrganizationHubData(req, res) {
       committeeMembers,
       pendingMembers,
       archivedMembers,
-      leaveApplications
+      leaveApplications,
+      termPayments
     });
     
   } catch (error) {
@@ -205,15 +234,42 @@ async function createOrganizationApplication(req, res) {
 
     // Validate logo file
     const logoFile = req.files?.logo;
+    console.log('[DEBUG] Logo file validation:', {
+      exists: !!logoFile,
+      name: logoFile?.name,
+      mimetype: logoFile?.mimetype,
+      size: logoFile?.size,
+      allowedTypes: Object.keys(ALLOWED_LOGO_TYPES)
+    });
+    
     if (!logoFile) {
       return res.status(400).json({ error: 'Organization logo is required' });
     }
     if (!Object.keys(ALLOWED_LOGO_TYPES).includes(logoFile.mimetype)) {
-      return res.status(400).json({ error: 'Logo must be JPG or PNG format' });
+      console.log('[DEBUG] Logo MIME type rejected:', logoFile.mimetype);
+      return res.status(400).json({ 
+        error: 'Logo must be JPG or PNG format',
+        debug: {
+          received: logoFile.mimetype,
+          allowed: Object.keys(ALLOWED_LOGO_TYPES)
+        }
+      });
     }
     const logoExt = path.extname(logoFile.name).toLowerCase();
+    console.log('[DEBUG] Logo extension check:', {
+      extension: logoExt,
+      allowedForMime: ALLOWED_LOGO_TYPES[logoFile.mimetype]
+    });
+    
     if (!ALLOWED_LOGO_TYPES[logoFile.mimetype].includes(logoExt)) {
-      return res.status(400).json({ error: 'Logo file extension does not match its content type' });
+      return res.status(400).json({ 
+        error: 'Logo file extension does not match its content type',
+        debug: {
+          extension: logoExt,
+          mimetype: logoFile.mimetype,
+          allowedExtensions: ALLOWED_LOGO_TYPES[logoFile.mimetype]
+        }
+      });
     }
     if (logoFile.size > MAX_LOGO_SIZE) {
       return res.status(400).json({ error: `Logo file size exceeds ${MAX_LOGO_SIZE / (1024 * 1024)}MB limit` });
@@ -223,23 +279,60 @@ async function createOrganizationApplication(req, res) {
     const requirementFiles = {};
     const validationErrors = [];
 
+    console.log('[DEBUG] Processing requirement files:', {
+      totalFiles: Object.keys(req.files || {}).length,
+      fileKeys: Object.keys(req.files || {}),
+      requirements: requirements.map(r => ({ id: r.requirement_id, expectedKey: `requirement_${r.requirement_id}` }))
+    });
+
     for (const reqItem of requirements) {
       const fileKey = `requirement_${reqItem.requirement_id}`;
       const file = req.files?.[fileKey];
+      
+      console.log(`[DEBUG] Processing requirement ${reqItem.requirement_id}:`, {
+        fileKey,
+        fileExists: !!file,
+        fileName: file?.name,
+        mimetype: file?.mimetype,
+        size: file?.size
+      });
+      
       if (file) {
         if (!Object.keys(ALLOWED_MIME_TYPES).includes(file.mimetype)) {
+          console.log(`[DEBUG] Requirement file MIME type rejected:`, {
+            requirement_id: reqItem.requirement_id,
+            received: file.mimetype,
+            allowed: Object.keys(ALLOWED_MIME_TYPES)
+          });
           validationErrors.push({
             requirement_id: reqItem.requirement_id,
             error: `Invalid file type. Allowed: PDF, DOC, DOCX, XLS, XLSX, JPG, PNG`,
+            debug: {
+              received: file.mimetype,
+              allowed: Object.keys(ALLOWED_MIME_TYPES)
+            }
           });
           continue;
         }
         const ext = path.extname(file.name).toLowerCase();
         const allowedExts = ALLOWED_MIME_TYPES[file.mimetype];
+        
+        console.log(`[DEBUG] Requirement file extension check:`, {
+          requirement_id: reqItem.requirement_id,
+          extension: ext,
+          mimetype: file.mimetype,
+          allowedForMime: allowedExts
+        });
+        
         if (!allowedExts.includes(ext)) {
           validationErrors.push({
             requirement_id: reqItem.requirement_id,
             error: `File extension (${ext}) does not match its content type`,
+            debug: {
+              extension: ext,
+              mimetype: file.mimetype,
+              allowedExtensions: allowedExts
+            }
           });
           continue;
         }
@@ -829,15 +922,15 @@ async function createExecutiveMember(req, res) {
       orgVersionId
     });
 
-    // Publish to both old channel (backward compatibility) and new hub
-    publishOrgHub({
-      orgId, 
-      orgVersionId,
-      entity: 'officers',
-      operation: 'CREATE',
-      data: result,
-      legacyChannel: `organization_officers_${orgId}_${orgVersionId}`
-    });
+    // Publish updated officers list for real-time updates (like Term Payments)
+    try {
+      const updatedOfficers = await organizationsModel.getOrganizationOfficers(orgId, orgVersionId);
+      const officersArray = Array.isArray(updatedOfficers) ? updatedOfficers : [];
+      publishToChannel(`organization_officers_${orgId}_${orgVersionId}`, officersArray);
+      console.log(`Published updated officers list to SSE channel: ${officersArray.length} officers`);
+    } catch (publishError) {
+      console.error('Failed to publish officer updates:', publishError);
+    }
 
     res.status(201).json({ message: result.message });
   } catch (error) {
@@ -860,15 +953,15 @@ async function updateExecutiveMember(req, res) {
       action_by_email
     });
 
-    // Publish to both old channel (backward compatibility) and new hub
-    publishOrgHub({
-      orgId, 
-      orgVersionId,
-      entity: 'officers',
-      operation: 'UPDATE',
-      data: result,
-      legacyChannel: `organization_officers_${orgId}_${orgVersionId}`
-    });
+    // Publish updated officers list for real-time updates (like Term Payments)
+    try {
+      const updatedOfficers = await organizationsModel.getOrganizationOfficers(orgId, orgVersionId);
+      const officersArray = Array.isArray(updatedOfficers) ? updatedOfficers : [];
+      publishToChannel(`organization_officers_${orgId}_${orgVersionId}`, officersArray);
+      console.log(`Published updated officers list to SSE channel: ${officersArray.length} officers`);
+    } catch (publishError) {
+      console.error('Failed to publish officer updates:', publishError);
+    }
 
     res.status(200).json({ message: "Update Successful" });
   } catch (error) {
@@ -888,15 +981,15 @@ async function archiveExecutiveMember(req, res) {
       action_by_email
     });
 
-    // Publish to both old channel (backward compatibility) and new hub
-    publishOrgHub({
-      orgId: organization_id, 
-      orgVersionId,
-      entity: 'officers',
-      operation: 'DELETE',
-      data: result,
-      legacyChannel: `organization_officers_${organization_id}_${orgVersionId}`
-    });
+    // Publish updated officers list for real-time updates (like Term Payments)
+    try {
+      const updatedOfficers = await organizationsModel.getOrganizationOfficers(organization_id, orgVersionId);
+      const officersArray = Array.isArray(updatedOfficers) ? updatedOfficers : [];
+      publishToChannel(`organization_officers_${organization_id}_${orgVersionId}`, officersArray);
+      console.log(`Published updated officers list to SSE channel: ${officersArray.length} officers`);
+    } catch (publishError) {
+      console.error('Failed to publish officer updates:', publishError);
+    }
 
     res.status(200).json({ message: "Archive Successful" });
   } catch (error) {
@@ -926,15 +1019,15 @@ async function createCommittee(req, res) {
       action_by_email,
     });
 
-    // Publish to both old channel (backward compatibility) and new hub
-    publishOrgHub({
-      orgId, 
-      orgVersionId,
-      entity: 'committees',
-      operation: 'CREATE',
-      data: result,
-      legacyChannel: `organization_committees_${orgId}_${orgVersionId}`
-    });
+    // Publish updated committees list for real-time updates (like Term Payments)
+    try {
+      const updatedCommittees = await organizationsModel.getOrganizationCommittees(orgId, orgVersionId);
+      const committeesArray = Array.isArray(updatedCommittees) ? updatedCommittees : [];
+      publishToChannel(`organization_committees_${orgId}_${orgVersionId}`, committeesArray);
+      console.log(`Published updated committees list to SSE channel: ${committeesArray.length} committees`);
+    } catch (publishError) {
+      console.error('Failed to publish committee updates:', publishError);
+    }
 
     res.status(201).json({ message: 'Committee created successfully.' });
   } catch (error) {
@@ -955,15 +1048,15 @@ async function updateCommittee(req, res) {
       action_by_email
     });
 
-    // Publish to both old channel (backward compatibility) and new hub
-    publishOrgHub({
-      orgId, 
-      orgVersionId,
-      entity: 'committees',
-      operation: 'UPDATE',
-      data: result,
-      legacyChannel: `organization_committees_${orgId}_${orgVersionId}`
-    });
+    // Publish updated committees list for real-time updates (like Term Payments)
+    try {
+      const updatedCommittees = await organizationsModel.getOrganizationCommittees(orgId, orgVersionId);
+      const committeesArray = Array.isArray(updatedCommittees) ? updatedCommittees : [];
+      publishToChannel(`organization_committees_${orgId}_${orgVersionId}`, committeesArray);
+      console.log(`Published updated committees list to SSE channel: ${committeesArray.length} committees`);
+    } catch (publishError) {
+      console.error('Failed to publish committee updates:', publishError);
+    }
 
     res.status(200).json({ message: 'Committee updated successfully.' });
   } catch (error) {
@@ -983,15 +1076,17 @@ async function archiveCommittee(req, res) {
       archived_by_email
     });
 
-    // Publish to both old channel (backward compatibility) and new hub
-    publishOrgHub({
-      orgId, 
-      orgVersionId,
-      entity: 'committees',
-      operation: 'DELETE',
-      data: result,
-      legacyChannel: `organization_committees_${orgId}_${orgVersionId}`
-    });
+    // Publish updated committees list for real-time updates (like Term Payments)
+    try {
+      const updatedCommittees = await organizationsModel.getOrganizationCommittees(orgId, orgVersionId);
+      const committeesArray = Array.isArray(updatedCommittees) ? updatedCommittees : [];
+      const channelName = `organization_committees_${orgId}_${orgVersionId}`;
+      publishToChannel(channelName, committeesArray);
+      console.log(`🟢 [ORG-BACKEND-DEBUG] Published updated committees list to SSE channel: ${channelName}, data count: ${committeesArray.length}`);
+      console.log(`🟢 [ORG-BACKEND-DEBUG] Published data:`, committeesArray);
+    } catch (publishError) {
+      console.error('Failed to publish committee updates:', publishError);
+    }
 
     res.status(200).json({
       message: 'Committee archived successfully.',
@@ -1044,26 +1139,26 @@ async function addCommitteeMember(req, res) {
       }
     }
 
-    // Publish to both old channel (backward compatibility) and new hub
-    publishOrgHub({
-      orgId, 
-      orgVersionId,
-      entity: 'committee_members',
-      operation: 'CREATE',
-      data: result,
-      legacyChannel: `committee_members_${orgId}_${orgVersionId}`
-    });
+    // Publish updated committee members list for real-time updates (like Term Payments)
+    try {
+      const updatedCommitteeMembers = await organizationsModel.getAllCommitteeMembers(orgId, orgVersionId);
+      const committeeMembersArray = Array.isArray(updatedCommitteeMembers) ? updatedCommitteeMembers : [];
+      publishToChannel(`organization_committeeMembers_${orgId}_${orgVersionId}`, committeeMembersArray);
+      console.log(`Published updated committee members list to SSE channel: ${committeeMembersArray.length} committee members`);
+    } catch (publishError) {
+      console.error('Failed to publish committee member updates:', publishError);
+    }
 
     // Also update members list since member was moved from regular to committee
     if (emailUpdate) {
-      publishOrgHub({
-        orgId, 
-        orgVersionId,
-        entity: 'members',
-        operation: 'DELETE',
-        data: emailUpdate,
-        legacyChannel: `organization_members_${orgId}_${orgVersionId}`
-      });
+      try {
+        const updatedMembers = await organizationsModel.getOrganizationMembers(orgId, orgVersionId);
+        const membersArray = Array.isArray(updatedMembers) ? updatedMembers : [];
+        publishToChannel(`organization_members_${orgId}_${orgVersionId}`, membersArray);
+        console.log(`Published updated members list to SSE channel: ${membersArray.length} members`);
+      } catch (publishError) {
+        console.error('Failed to publish member updates:', publishError);
+      }
     }
 
     res.status(201).json({
@@ -1087,15 +1182,15 @@ async function updateCommitteeMember(req, res) {
       action_by_email
     });
 
-    // Publish to both old channel (backward compatibility) and new hub
-    publishOrgHub({
-      orgId, 
-      orgVersionId,
-      entity: 'committee_members',
-      operation: 'UPDATE',
-      data: result,
-      legacyChannel: `committee_members_${orgId}_${orgVersionId}`
-    });
+    // Publish updated committee members list for real-time updates (like Term Payments)
+    try {
+      const updatedCommitteeMembers = await organizationsModel.getAllCommitteeMembers(orgId, orgVersionId);
+      const committeeMembersArray = Array.isArray(updatedCommitteeMembers) ? updatedCommitteeMembers : [];
+      publishToChannel(`organization_committeeMembers_${orgId}_${orgVersionId}`, committeeMembersArray);
+      console.log(`Published updated committee members list to SSE channel: ${committeeMembersArray.length} committee members`);
+    } catch (publishError) {
+      console.error('Failed to publish committee member updates:', publishError);
+    }
 
     res.status(200).json({
       message: 'Committee member updated successfully.',
@@ -1118,15 +1213,15 @@ async function archiveCommitteeMember(req, res) {
       action_by_email
     });
 
-    // Publish to both old channel (backward compatibility) and new hub
-    publishOrgHub({
-      orgId, 
-      orgVersionId,
-      entity: 'committee_members',
-      operation: 'DELETE',
-      data: result,
-      legacyChannel: `committee_members_${orgId}_${orgVersionId}`
-    });
+    // Publish updated committee members list for real-time updates (like Term Payments)
+    try {
+      const updatedCommitteeMembers = await organizationsModel.getAllCommitteeMembers(orgId, orgVersionId);
+      const committeeMembersArray = Array.isArray(updatedCommitteeMembers) ? updatedCommitteeMembers : [];
+      publishToChannel(`organization_committeeMembers_${orgId}_${orgVersionId}`, committeeMembersArray);
+      console.log(`Published updated committee members list to SSE channel: ${committeeMembersArray.length} committee members`);
+    } catch (publishError) {
+      console.error('Failed to publish committee member updates:', publishError);
+    }
 
     res.status(200).json({
       message: 'Committee member archived successfully.',
@@ -1158,16 +1253,16 @@ async function approveMembershipApplication(req, res) {
     const newMember = result.newMember?.[0] || null;
     const archivedMembers = result.archivedMembers || null;
 
-    // remove from pending
+    // Remove from pending members list
     if (approvedApplication) {
-      publishOrgHub({
-        orgId: organization_id, 
-        orgVersionId: organization_version_id,
-        entity: 'pending_members',
-        operation: 'DELETE',
-        data: [approvedApplication],
-        legacyChannel: `pending_organization_members_${organization_id}_${organization_version_id}`
-      });
+      try {
+        const updatedPendingMembers = await organizationsModel.getPendingOrganizationMembers(organization_id, organization_version_id);
+        const pendingMembersArray = Array.isArray(updatedPendingMembers) ? updatedPendingMembers : [];
+        publishToChannel(`organization_pendingMembers_${organization_id}_${organization_version_id}`, pendingMembersArray);
+        console.log(`Published updated pending members list to SSE channel: ${pendingMembersArray.length} pending members`);
+      } catch (publishError) {
+        console.error('Failed to publish pending member updates:', publishError);
+      }
     }
 
     // transactions (UPDATE)
@@ -1178,28 +1273,28 @@ async function approveMembershipApplication(req, res) {
       }
     }
 
-    // member created
+    // Add to members list
     if (newMember) {
-      publishOrgHub({
-        orgId: organization_id, 
-        orgVersionId: organization_version_id,
-        entity: 'members',
-        operation: 'CREATE',
-        data: [newMember],
-        legacyChannel: `organization_members_${organization_id}_${organization_version_id}`
-      });
+      try {
+        const updatedMembers = await organizationsModel.getOrganizationMembers(organization_id, organization_version_id);
+        const membersArray = Array.isArray(updatedMembers) ? updatedMembers : [];
+        publishToChannel(`organization_members_${organization_id}_${organization_version_id}`, membersArray);
+        console.log(`Published updated members list to SSE channel: ${membersArray.length} members`);
+      } catch (publishError) {
+        console.error('Failed to publish member updates:', publishError);
+      }
     }
 
-    // archived members removed from archive list (reactivation)
+    // Remove from archived members list (reactivation)
     if (archivedMembers && archivedMembers.length > 0) {
-      publishOrgHub({
-        orgId: organization_id, 
-        orgVersionId: organization_version_id,
-        entity: 'archived_members',
-        operation: 'DELETE',
-        data: archivedMembers,
-        legacyChannel: `archived_organization_members_${organization_id}_${organization_version_id}`
-      });
+      try {
+        const updatedArchivedMembers = await organizationsModel.getArchivedOrganizationMembers(organization_id, organization_version_id);
+        const archivedMembersArray = Array.isArray(updatedArchivedMembers) ? updatedArchivedMembers : [];
+        publishToChannel(`organization_archivedMembers_${organization_id}_${organization_version_id}`, archivedMembersArray);
+        console.log(`Published updated archived members list to SSE channel: ${archivedMembersArray.length} archived members`);
+      } catch (publishError) {
+        console.error('Failed to publish archived member updates:', publishError);
+      }
     }
 
     res.json({ 
@@ -1230,14 +1325,15 @@ async function rejectMembershipApplication(req, res) {
     const failedTransaction = result.failedTransaction?.[0] || null;
 
     if (rejectedApplication) {
-      publishOrgHub({
-        orgId: organization_id, 
-        orgVersionId: organization_version_id,
-        entity: 'pending_members',
-        operation: 'DELETE',
-        data: [rejectedApplication],
-        legacyChannel: `pending_organization_members_${organization_id}_${organization_version_id}`
-      });
+      // Remove from pending members list
+      try {
+        const updatedPendingMembers = await organizationsModel.getPendingOrganizationMembers(organization_id, organization_version_id);
+        const pendingMembersArray = Array.isArray(updatedPendingMembers) ? updatedPendingMembers : [];
+        publishToChannel(`organization_pendingMembers_${organization_id}_${organization_version_id}`, pendingMembersArray);
+        console.log(`Published updated pending members list to SSE channel: ${pendingMembersArray.length} pending members`);
+      } catch (publishError) {
+        console.error('Failed to publish pending member updates:', publishError);
+      }
     }
     if (failedTransaction) {
       publishToChannel('transactions', { operation: 'UPDATE', data: [failedTransaction], timestamp: new Date() });
@@ -1277,33 +1373,36 @@ async function approveLeaveApplication(req, res) {
     const archivedMembers = result.archivedMembers || null;
 
     if (approvedApplication) {
-      publishOrgHub({
-        orgId: organization_id, 
-        orgVersionId: organization_version_id,
-        entity: 'leave_applications',
-        operation: 'DELETE',
-        data: [approvedApplication],
-        legacyChannel: `leave_organization_${organization_id}_${organization_version_id}`
-      });
+      // Update leave applications list (remove approved application)
+      try {
+        const updatedLeaveApplications = await organizationsModel.getLeaveApplications(organization_id, organization_version_id);
+        const leaveApplicationsArray = Array.isArray(updatedLeaveApplications) ? updatedLeaveApplications : [];
+        publishToChannel(`organization_leaveApplications_${organization_id}_${organization_version_id}`, leaveApplicationsArray);
+        console.log(`Published updated leave applications list to SSE channel: ${leaveApplicationsArray.length} leave applications`);
+      } catch (publishError) {
+        console.error('Failed to publish leave application updates:', publishError);
+      }
       
-      publishOrgHub({
-        orgId: organization_id, 
-        orgVersionId: organization_version_id,
-        entity: 'members',
-        operation: 'DELETE',
-        data: [approvedApplication],
-        legacyChannel: `organization_members_${organization_id}_${organization_version_id}`
-      });
+      // Update members list (remove member who left)
+      try {
+        const updatedMembers = await organizationsModel.getOrganizationMembers(organization_id, organization_version_id);
+        const membersArray = Array.isArray(updatedMembers) ? updatedMembers : [];
+        publishToChannel(`organization_members_${organization_id}_${organization_version_id}`, membersArray);
+        console.log(`Published updated members list to SSE channel: ${membersArray.length} members`);
+      } catch (publishError) {
+        console.error('Failed to publish member updates:', publishError);
+      }
     }
     if (archivedMembers && archivedMembers.length > 0) {
-      publishOrgHub({
-        orgId: organization_id, 
-        orgVersionId: organization_version_id,
-        entity: 'archived_members',
-        operation: 'CREATE',
-        data: archivedMembers,
-        legacyChannel: `archived_organization_members_${organization_id}_${organization_version_id}`
-      });
+      // Update archived members list (add member who left)
+      try {
+        const updatedArchivedMembers = await organizationsModel.getArchivedOrganizationMembers(organization_id, organization_version_id);
+        const archivedMembersArray = Array.isArray(updatedArchivedMembers) ? updatedArchivedMembers : [];
+        publishToChannel(`organization_archivedMembers_${organization_id}_${organization_version_id}`, archivedMembersArray);
+        console.log(`Published updated archived members list to SSE channel: ${archivedMembersArray.length} archived members`);
+      } catch (publishError) {
+        console.error('Failed to publish archived member updates:', publishError);
+      }
     }
 
     res.json({ 
@@ -1335,14 +1434,15 @@ async function rejectLeaveApplication(req, res) {
     );
 
     if (rejectedApplication && rejectedApplication.length > 0) {
-      publishOrgHub({
-        orgId: organization_id, 
-        orgVersionId: organization_version_id,
-        entity: 'leave_applications',
-        operation: 'DELETE',
-        data: rejectedApplication,
-        legacyChannel: `leave_organization_${organization_id}_${organization_version_id}`
-      });
+      // Update leave applications list (remove rejected application)
+      try {
+        const updatedLeaveApplications = await organizationsModel.getLeaveApplications(organization_id, organization_version_id);
+        const leaveApplicationsArray = Array.isArray(updatedLeaveApplications) ? updatedLeaveApplications : [];
+        publishToChannel(`organization_leaveApplications_${organization_id}_${organization_version_id}`, leaveApplicationsArray);
+        console.log(`Published updated leave applications list to SSE channel: ${leaveApplicationsArray.length} leave applications`);
+      } catch (publishError) {
+        console.error('Failed to publish leave application updates:', publishError);
+      }
     }
 
     res.json({ 
@@ -1378,17 +1478,18 @@ async function addOrganizationMember(req, res) {
       await userCacheModel.cacheSingleOrganizationUser(orgName, emailSUggestionOrganizationUpdate[0]); // backward compat
     }
 
-    // Publish to both old and new channels
+    // Publish updated members list for real-time updates (like Term Payments)
     if (orgId && orgVersionId) {
-      publishOrgHub({
-        orgId, 
-        orgVersionId,
-        entity: 'members',
-        operation: 'CREATE',
-        data: result,
-        legacyChannel: `organization_members_${orgId}_${orgVersionId}`
-      });
+      try {
+        const updatedMembers = await organizationsModel.getOrganizationMembers(orgId, orgVersionId);
+        const membersArray = Array.isArray(updatedMembers) ? updatedMembers : [];
+        publishToChannel(`organization_members_${orgId}_${orgVersionId}`, membersArray);
+        console.log(`Published updated members list to SSE channel: ${membersArray.length} members`);
+      } catch (publishError) {
+        console.error('Failed to publish member updates:', publishError);
+      }
     } else {
+      // Backward compatibility for old format
       publishToChannel(`organization_members_${orgName}`, {
         operation: 'CREATE',
         data: Array.isArray(result) ? result : [result],
@@ -1435,24 +1536,25 @@ async function archiveOrganizationMember(req, res) {
     const result = await organizationsModel.archiveOrganizationMember({ member_id, archived_by_email, reason, orgId, orgVersionId });
 
     if (orgId && orgVersionId) {
-      // Remove from members, add to archived
-      publishOrgHub({
-        orgId, 
-        orgVersionId,
-        entity: 'members',
-        operation: 'DELETE',
-        data: result,
-        legacyChannel: `organization_members_${orgId}_${orgVersionId}`
-      });
+      // Update members list (remove archived member)
+      try {
+        const updatedMembers = await organizationsModel.getOrganizationMembers(orgId, orgVersionId);
+        const membersArray = Array.isArray(updatedMembers) ? updatedMembers : [];
+        publishToChannel(`organization_members_${orgId}_${orgVersionId}`, membersArray);
+        console.log(`Published updated members list to SSE channel: ${membersArray.length} members`);
+      } catch (publishError) {
+        console.error('Failed to publish member updates:', publishError);
+      }
       
-      publishOrgHub({
-        orgId, 
-        orgVersionId,
-        entity: 'archived_members',
-        operation: 'CREATE',
-        data: result,
-        legacyChannel: `archived_organization_members_${orgId}_${orgVersionId}`
-      });
+      // Update archived members list (add newly archived member)
+      try {
+        const updatedArchivedMembers = await organizationsModel.getArchivedOrganizationMembers(orgId, orgVersionId);
+        const archivedMembersArray = Array.isArray(updatedArchivedMembers) ? updatedArchivedMembers : [];
+        publishToChannel(`organization_archivedMembers_${orgId}_${orgVersionId}`, archivedMembersArray);
+        console.log(`Published updated archived members list to SSE channel: ${archivedMembersArray.length} archived members`);
+      } catch (publishError) {
+        console.error('Failed to publish archived member updates:', publishError);
+      }
     }
 
     res.status(200).json({ message: 'Organization member archived successfully.' });
@@ -2203,6 +2305,143 @@ async function createMembershipResponse(req, res) {
   }
 }
 
+// Get current organization version (for mobile app)
+async function getCurrentOrganizationVersion(req, res) {
+  try {
+    const { organizationId } = req.params;
+    
+    const orgDetails = await organizationsModel.getOrganizationDetails(organizationId);
+    
+    if (!orgDetails || !orgDetails.current_org_version_id) {
+      return res.status(404).json({
+        success: false,
+        message: 'Organization not found or no current version'
+      });
+    }
+    
+    res.json({
+      success: true,
+      data: {
+        organization_id: organizationId,
+        current_org_version_id: orgDetails.current_org_version_id
+      }
+    });
+  } catch (error) {
+    console.error('Error getting current organization version:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get organization version',
+      error: error.message
+    });
+  }
+}
+
+// ===========================
+// ORGANIZATION TERM OPTION MANAGEMENT
+// ===========================
+
+// Update organization term option setting
+const updateOrganizationTermOption = async (req, res) => {
+  try {
+    let { organization_id, organization_version_id, organizationVersionId, term_option } = req.body;
+
+    // Handle both parameter naming conventions
+    if (!organization_version_id && organizationVersionId) {
+      organization_version_id = organizationVersionId;
+    }
+
+    console.log('updateOrganizationTermOption called with:', {
+      organization_id,
+      organization_version_id,
+      organizationVersionId,
+      term_option,
+      raw_body: req.body
+    });
+
+    // Validate required parameters
+    if (!organization_id || term_option === undefined) {
+      return res.status(400).json({
+        success: false,
+        message: 'Missing required parameters: organization_id and term_option are required'
+      });
+    }
+
+    // If organization_version_id is not provided, fetch the current version
+    if (organization_version_id === undefined || organization_version_id === null) {
+      try {
+        console.log('Fetching current organization version for organization_id:', organization_id);
+        // Use the database connection to get current organization version
+        const connection = await pool.getConnection();
+        try {
+          const [rows] = await connection.query(
+            'SELECT current_org_version_id FROM organizations WHERE organization_id = ?',
+            [organization_id]
+          );
+          console.log('Query result:', rows);
+          if (!rows || rows.length === 0 || !rows[0].current_org_version_id) {
+            return res.status(404).json({
+              success: false,
+              message: 'Organization not found or no current version available'
+            });
+          }
+          organization_version_id = rows[0].current_org_version_id;
+          console.log('Auto-fetched organization_version_id:', organization_version_id);
+        } finally {
+          connection.release();
+        }
+      } catch (fetchError) {
+        console.error('Error fetching organization version:', fetchError);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to fetch organization version'
+        });
+      }
+    }
+
+    // Call the stored procedure
+    const result = await organizationsModel.updateOrganizationTermOption(
+      organization_id,
+      organization_version_id,
+      term_option
+    );
+
+    console.log('updateOrganizationTermOption result:', result);
+
+    // Publish real-time update to organization hub
+    try {
+      publishOrgHub({
+        orgId: organization_id,
+        orgVersionId: organization_version_id,
+        entity: 'organization_settings',
+        operation: 'UPDATE',
+        data: {
+          organization_id,
+          organization_version_id,
+          term_option,
+          updated_at: new Date().toISOString()
+        }
+      });
+      console.log(`🟢 Published term option update to organization hub: ${organization_id}`);
+    } catch (sseError) {
+      console.error('🔴 Failed to publish term option update to SSE:', sseError);
+    }
+
+    res.json({
+      success: true,
+      message: 'Term option updated successfully',
+      data: result
+    });
+
+  } catch (error) {
+    console.error('Error in updateOrganizationTermOption:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to update term option',
+      error: error.message
+    });
+  }
+};
+
 module.exports = {
   getOrganizations,
   createOrganizationApplication,
@@ -2276,5 +2515,9 @@ module.exports = {
   createMembershipResponse,
   // Leave Application functions
   approveLeaveApplication,
-  rejectLeaveApplication
+  rejectLeaveApplication,
+  // Mobile helper functions
+  getCurrentOrganizationVersion,
+  // Term option management
+  updateOrganizationTermOption
 };

@@ -334,9 +334,15 @@ async function getAllPeriodsWithApplications(req, res) {
 }
 
 async function getActiveApplicationPeriodSimple(req, res) {
+  console.log('=== getActiveApplicationPeriodSimple called ===');
+  console.log('User:', req.user);
+  console.log('Query params:', req.query);
+  
   const { sessionId } = req.query;
   try {
+    console.log('Calling model function...');
     const period = await requirementModel.getActiveApplicationPeriodSimple();
+    console.log('Model returned:', period);
 
     if (sessionId) {
       subscribeToChannel(sessionId, 'application_periods');

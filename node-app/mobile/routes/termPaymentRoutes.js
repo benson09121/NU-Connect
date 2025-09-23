@@ -50,6 +50,13 @@ router.get('/my-payments', (req, res) => {
 router.get('/my-pending-payments', TermPaymentController.getUserPendingPayments);
 
 /**
+ * @route   GET /mobile/api/term-payments/retry-status/:organizationId/:organizationVersionId?/:termId?
+ * @desc    Check if user can retry payment after rejection
+ * @access  Private (User themselves)
+ */
+router.get('/retry-status/:organizationId/:organizationVersionId?/:termId?', TermPaymentController.checkPaymentRetryStatus);
+
+/**
  * @route   GET /mobile/api/term-payments/my-payment-summary
  * @desc    Get user's payment summary
  * @access  Private (User themselves)
@@ -470,6 +477,31 @@ router.get('/user/:userId/organization/:organizationId', async (req, res) => {
         });
     }
 });
+
+// ===================
+// TWO-STEP PAYMENT CREATION ROUTES
+// ===================
+
+/**
+ * @route   POST /mobile/api/term-payments/create-transaction
+ * @desc    Step 1: Create transaction and membership entry
+ * @access  Private
+ */
+router.post('/create-transaction', TermPaymentController.createTransactionStep);
+
+/**
+ * @route   POST /mobile/api/term-payments/create-term-payment
+ * @desc    Step 2: Create term payment using existing transaction ID
+ * @access  Private
+ */
+router.post('/create-term-payment', TermPaymentController.createTermPaymentStep);
+
+/**
+ * @route   POST /mobile/api/term-payments/create-payment
+ * @desc    Legacy: Create term payment with transaction (single step)
+ * @access  Private
+ */
+router.post('/create-payment', TermPaymentController.createTermPayment);
 
 // ===================
 // ERROR HANDLING MIDDLEWARE
