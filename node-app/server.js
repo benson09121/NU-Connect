@@ -43,6 +43,13 @@ app.use((req, res, next) => {
 app.use(cors({
     origin: "http://localhost:5173",
     methods: ['GET', 'POST', 'PUT', 'DELETE'],
+    allowedHeaders: [
+        'Content-Type', 
+        'Authorization', 
+        'x-api-key', 
+        'Ocp-Apim-Subscription-Key',
+        'Accept'
+    ],
     credentials: true,
 }));
 
@@ -86,7 +93,10 @@ app.use('/api/mobile', eventRoutes);
 app.use('/api/mobile', organizationRoutes);
 app.use('/api/mobile', notification);
 app.use('/api/mobile', termPaymentsMobile);
-// Routes on Web
+// Routes on Web  
+// PUBLIC ROUTES MUST BE FIRST to avoid middleware conflicts
+app.use('/api/web/public', publicRoutes);
+
 app.use('/api/web', authRoutesWeb);
 app.use('/api/web', permissionRoutesWeb);
 app.use('/api/web', manageAccountsRoutesWeb);
@@ -104,7 +114,6 @@ app.use('/api/web', analytics);
 app.use('/api/web', novaRoutes);
 app.use('/api/web', termPaymentRoutes);
 app.use('/api/web/term-payments', termPaymentRoutes); // Temporary fallback for old path
-app.use('/api/web/public', publicRoutes);
 
 
 // Initialize cron jobs
