@@ -173,6 +173,30 @@ async function rejectUserApplication(application_id, rejectedByEmail, rejectionR
     }
 }
 
+// 🆕 NEW HELPER FUNCTION FOR ROLE-BASED STATUS CHECKS
+async function getUserRoleAndStatus(email) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query(`
+            SELECT 
+                u.user_id,
+                u.email,
+                u.status,
+                r.role_name,
+                r.role_name = 'Student' as is_student
+            FROM tbl_user u
+            LEFT JOIN tbl_role r ON u.role_id = r.role_id
+            WHERE u.email = ?
+        `, [email]);
+        return rows[0] || null;
+    } catch (error) {
+        console.error('Error getting user role and status:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
 module.exports = {
     getAccounts,
     addAccount,
@@ -184,5 +208,6 @@ module.exports = {
     addUserApplication,
     getAllPendingUsersAndApplications,
     approveUserApplication,
-    rejectUserApplication, 
+    rejectUserApplication,
+    getUserRoleAndStatus, // 🆕 NEW EXPORT
 };

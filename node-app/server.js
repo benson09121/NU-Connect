@@ -40,17 +40,34 @@ app.use((req, res, next) => {
     }
     next();
 });
+
+// 🔍 CORS Debugging Middleware - Log all preflight requests
+app.use((req, res, next) => {
+    if (req.method === 'OPTIONS') {
+        console.log('🔍 [CORS DEBUG] Preflight OPTIONS request:');
+        console.log('  - Origin:', req.headers.origin);
+        console.log('  - Method:', req.headers['access-control-request-method']);
+        console.log('  - Headers requested:', req.headers['access-control-request-headers']);
+        console.log('  - URL:', req.url);
+        console.log('  - All headers:', JSON.stringify(req.headers, null, 2));
+    }
+    next();
+});
+
+// Temporarily allow ALL headers for debugging - proper way
 app.use(cors({
-    origin: "http://localhost:5173",
-    methods: ['GET', 'POST', 'PUT', 'DELETE'],
-    allowedHeaders: [
-        'Content-Type', 
-        'Authorization', 
-        'x-api-key', 
-        'Ocp-Apim-Subscription-Key',
-        'Accept'
-    ],
+    origin: "http://localhost:5173", 
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: function (req, callback) {
+        // Allow any headers that are requested
+        const requestedHeaders = req.headers['access-control-request-headers'];
+        console.log('� [CORS] Dynamically allowing headers:', requestedHeaders);
+        callback(null, requestedHeaders ? requestedHeaders.split(',').map(h => h.trim()) : []);
+    },
     credentials: true,
+    optionsSuccessStatus: 200,
+    preflightContinue: false,
+    maxAge: 86400
 }));
 
 

@@ -1465,20 +1465,37 @@ module.exports = {
 async function getApplicationOfficers(application_id) {
     const connection = await pool.getConnection();
     try {
+        console.log('🔍 [DB-DEBUG] getApplicationOfficers - Fetching officers for application_id:', application_id);
         const [rows] = await connection.query(`
             SELECT 
                 ae.proposed_user_id as user_id,
                 ae.proposed_name as name,
                 ae.proposed_email as email,
                 u.status,
-                ae.proposed_title as title
+                ae.proposed_title as title,
+                u.f_name,
+                u.l_name
             FROM tbl_application_executives ae
             LEFT JOIN tbl_user u ON ae.proposed_user_id = u.user_id
             WHERE ae.application_id = ?
         `, [application_id]);
+        
+        console.log('🔍 [DB-DEBUG] getApplicationOfficers - Retrieved officers:', {
+          count: rows.length,
+          officers: rows.map(row => ({
+            user_id: row.user_id,
+            name: row.name,
+            email: row.email,
+            f_name: row.f_name,
+            l_name: row.l_name,
+            title: row.title,
+            status: row.status
+          }))
+        });
+        
         return rows;
     } catch (error) {
-        console.error('Error getting application officers:', error);
+        console.error('❌ [DB-DEBUG] Error getting application officers:', error);
         throw error;
     } finally {
         connection.release();

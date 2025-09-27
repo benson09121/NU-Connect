@@ -82,4 +82,27 @@ async function updateUserStatus(user_id, status) {
     }
 }
 
-module.exports = { getUser, generateToken, getPermissions, getUserByEmail, createPendingMobileUser, updateUserStatus };
+// 🆕 NEW FUNCTION FOR MOBILE: Handle login with name updates and status change
+async function handleMobileLogin(email, firstName, lastName) {
+    const connection = await pool.getConnection();
+    try {
+        // Use the existing HandleLogin stored procedure which already handles Pending → Active transition
+        const [rows] = await connection.query('CALL HandleLogin(?, ?, ?)', [email, firstName, lastName]);
+        return rows[0];
+    } catch (error) {
+        console.error('Error handling mobile login:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+module.exports = { 
+    getUser, 
+    generateToken, 
+    getPermissions, 
+    getUserByEmail, 
+    createPendingMobileUser, 
+    updateUserStatus,
+    handleMobileLogin // 🆕 NEW EXPORT
+};

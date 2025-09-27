@@ -8,6 +8,13 @@ router.get(
     middleware.validateAzureJWT,
     organizationsController.getOrganizations
 );
+
+// 🆕 Real-time user organizations endpoint
+router.get('/user-organizations', 
+    middleware.validateAzureJWT, 
+    organizationsController.getUserOrganizations
+);
+
 router.get('/organizations-by-status', middleware.validateAzureJWT, middleware.hasPermission("VIEW_ORGANIZATION"), organizationsController.getOrganizationsByStatus);
 router.post('/organizations', middleware.validateAzureJWT, organizationsController.createOrganizationApplication);
 router.get('/organizations', middleware.validateAzureJWT, organizationsController.getOrganizations);

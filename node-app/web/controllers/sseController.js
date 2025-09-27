@@ -11,7 +11,10 @@ function publishToChannel(channel, data) {
         ? { data, timestamp: Date.now() }
         : { ...data, timestamp: Date.now() };
     
-    redisClient.publish(channel, JSON.stringify(payload));
+    console.log(`🔍 [BACKEND-SSE-DEBUG] About to publish to Redis channel: ${channel}, payload:`, payload);
+    const result = redisClient.publish(channel, JSON.stringify(payload));
+    console.log(`🔍 [BACKEND-SSE-DEBUG] Redis publish result:`, result);
+    return result;
 }
 
 // Handle SSE connections
@@ -55,23 +58,29 @@ async function handleSSEConnection(req, res) {
         try {
             const eventData = JSON.parse(message);
             
+            console.log(`🔵 [BACKEND-SSE-DEBUG] Redis message received on channel: ${channel}`, eventData);
+            
             // Debug organization channels specifically
-            if (channel && (channel.includes('organization') || channel.includes('orghub'))) {
+            if (channel && (channel.includes('organization') || channel.includes('orghub') || channel.startsWith('user_organizations_'))) {
                 console.log(`🔴 [BACKEND-SSE-DEBUG] Received message for org channel: ${channel}, subscribed: ${sessionSubscriptions.get(sessionId)?.channels.has(channel)}, data:`, eventData);
             }
             
             // Only send if client is subscribed to this channel
             if (sessionSubscriptions.get(sessionId)?.channels.has(channel)) {
+                console.log(`✅ [BACKEND-SSE-DEBUG] Forwarding message to client for channel: ${channel}`);
                 res.write(`event: ${channel}\n`);
                 res.write(`data: ${JSON.stringify(eventData)}\n\n`);
                 
                 // Debug what we're sending to client
-                if (channel && (channel.includes('organization') || channel.includes('orghub'))) {
+                if (channel && (channel.includes('organization') || channel.includes('orghub') || channel.startsWith('user_organizations_'))) {
                     console.log(`🔴 [BACKEND-SSE-DEBUG] Sent to client - channel: ${channel}, data:`, eventData);
                 }
+            } else {
+                console.log(`❌ [BACKEND-SSE-DEBUG] Client not subscribed to channel: ${channel}, available channels:`, 
+                    Array.from(sessionSubscriptions.get(sessionId)?.channels || []));
             }
         } catch (err) {
-            console.error('Error processing message:', err);
+            console.error(`❌ [BACKEND-SSE-DEBUG] Error processing Redis message for channel ${channel}:`, err);
         }
     });
     
@@ -89,17 +98,33 @@ async function handleSSEConnection(req, res) {
 
 // Subscribe session to a channel
 function subscribeToChannel(sessionId, channel) {
+    console.log(`🔍 [BACKEND-SSE-DEBUG] Attempting to subscribe session ${sessionId} to channel: ${channel}`);
+    
     const session = sessionSubscriptions.get(sessionId);
-    if (!session || session.channels.has(channel)) return false;
+    if (!session) {
+        console.log(`❌ [BACKEND-SSE-DEBUG] No session found for ${sessionId}`);
+        return false;
+    }
+    
+    if (session.channels.has(channel)) {
+        console.log(`⚠️ [BACKEND-SSE-DEBUG] Session ${sessionId} already subscribed to channel: ${channel}`);
+        return false;
+    }
     
     // Debug organization channels specifically
-    if (channel && (channel.includes('organization') || channel.includes('orghub'))) {
+    if (channel && (channel.includes('organization') || channel.includes('orghub') || channel.startsWith('user_organizations_'))) {
         console.log(`🟡 [BACKEND-SSE-DEBUG] Subscribing session ${sessionId} to org channel: ${channel}`);
     }
     
-    session.subscriber.subscribe(channel);
-    session.channels.add(channel);
-    return true;
+    try {
+        session.subscriber.subscribe(channel);
+        session.channels.add(channel);
+        console.log(`✅ [BACKEND-SSE-DEBUG] Successfully subscribed session ${sessionId} to channel: ${channel}. Total channels: ${session.channels.size}`);
+        return true;
+    } catch (error) {
+        console.error(`❌ [BACKEND-SSE-DEBUG] Failed to subscribe session ${sessionId} to channel: ${channel}`, error);
+        return false;
+    }
 }
 
 // Unsubscribe from channel
