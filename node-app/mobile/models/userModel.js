@@ -97,6 +97,63 @@ async function handleMobileLogin(email, firstName, lastName) {
     }
 }
 
+// 🆕 NEW FUNCTION FOR MOBILE: Activate EXISTING users only (no account creation)
+async function activateExistingUser(email, firstName, lastName) {
+    const connection = await pool.getConnection();
+    try {
+        // First check if user exists
+        const [userCheck] = await connection.query('SELECT user_id, status FROM tbl_user WHERE email = ?', [email]);
+        
+        if (!userCheck || userCheck.length === 0) {
+            console.log('📱 activateExistingUser: User not found:', email);
+            return null; // User doesn't exist
+        }
+        
+        const user = userCheck[0];
+        
+        // Only activate if user is pending
+        if (user.status === 'Pending') {
+            console.log('📱 activateExistingUser: Activating pending user:', email);
+            
+            // Update user status and names
+            const [updateResult] = await connection.query(
+                'UPDATE tbl_user SET f_name = ?, l_name = ?, status = "Active", updated_at = CURRENT_TIMESTAMP WHERE email = ?',
+                [firstName, lastName, email]
+            );
+            
+            if (updateResult.affectedRows > 0) {
+                console.log('📱 activateExistingUser: User activated successfully:', email);
+                
+                // Get user permissions after activation
+                const [permissionRows] = await connection.query('CALL GetUserPermissions(?)', [email]);
+                return permissionRows[0];
+            } else {
+                console.log('📱 activateExistingUser: Update failed for:', email);
+                return null;
+            }
+        } else {
+            console.log('📱 activateExistingUser: User not pending, current status:', user.status);
+            
+            // For active users, just update names if different and get permissions
+            if (firstName && lastName) {
+                await connection.query(
+                    'UPDATE tbl_user SET f_name = ?, l_name = ?, updated_at = CURRENT_TIMESTAMP WHERE email = ? AND (f_name != ? OR l_name != ?)',
+                    [firstName, lastName, email, firstName, lastName]
+                );
+            }
+            
+            // Get user permissions
+            const [permissionRows] = await connection.query('CALL GetUserPermissions(?)', [email]);
+            return permissionRows[0];
+        }
+    } catch (error) {
+        console.error('📱 Error activating existing user:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
 module.exports = { 
     getUser, 
     generateToken, 
@@ -104,5 +161,7 @@ module.exports = {
     getUserByEmail, 
     createPendingMobileUser, 
     updateUserStatus,
-    handleMobileLogin // 🆕 NEW EXPORT
+    handleMobileLogin, // 🆕 OLD EXPORT (still available for compatibility)
+    activateExistingUser // 🆕 NEW EXPORT (preferred for existing-user-only logic)
 };
+

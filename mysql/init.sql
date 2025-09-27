@@ -18651,7 +18651,7 @@ BEGIN
     
     -- Check if payment already exists for this term
     IF EXISTS (
-        SELECT 1 FROM tbl_membership_term_payment 
+        SELECT 1 FROM tbl_term_payments 
         WHERE user_id = p_user_id 
         AND organization_id = p_organization_id 
         AND term_id = p_term_id
@@ -18750,14 +18750,16 @@ BEGIN
     
     -- Get payment details
     SELECT 
-        mtp.user_id, mtp.organization_id, mtp.org_version_id, mtp.payment_amount,
+        tp.user_id, tp.organization_id, tp.organization_version_id,
         CONCAT(u.f_name, ' ', u.l_name) as payer_name,
-        o.name as org_name
-    INTO v_user_id, v_organization_id, v_org_version_id, v_payment_amount, v_payer_name, v_org_name
-    FROM tbl_membership_term_payment mtp
-    JOIN tbl_user u ON mtp.user_id = u.user_id
-    JOIN tbl_organization o ON mtp.organization_id = o.organization_id
-    WHERE mtp.payment_id = p_payment_id;
+        o.name as org_name,
+        t.amount as payment_amount
+    INTO v_user_id, v_organization_id, v_org_version_id, v_payer_name, v_org_name, v_payment_amount
+    FROM tbl_term_payments tp
+    JOIN tbl_user u ON tp.user_id = u.user_id
+    JOIN tbl_organization o ON tp.organization_id = o.organization_id
+    JOIN tbl_transaction t ON tp.transaction_id = t.transaction_id
+    WHERE tp.payment_id = p_payment_id;
     
     -- Get required IDs for transaction
     SELECT transaction_type_id INTO v_transaction_type_id 
@@ -18799,14 +18801,12 @@ BEGIN
     VALUES (v_transaction_id, v_organization_id, v_cycle_number);
     
     -- Update term payment record
-    UPDATE tbl_membership_term_payment 
+    UPDATE tbl_term_payments 
     SET 
         payment_status = CASE WHEN p_receipt_image IS NOT NULL THEN 'Pending' ELSE 'Paid' END,
-        payment_method = p_payment_method,
-        transaction_reference = COALESCE(p_transaction_reference, v_receipt_no),
-        payment_date = CURRENT_TIMESTAMP,
-        transaction_id = v_transaction_id,
-        receipt_url = p_receipt_image
+        verified_at = CASE WHEN p_receipt_image IS NULL THEN CURRENT_TIMESTAMP ELSE verified_at END,
+        notes = COALESCE(p_transaction_reference, notes),
+        updated_at = CURRENT_TIMESTAMP
     WHERE payment_id = p_payment_id;
     
     -- Return transaction details
@@ -19218,20 +19218,21 @@ BEGIN
 
     -- Get payment details
     SELECT 
-        mtp.user_id, 
-        mtp.organization_id, 
-        mtp.org_version_id, 
-        mtp.payment_amount,
-        CONCAT(u.first_name, ' ', u.last_name) as payer_name
+        tp.user_id, 
+        tp.organization_id, 
+        tp.organization_version_id, 
+        t.amount as payment_amount,
+        CONCAT(u.f_name, ' ', u.l_name) as payer_name
     INTO 
         v_user_id, 
         v_organization_id, 
         v_org_version_id, 
         v_payment_amount,
         v_payer_name
-    FROM tbl_membership_term_payment mtp
-    JOIN tbl_user u ON mtp.user_id = u.user_id
-    WHERE mtp.payment_id = p_payment_id;
+    FROM tbl_term_payments tp
+    JOIN tbl_user u ON tp.user_id = u.user_id
+    JOIN tbl_transaction t ON tp.transaction_id = t.transaction_id
+    WHERE tp.payment_id = p_payment_id;
 
     -- Get current renewal cycle for the organization
     SELECT cycle_number INTO v_cycle_number
@@ -19299,13 +19300,12 @@ BEGIN
     VALUES (v_transaction_id, v_organization_id, COALESCE(v_cycle_number, 1));
 
     -- Update term payment record with transaction details
-    UPDATE tbl_membership_term_payment 
+    UPDATE tbl_term_payments 
     SET 
         payment_status = 'Paid',
-        payment_method = p_payment_method,
-        transaction_reference = COALESCE(p_transaction_reference, v_receipt_no),
-        payment_date = CURRENT_TIMESTAMP,
-        transaction_id = v_transaction_id
+        verified_at = CURRENT_TIMESTAMP,
+        notes = COALESCE(p_transaction_reference, notes),
+        updated_at = CURRENT_TIMESTAMP
     WHERE payment_id = p_payment_id;
     
     -- Log the payment history
@@ -19354,30 +19354,27 @@ BEGIN
     AND org_version_id = p_org_version_id
     AND term_id = p_term_id;
     
-    -- Create payments for all active members
-    INSERT INTO tbl_membership_term_payment (
-        application_id, term_id, organization_id, org_version_id,
-        user_id, payment_amount, due_date
-    )
+    -- Create payments for all active members (simplified structure)
+    -- Note: In simplified structure, payments are only created when transaction exists
+    -- This procedure just returns active members who need to create payments
+    
     SELECT 
-        ma.application_id,
-        p_term_id,
-        p_organization_id,
-        p_org_version_id,
-        ma.user_id,
-        v_payment_amount,
-        COALESCE(otc.due_date, at.end_date)
-    FROM tbl_membership_application ma
-    JOIN tbl_academic_term at ON at.term_id = p_term_id
-    LEFT JOIN tbl_organization_term_config otc ON otc.organization_id = p_organization_id 
-        AND otc.org_version_id = p_org_version_id
-        AND otc.term_id = p_term_id
-    WHERE ma.organization_id = p_organization_id
-    AND ma.status = 'Approved'
+        om.user_id,
+        p_organization_id as organization_id,
+        om.org_version_id,
+        p_term_id as term_id,
+        CONCAT(u.f_name, ' ', u.l_name) as member_name,
+        u.email as member_email,
+        'Payment needed - Transaction must be created first' as status
+    FROM tbl_organization_member om
+    JOIN tbl_user u ON om.user_id = u.user_id
+    WHERE om.organization_id = p_organization_id
+    AND om.membership_status = 'Active'
     AND NOT EXISTS (
-        SELECT 1 FROM tbl_membership_term_payment mtp 
-        WHERE mtp.application_id = ma.application_id 
-        AND mtp.term_id = p_term_id
+        SELECT 1 FROM tbl_term_payments tp 
+        WHERE tp.user_id = om.user_id 
+        AND tp.organization_id = p_organization_id
+        AND tp.term_id = p_term_id
     );
 END $$
 DELIMITER ;
@@ -19391,16 +19388,17 @@ CREATE DEFINER='admin'@'%' PROCEDURE GetTermPaymentAnalytics(
 BEGIN
     SELECT 
         COUNT(*) as total_members,
-        SUM(CASE WHEN payment_status = 'Paid' THEN 1 ELSE 0 END) as paid_count,
-        SUM(CASE WHEN payment_status = 'Pending' THEN 1 ELSE 0 END) as pending_count,
-        SUM(CASE WHEN payment_status = 'Overdue' THEN 1 ELSE 0 END) as overdue_count,
-        SUM(payment_amount) as total_expected,
-        SUM(CASE WHEN payment_status = 'Paid' THEN payment_amount ELSE 0 END) as total_collected,
-        ROUND(SUM(CASE WHEN payment_status = 'Paid' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) as payment_rate,
-        AVG(DATEDIFF(payment_date, created_at)) as avg_payment_days
-    FROM tbl_membership_term_payment
-    WHERE organization_id = p_organization_id
-    AND term_id = p_term_id;
+        SUM(CASE WHEN tp.payment_status = 'Paid' THEN 1 ELSE 0 END) as paid_count,
+        SUM(CASE WHEN tp.payment_status = 'Pending' THEN 1 ELSE 0 END) as pending_count,
+        SUM(CASE WHEN tp.payment_status = 'Rejected' THEN 1 ELSE 0 END) as rejected_count,
+        SUM(t.amount) as total_expected,
+        SUM(CASE WHEN tp.payment_status = 'Paid' THEN t.amount ELSE 0 END) as total_collected,
+        ROUND(SUM(CASE WHEN tp.payment_status = 'Paid' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) as payment_rate,
+        AVG(DATEDIFF(tp.verified_at, tp.created_at)) as avg_payment_days
+    FROM tbl_term_payments tp
+    JOIN tbl_transaction t ON tp.transaction_id = t.transaction_id
+    WHERE tp.organization_id = p_organization_id
+    AND tp.term_id = p_term_id;
 END $$
 DELIMITER ;
 

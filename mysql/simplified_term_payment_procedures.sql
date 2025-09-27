@@ -31,29 +31,36 @@ CREATE DEFINER='admin'@'%' PROCEDURE GetUserTermPayments(
 )
 BEGIN
     SELECT 
-        mtp.payment_id,
-        mtp.organization_id,
-        mtp.user_id,
-        mtp.term_id,
-        mtp.amount_due,
-        mtp.payment_status,
-        mtp.due_date,
-        mtp.paid_date,
-        mtp.created_at,
-        mtp.updated_at,
+        tp.payment_id,
+        tp.organization_id,
+        tp.organization_version_id,
+        tp.user_id,
+        tp.term_id,
+        tp.transaction_id,
+        tp.payment_status,
+        tp.verified_by,
+        tp.verified_at,
+        tp.notes,
+        tp.created_at,
+        tp.updated_at,
         at.term_name,
         at.academic_year,
         at.start_date,
         at.end_date,
         o.name as organization_name,
-        o.membership_fee_amount,
-        o.membership_fee_type
-    FROM tbl_membership_term_payment mtp
-    JOIN tbl_academic_term at ON mtp.term_id = at.term_id
-    JOIN tbl_organization o ON mtp.organization_id = o.organization_id
-    WHERE mtp.user_id = p_user_id 
-    AND mtp.organization_id = p_organization_id
-    ORDER BY mtp.created_at DESC;
+        -- Get transaction details for payment information
+        t.amount,
+        t.description as transaction_description,
+        t.transaction_date,
+        t.payment_method,
+        t.status as transaction_status
+    FROM tbl_term_payments tp
+    JOIN tbl_academic_term at ON tp.term_id = at.term_id
+    JOIN tbl_organization o ON tp.organization_id = o.organization_id
+    JOIN tbl_transaction t ON tp.transaction_id = t.transaction_id
+    WHERE tp.user_id = p_user_id 
+        AND tp.organization_id = p_organization_id
+    ORDER BY at.start_date DESC;
 END$$
 
 -- 3. Create term payment with transaction
@@ -61,16 +68,11 @@ DROP PROCEDURE IF EXISTS CreateTermPaymentWithTransaction$$
 CREATE DEFINER='admin'@'%' PROCEDURE CreateTermPaymentWithTransaction(
     IN p_user_id VARCHAR(200),
     IN p_organization_id INT,
+    IN p_organization_version_id INT,
     IN p_term_id INT,
-    IN p_receipt_path VARCHAR(500)
+    IN p_transaction_id INT
 )
 BEGIN
-    DECLARE v_payment_id INT;
-    DECLARE v_transaction_id INT;
-    DECLARE v_receipt_no VARCHAR(20);
-    DECLARE v_amount DECIMAL(10,2);
-    DECLARE v_term_name VARCHAR(50);
-    DECLARE v_due_date DATE;
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
         ROLLBACK;
@@ -79,36 +81,52 @@ BEGIN
 
     START TRANSACTION;
 
-    -- Get organization fee amount
-    SELECT membership_fee_amount INTO v_amount 
-    FROM tbl_organization 
-    WHERE organization_id = p_organization_id;
+    -- Check if payment already exists for this user, org, version and term
+    IF EXISTS (
+        SELECT 1 FROM tbl_term_payments 
+        WHERE user_id = p_user_id 
+            AND organization_id = p_organization_id 
+            AND organization_version_id = p_organization_version_id
+            AND term_id = p_term_id
+    ) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Term payment already exists for this user and term';
+    END IF;
 
-    -- Get term details
-    SELECT term_name, end_date INTO v_term_name, v_due_date
-    FROM tbl_academic_term 
-    WHERE term_id = p_term_id;
-
-    -- Create payment record
-    INSERT INTO tbl_membership_term_payment (
-        organization_id,
+    -- Create payment record linking to existing transaction
+    INSERT INTO tbl_term_payments (
         user_id,
+        organization_id,
+        organization_version_id,
         term_id,
-        amount_due,
+        transaction_id,
         payment_status,
-        due_date,
         created_at
     ) VALUES (
-        p_organization_id,
         p_user_id,
+        p_organization_id,
+        p_organization_version_id,
         p_term_id,
-        v_amount,
+        p_transaction_id,
         'Pending',
-        v_due_date,
         NOW()
     );
 
-    SET v_payment_id = LAST_INSERT_ID();
+    COMMIT;
+
+    -- Return the new payment record
+    SELECT 
+        tp.*,
+        at.term_name,
+        at.academic_year,
+        o.name as organization_name,
+        t.amount,
+        t.description as transaction_description
+    FROM tbl_term_payments tp
+    JOIN tbl_academic_term at ON tp.term_id = at.term_id
+    JOIN tbl_organization o ON tp.organization_id = o.organization_id
+    JOIN tbl_transaction t ON tp.transaction_id = t.transaction_id
+    WHERE tp.payment_id = LAST_INSERT_ID();
+END$$
 
     -- Generate receipt number
     SET v_receipt_no = CONCAT('PAY', LPAD(v_payment_id, 6, '0'));
