@@ -99,16 +99,20 @@ async function handleSSEConnection(req, res) {
 // Subscribe session to a channel
 function subscribeToChannel(sessionId, channel) {
     console.log(`🔍 [BACKEND-SSE-DEBUG] Attempting to subscribe session ${sessionId} to channel: ${channel}`);
+    console.log(`🔍 [BACKEND-SSE-DEBUG] Current sessions:`, Array.from(sessionSubscriptions.keys()));
     
     const session = sessionSubscriptions.get(sessionId);
     if (!session) {
         console.log(`❌ [BACKEND-SSE-DEBUG] No session found for ${sessionId}`);
+        console.log(`🔍 [BACKEND-SSE-DEBUG] Available sessions:`, Array.from(sessionSubscriptions.keys()));
         return false;
     }
     
+    console.log(`✅ [BACKEND-SSE-DEBUG] Session ${sessionId} found, current channels:`, Array.from(session.channels));
+    
     if (session.channels.has(channel)) {
         console.log(`⚠️ [BACKEND-SSE-DEBUG] Session ${sessionId} already subscribed to channel: ${channel}`);
-        return false;
+        return true; // Changed from false to true - already subscribed should be success
     }
     
     // Debug organization channels specifically
@@ -143,11 +147,16 @@ function generateSessionId() {
 }
 
 function cleanupSession(sessionId) {
+    console.log(`🧹 [BACKEND-SSE-DEBUG] Cleaning up session: ${sessionId}`);
     const session = sessionSubscriptions.get(sessionId);
     if (session) {
+        console.log(`🧹 [BACKEND-SSE-DEBUG] Session ${sessionId} had ${session.channels.size} channels subscribed`);
         session.subscriber.unsubscribe();
         session.subscriber.quit();
         sessionSubscriptions.delete(sessionId);
+        console.log(`🧹 [BACKEND-SSE-DEBUG] Session ${sessionId} cleaned up successfully`);
+    } else {
+        console.log(`⚠️ [BACKEND-SSE-DEBUG] Attempted to cleanup non-existent session: ${sessionId}`);
     }
 }
 

@@ -594,6 +594,14 @@ async function approveApplication(req, res) {
               providedOrgId: organization_id
             }
           });
+
+          // 🆕 Add immediate debug logging before delay
+          console.log('🔄 [RT-DEBUG] About to call notifyOrganizationApproved with:', {
+            orgId,
+            organizationName,
+            memberEmails,
+            functionExists: typeof notifyOrganizationApproved === 'function'
+          });
           
           // 🕒 Enhanced delay with better error handling and logging
           setTimeout(async () => {
@@ -619,6 +627,7 @@ async function approveApplication(req, res) {
               };
               
               console.log('🔍 [RT-DEBUG] Complete organization data for notification:', completeOrgData);
+              console.log('🚀 [RT-DEBUG] Calling notifyOrganizationApproved NOW!');
               
               const notificationResult = await notifyOrganizationApproved(completeOrgData, memberEmails);
               console.log('✅ [RT-DEBUG] Organization approval notifications sent successfully:', notificationResult);

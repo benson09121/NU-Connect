@@ -22,96 +22,100 @@ async function login(req, res) {
             return res.status(400).json({ message: 'Email is required' });
         }
         
-        // 🆕 MOBILE AUTO-ACTIVATION LOGIC - Check user status before login
-        console.log('📱 Checking user activation status before login...');
-        const userStatusBefore = await userActivationModel.getUserActivationStatus(email);
-        const wasActiveBefore = userStatusBefore?.status === 'Active';
-        const wasPendingBefore = userStatusBefore?.status === 'Pending';
+        // 🆕 MOBILE EXISTING-USER-ONLY LOGIC - Check if user exists first
+        console.log('📱 Checking if user exists before login...');
+        const existingUser = await userModel.getUserByEmail(email);
         
-        console.log('📱 User status before login:', {
-            email,
-            status: userStatusBefore?.status,
-            wasActiveBefore,
-            wasPendingBefore
-        });
-        
-        // 🆕 ENHANCED: Handle login with potential status transition using stored procedure
-        // Get names from various sources for the HandleLogin procedure
-        let firstName = 'User';  // Default fallback
-        let lastName = 'Student'; // Default fallback
-        
-        // Try to get names from request body (if mobile app sends them)
-        if (req.body.first_name || req.body.f_name) {
-            firstName = req.body.first_name || req.body.f_name;
-        }
-        if (req.body.last_name || req.body.l_name) {
-            lastName = req.body.last_name || req.body.l_name;
+        if (!existingUser) {
+            console.log('📱 Login failed - user does not exist:', email);
+            return res.status(401).json({ 
+                message: 'User not found. Please register first or contact support.',
+                error_code: 'USER_NOT_FOUND'
+            });
         }
         
-        // If we have existing user data, use those names if request doesn't provide them
-        if (userStatusBefore) {
-            firstName = req.body.first_name || req.body.f_name || userStatusBefore.f_name || firstName;
-            lastName = req.body.last_name || req.body.l_name || userStatusBefore.l_name || lastName;
+        console.log('📱 User exists with status:', existingUser.status);
+        
+        // Only allow login for Active or Pending users
+        if (existingUser.status === 'Suspended') {
+            console.log('📱 Login failed - user is suspended:', email);
+            return res.status(401).json({ 
+                message: 'Account is suspended. Please contact support.',
+                error_code: 'ACCOUNT_SUSPENDED'
+            });
         }
         
-        console.log('📱 Using names for login/activation:', { email, firstName, lastName });
-        
-        // Use the HandleLogin stored procedure (same as web) which handles Pending → Active automatically
-        console.log('📱 Calling HandleLogin stored procedure...');
-        const loginResult = await userModel.handleMobileLogin(email, firstName, lastName);
-        
-        if (!loginResult || loginResult.length === 0) {
-            return res.status(401).json({ message: 'Login failed - invalid credentials' });
-        }
-        
-        // Check if user was activated during this login
         let userActivated = false;
-        if (wasPendingBefore && !wasActiveBefore) {
-            // Check current status after HandleLogin
-            const userStatusAfter = await userActivationModel.getUserActivationStatus(email);
-            if (userStatusAfter?.status === 'Active') {
-                userActivated = true;
-                console.log(`🎉 Mobile user ${email} activated on first login!`);
-                
-                // Log the activation event
-                const userInfo = await userModel.getUserByEmail(email);
-                if (userInfo?.user_id) {
-                    await userActivationModel.logUserActivation(
-                        userInfo.user_id,
-                        email,
-                        'mobile_first_login'
-                    );
-                }
-                
-                // 🆕 BROADCAST REAL-TIME UPDATES FOR MOBILE STATUS CHANGE
-                try {
-                    // Check if user is a student (mobile users are typically students)
-                    const isStudent = userStatusAfter?.role_name?.toLowerCase() === 'student';
-                    
-                    // Update accounts list for non-students only
-                    if (!isStudent) {
-                        const allAccounts = await accountModel.getAccounts();
-                        publishToChannel('accounts', {
-                            operation: 'SNAPSHOT',
-                            data: allAccounts,
-                        });
-                        console.log(`📡 [MOBILE] Broadcasted accounts update for non-student activation: ${email}`);
-                    } else {
-                        console.log(`👤 [MOBILE] Student ${email} activated - not included in accounts broadcast`);
-                    }
-                    
-                    // Always update pending applications list
-                    const fullPending = await accountModel.getAllPendingUsersAndApplications();
-                    publishToChannel('user-applications', {
-                        operation: 'SNAPSHOT',
-                        data: fullPending,
-                    });
-                    console.log(`📡 [MOBILE] Broadcasted pending applications update after activation: ${email}`);
-                } catch (broadcastError) {
-                    console.error('📱 Failed to broadcast mobile status change updates:', broadcastError);
-                    // Don't fail login if broadcast fails
-                }
+        
+        // If user is Pending, activate them with name updates
+        if (existingUser.status === 'Pending') {
+            console.log('📱 User is pending - proceeding with activation...');
+            
+            // Get names from various sources
+            let firstName = existingUser.f_name || 'User';  // Use existing name as fallback
+            let lastName = existingUser.l_name || 'Student'; // Use existing name as fallback
+            
+            // Try to get names from request body (if mobile app sends them)
+            if (req.body.first_name || req.body.f_name) {
+                firstName = req.body.first_name || req.body.f_name;
             }
+            if (req.body.last_name || req.body.l_name) {
+                lastName = req.body.last_name || req.body.l_name;
+            }
+            
+            console.log('📱 Using names for activation:', { email, firstName, lastName });
+            
+            // Use the mobile-specific activation function that only handles existing users
+            console.log('📱 Calling mobile user activation...');
+            const activationResult = await userModel.activateExistingUser(email, firstName, lastName);
+            
+            if (!activationResult) {
+                console.log('📱 Activation failed for:', email);
+                return res.status(500).json({ message: 'User activation failed' });
+            }
+            
+            userActivated = true;
+            console.log(`🎉 Mobile user ${email} activated on login!`);
+            
+            // Log the activation event
+            if (existingUser.user_id) {
+                await userActivationModel.logUserActivation(
+                    existingUser.user_id,
+                    email,
+                    'mobile_first_login'
+                );
+            }
+            
+            // 🆕 BROADCAST REAL-TIME UPDATES FOR MOBILE STATUS CHANGE
+            try {
+                // Check if user is a student (mobile users are typically students)
+                const isStudent = existingUser.role_name?.toLowerCase() === 'student';
+                
+                // Update accounts list for non-students only
+                if (!isStudent) {
+                    const allAccounts = await accountModel.getAccounts();
+                    publishToChannel('accounts', {
+                        operation: 'SNAPSHOT',
+                        data: allAccounts,
+                    });
+                    console.log(`📡 [MOBILE] Broadcasted accounts update for non-student activation: ${email}`);
+                } else {
+                    console.log(`👤 [MOBILE] Student ${email} activated - not included in accounts broadcast`);
+                }
+                
+                // Always update pending applications list
+                const fullPending = await accountModel.getAllPendingUsersAndApplications();
+                publishToChannel('user-applications', {
+                    operation: 'SNAPSHOT',
+                    data: fullPending,
+                });
+                console.log(`📡 [MOBILE] Broadcasted pending applications update after activation: ${email}`);
+            } catch (broadcastError) {
+                console.error('📱 Failed to broadcast mobile status change updates:', broadcastError);
+                // Don't fail login if broadcast fails
+            }
+        } else if (existingUser.status === 'Active') {
+            console.log('📱 User is already active - proceeding with normal login...');
         }
         
         console.log('📱 Generating JWT token...');
@@ -335,3 +339,4 @@ async function getAllPrograms(req, res) {
 
 
 module.exports = { login, register, getAllPrograms };
+    
