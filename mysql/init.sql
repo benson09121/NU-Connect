@@ -3368,7 +3368,8 @@ BEGIN
                     SELECT o.name, o.logo, o.status, o.organization_id, o.current_org_version_id, rc.cycle_number,
                         'Adviser' AS position
                     FROM tbl_organization o
-                    JOIN tbl_renewal_cycle rc ON o.organization_id = rc.organization_id
+                    JOIN tbl_renewal_cycle rc ON o.organization_id = rc.organization_id 
+                        AND rc.org_version_id = o.current_org_version_id
                     WHERE o.adviser_id = u.user_id
 
                     UNION
@@ -3377,10 +3378,11 @@ BEGIN
                     SELECT o.name, o.logo, o.status, o.organization_id, o.current_org_version_id, rc.cycle_number,
                         'Executive' AS position
                     FROM tbl_organization_members om
+                    JOIN tbl_organization o ON om.organization_id = o.organization_id
                     JOIN tbl_renewal_cycle rc ON om.organization_id = rc.organization_id 
                         AND om.cycle_number = rc.cycle_number
-                    JOIN tbl_organization o ON om.organization_id = o.organization_id
-                    WHERE om.user_id = u.user_id AND om.member_type = 'Executive'
+                        AND rc.org_version_id = o.current_org_version_id
+                    WHERE om.user_id = u.user_id AND om.member_type = 'Executive' AND om.status = 'Active'
 
                     UNION
 
@@ -3388,10 +3390,11 @@ BEGIN
                     SELECT o.name, o.logo, o.status, o.organization_id, o.current_org_version_id, rc.cycle_number,
                         'Committee' AS position
                     FROM tbl_organization_members om
+                    JOIN tbl_organization o ON om.organization_id = o.organization_id
                     JOIN tbl_renewal_cycle rc ON om.organization_id = rc.organization_id 
                         AND om.cycle_number = rc.cycle_number
-                    JOIN tbl_organization o ON om.organization_id = o.organization_id
-                    WHERE om.user_id = u.user_id AND om.member_type = 'Committee'
+                        AND rc.org_version_id = o.current_org_version_id
+                    WHERE om.user_id = u.user_id AND om.member_type = 'Committee' AND om.status = 'Active'
 
                     UNION
 
@@ -3399,10 +3402,24 @@ BEGIN
                     SELECT o.name, o.logo, o.status, o.organization_id, o.current_org_version_id, rc.cycle_number,
                         'Member' AS position
                     FROM tbl_organization_members om
+                    JOIN tbl_organization o ON om.organization_id = o.organization_id
                     JOIN tbl_renewal_cycle rc ON om.organization_id = rc.organization_id 
                         AND om.cycle_number = rc.cycle_number
-                    JOIN tbl_organization o ON om.organization_id = o.organization_id
-                    WHERE om.user_id = u.user_id AND om.member_type = 'Member'
+                        AND rc.org_version_id = o.current_org_version_id
+                    WHERE om.user_id = u.user_id AND om.member_type = 'Member' AND om.status = 'Active'
+
+                    UNION
+
+                    -- Applicant of approved applications (for students who created org applications but weren't added as members)
+                    SELECT o.name, o.logo, o.status, o.organization_id, o.current_org_version_id, rc.cycle_number,
+                        'Applicant' AS position
+                    FROM tbl_application a
+                    JOIN tbl_organization o ON a.organization_id = o.organization_id
+                    JOIN tbl_renewal_cycle rc ON o.organization_id = rc.organization_id 
+                        AND rc.org_version_id = o.current_org_version_id
+                    WHERE a.applicant_user_id = u.user_id 
+                      AND a.status = 'Approved'
+                      AND o.status = 'Approved'
                 ) AS orgs
             ),
             JSON_ARRAY()
@@ -6121,7 +6138,8 @@ BEGIN
                     'status', 'Approved',
                     'is_recruiting', v_is_recruiting,
                     'is_open_to_all_courses', v_is_open_to_all_courses,
-                    'effective_cycle', v_effective_cycle_number
+                    'effective_cycle', v_effective_cycle_number,
+                    'current_org_version_id', v_org_version_id
                 )
             ELSE NULL END,
         'other', JSON_OBJECT(
@@ -19848,21 +19866,795 @@ END$$
 
 DELIMITER ;
 
--- =====================================
+DELIMITER $$
+DROP PROCEDURE IF EXISTS populate_all_demo $$
 
--- Final verification message
-SELECT 'MOCK DATA GENERATION COMPLETED SUCCESSFULLY!' as Status,
-       COUNT(*) as Total_Users FROM tbl_user
-UNION ALL
-SELECT 'Total Organizations', COUNT(*) FROM tbl_organization
-UNION ALL
-SELECT 'Total Events', COUNT(*) FROM tbl_event
-UNION ALL
-SELECT 'Total Org Members', COUNT(*) FROM tbl_organization_members
-UNION ALL
-SELECT 'Total Term Payments', COUNT(*) FROM tbl_term_payments
-UNION ALL
-SELECT 'Total Transactions', COUNT(*) FROM tbl_transaction;
+CREATE PROCEDURE populate_all_demo()
+BEGIN
+DECLARE ov1 INT; DECLARE ov2 INT; DECLARE ov3 INT; DECLARE ov4 INT;
+DECLARE org1 INT; DECLARE org2 INT; DECLARE org3 INT; DECLARE org4 INT;
+DECLARE er1 INT; DECLARE er2 INT; DECLARE er3 INT; DECLARE er4 INT;
 
+DECLARE i INT; DECLARE n INT; DECLARE idx INT;
+DECLARE mon CHAR(2); DECLARE day CHAR(2); DECLARE dt DATE;
+DECLARE vt VARCHAR(20); DECLARE vv VARCHAR(100);
+DECLARE stuid VARCHAR(20); DECLARE prog INT;
 
+DECLARE cur_event_id INT; DECLARE cur_org_id INT; DECLARE cur_start_date DATE;
+DECLARE done INT DEFAULT 0;
 
+DECLARE perm_create_event INT; DECLARE perm_view_committee INT;
+DECLARE perm_update_event INT; DECLARE perm_delete_event INT;
+
+DECLARE txn_type_income INT; DECLARE txn_type_expense INT;
+DECLARE pay_cash INT; DECLARE pay_bank INT; DECLARE pay_gcash INT;
+DECLARE cat_membership INT; DECLARE cat_sponsorship INT; DECLARE cat_office INT; DECLARE cat_event_fee INT;
+
+DECLARE app_period_id INT;
+
+DECLARE ev_cur CURSOR FOR
+SELECT e.event_id, e.organization_id, e.start_date
+FROM tbl_event AS e;
+DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = 1;
+
+SET @sdao := '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0';
+
+/* 1) Core users */
+INSERT INTO tbl_user (user_id, f_name, l_name, email, program_id, role_id, profile_picture, status, created_at, updated_at, archived_at, archived_by, archived_reason)
+VALUES ('ADV001','Ava','Adviser','ava.adviser@nu-dasma.edu.ph', NULL, 2, NULL, 'Active', NOW(), NOW(), NULL, NULL, NULL)
+ON DUPLICATE KEY UPDATE user_id=user_id;
+
+INSERT INTO tbl_user (user_id, f_name, l_name, email, program_id, role_id, profile_picture, status, created_at, updated_at, archived_at, archived_by, archived_reason)
+VALUES ('ADV002','Ben','Adviser','ben.adviser@nu-dasma.edu.ph', NULL, 2, NULL, 'Active', NOW(), NOW(), NULL, NULL, NULL)
+ON DUPLICATE KEY UPDATE user_id=user_id;
+
+INSERT INTO tbl_user (user_id, f_name, l_name, email, program_id, role_id, profile_picture, status, created_at, updated_at, archived_at, archived_by, archived_reason)
+VALUES ('ADV003','Cara','Adviser','cara.adviser@nu-dasma.edu.ph', NULL, 2, NULL, 'Active', NOW(), NOW(), NULL, NULL, NULL)
+ON DUPLICATE KEY UPDATE user_id=user_id;
+
+INSERT INTO tbl_user (user_id, f_name, l_name, email, program_id, role_id, profile_picture, status, created_at, updated_at, archived_at, archived_by, archived_reason)
+VALUES ('ADV004','Drew','Adviser','drew.adviser@nu-dasma.edu.ph', NULL, 2, NULL, 'Active', NOW(), NOW(), NULL, NULL, NULL)
+ON DUPLICATE KEY UPDATE user_id=user_id;
+
+INSERT INTO tbl_user (user_id, f_name, l_name, email, program_id, role_id, profile_picture, status, created_at, updated_at, archived_at, archived_by, archived_reason)
+VALUES ('PRE001','Paolo','Perez','pre001@students.nu-dasma.edu.ph', 13, 1, NULL, 'Active', NOW(), NOW(), NULL, NULL, NULL)
+ON DUPLICATE KEY UPDATE user_id=user_id;
+
+INSERT INTO tbl_user (user_id, f_name, l_name, email, program_id, role_id, profile_picture, status, created_at, updated_at, archived_at, archived_by, archived_reason)
+VALUES ('PRE002','Bianca','Bautista','pre002@students.nu-dasma.edu.ph', 8, 1, NULL, 'Active', NOW(), NOW(), NULL, NULL, NULL)
+ON DUPLICATE KEY UPDATE user_id=user_id;
+
+INSERT INTO tbl_user (user_id, f_name, l_name, email, program_id, role_id, profile_picture, status, created_at, updated_at, archived_at, archived_by, archived_reason)
+VALUES ('PRE003','Miguel','Morales','pre003@students.nu-dasma.edu.ph', 1, 1, NULL, 'Active', NOW(), NOW(), NULL, NULL, NULL)
+ON DUPLICATE KEY UPDATE user_id=user_id;
+
+INSERT INTO tbl_user (user_id, f_name, l_name, email, program_id, role_id, profile_picture, status, created_at, updated_at, archived_at, archived_by, archived_reason)
+VALUES ('PRE004','Sofia','Santos','pre004@students.nu-dasma.edu.ph', 12, 1, NULL, 'Active', NOW(), NOW(), NULL, NULL, NULL)
+ON DUPLICATE KEY UPDATE user_id=user_id;
+
+/* 2) Organization versions */
+INSERT INTO tbl_organization_version (name, status, created_by)
+VALUES ('Tech Innovators Society AY2025', 'Approved', @sdao);
+SET ov1 = LAST_INSERT_ID();
+
+INSERT INTO tbl_organization_version (name, status, created_by)
+VALUES ('Business Leaders Guild AY2025', 'Approved', @sdao);
+SET ov2 = LAST_INSERT_ID();
+
+INSERT INTO tbl_organization_version (name, status, created_by)
+VALUES ('Arts & Culture Circle AY2025', 'Approved', @sdao);
+SET ov3 = LAST_INSERT_ID();
+
+INSERT INTO tbl_organization_version (name, status, created_by)
+VALUES ('Green Earth Advocates AY2025', 'Approved', @sdao);
+SET ov4 = LAST_INSERT_ID();
+
+/* 3) Organizations */
+INSERT INTO tbl_organization (adviser_id, current_org_version_id, name, description, base_program_id, logo, status, membership_fee_type, category, membership_fee_amount, is_recruiting, is_open_to_all_courses, archived_at, archived_by, archived_reason)
+VALUES ('ADV001', ov1, 'Tech Innovators Society', 'Organization focused on technology innovation and hackathons', 13, NULL, 'Approved', 'Free', 'Co-Curricular Organization', NULL, TRUE, TRUE, NULL, NULL, NULL);
+SET org1 = LAST_INSERT_ID();
+UPDATE tbl_organization_version SET organization_id=org1, name='Tech Innovators Society' WHERE org_version_id=ov1;
+
+INSERT INTO tbl_organization (adviser_id, current_org_version_id, name, description, base_program_id, logo, status, membership_fee_type, category, membership_fee_amount, is_recruiting, is_open_to_all_courses, archived_at, archived_by, archived_reason)
+VALUES ('ADV002', ov2, 'Business Leaders Guild', 'Leadership and business case org', 8, NULL, 'Approved', 'Free', 'Co-Curricular Organization', NULL, TRUE, TRUE, NULL, NULL, NULL);
+SET org2 = LAST_INSERT_ID();
+UPDATE tbl_organization_version SET organization_id=org2, name='Business Leaders Guild' WHERE org_version_id=ov2;
+
+INSERT INTO tbl_organization (adviser_id, current_org_version_id, name, description, base_program_id, logo, status, membership_fee_type, category, membership_fee_amount, is_recruiting, is_open_to_all_courses, archived_at, archived_by, archived_reason)
+VALUES ('ADV003', ov3, 'Arts & Culture Circle', 'Fosters arts, culture, and performances', 1, NULL, 'Approved', 'Free', 'Co-Curricular Organization', NULL, TRUE, TRUE, NULL, NULL, NULL);
+SET org3 = LAST_INSERT_ID();
+UPDATE tbl_organization_version SET organization_id=org3, name='Arts & Culture Circle' WHERE org_version_id=ov3;
+
+INSERT INTO tbl_organization (adviser_id, current_org_version_id, name, description, base_program_id, logo, status, membership_fee_type, category, membership_fee_amount, is_recruiting, is_open_to_all_courses, archived_at, archived_by, archived_reason)
+VALUES ('ADV004', ov4, 'Green Earth Advocates', 'Environmental sustainability and green initiatives', 11, NULL, 'Approved', 'Free', 'Co-Curricular Organization', NULL, TRUE, TRUE, NULL, NULL, NULL);
+SET org4 = LAST_INSERT_ID();
+UPDATE tbl_organization_version SET organization_id=org4, name='Green Earth Advocates' WHERE org_version_id=ov4;
+
+/* 4) Renewal cycles */
+INSERT INTO tbl_renewal_cycle (organization_id, cycle_number, start_date, president_id, org_version_id, created_at)
+VALUES (org1,1,'2025-06-01','PRE001',ov1,NOW()),
+(org2,1,'2025-06-01','PRE002',ov2,NOW()),
+(org3,1,'2025-06-01','PRE003',ov3,NOW()),
+(org4,1,'2025-06-01','PRE004',ov4,NOW());
+
+/* 5) Executive roles + memberships */
+INSERT INTO tbl_executive_role (organization_id, cycle_number, role_title, rank_id, created_at)
+VALUES (org1,1,'President',1,NOW());
+SET er1 = LAST_INSERT_ID();
+
+INSERT INTO tbl_executive_role (organization_id, cycle_number, role_title, rank_id, created_at)
+VALUES (org2,1,'President',1,NOW());
+SET er2 = LAST_INSERT_ID();
+
+INSERT INTO tbl_executive_role (organization_id, cycle_number, role_title, rank_id, created_at)
+VALUES (org3,1,'President',1,NOW());
+SET er3 = LAST_INSERT_ID();
+
+INSERT INTO tbl_executive_role (organization_id, cycle_number, role_title, rank_id, created_at)
+VALUES (org4,1,'President',1,NOW());
+SET er4 = LAST_INSERT_ID();
+
+INSERT INTO tbl_organization_members (organization_id, cycle_number, user_id, org_version_id, member_type, status, executive_role_id, joined_at)
+VALUES (org1,1,'PRE001',ov1,'Executive','Active',er1,NOW()),
+(org2,1,'PRE002',ov2,'Executive','Active',er2,NOW()),
+(org3,1,'PRE003',ov3,'Executive','Active',er3,NOW()),
+(org4,1,'PRE004',ov4,'Executive','Active',er4,NOW());
+
+/* 6) 600 student users */
+SET i = 1;
+WHILE i <= 600 DO
+SET stuid = CONCAT('STU', LPAD(i, 3, '0'));
+SET prog = 1 + FLOOR(RAND()*16);
+INSERT INTO tbl_user (user_id, f_name, l_name, email, program_id, role_id, profile_picture, status, created_at, updated_at, archived_at, archived_by, archived_reason)
+VALUES (stuid, CONCAT('Student', i), CONCAT('User', i), CONCAT('student', LPAD(i,3,'0'), '@students.nu-dasma.edu.ph'), prog, 1, NULL, 'Active', NOW(), NOW(), NULL, NULL, NULL)
+ON DUPLICATE KEY UPDATE user_id=user_id;
+SET i = i + 1;
+END WHILE;
+
+/* 7) Members: 150 per org */
+SET i = 1;
+WHILE i <= 150 DO
+SET stuid = CONCAT('STU', LPAD(i,3,'0'));
+IF NOT EXISTS (SELECT 1 FROM tbl_organization_members m WHERE m.organization_id=org1 AND m.cycle_number=1 AND m.user_id=stuid) THEN
+INSERT INTO tbl_organization_members (organization_id, cycle_number, user_id, org_version_id, member_type, status, executive_role_id, joined_at)
+VALUES (org1,1,stuid,ov1,'Member','Active',NULL,NOW());
+END IF;
+SET i = i + 1;
+END WHILE;
+
+SET i = 151;
+WHILE i <= 300 DO
+SET stuid = CONCAT('STU', LPAD(i,3,'0'));
+IF NOT EXISTS (SELECT 1 FROM tbl_organization_members m WHERE m.organization_id=org2 AND m.cycle_number=1 AND m.user_id=stuid) THEN
+INSERT INTO tbl_organization_members (organization_id, cycle_number, user_id, org_version_id, member_type, status, executive_role_id, joined_at)
+VALUES (org2,1,stuid,ov2,'Member','Active',NULL,NOW());
+END IF;
+SET i = i + 1;
+END WHILE;
+
+SET i = 301;
+WHILE i <= 450 DO
+SET stuid = CONCAT('STU', LPAD(i,3,'0'));
+IF NOT EXISTS (SELECT 1 FROM tbl_organization_members m WHERE m.organization_id=org3 AND m.cycle_number=1 AND m.user_id=stuid) THEN
+INSERT INTO tbl_organization_members (organization_id, cycle_number, user_id, org_version_id, member_type, status, executive_role_id, joined_at)
+VALUES (org3,1,stuid,ov3,'Member','Active',NULL,NOW());
+END IF;
+SET i = i + 1;
+END WHILE;
+
+SET i = 451;
+WHILE i <= 600 DO
+SET stuid = CONCAT('STU', LPAD(i,3,'0'));
+IF NOT EXISTS (SELECT 1 FROM tbl_organization_members m WHERE m.organization_id=org4 AND m.cycle_number=1 AND m.user_id=stuid) THEN
+INSERT INTO tbl_organization_members (organization_id, cycle_number, user_id, org_version_id, member_type, status, executive_role_id, joined_at)
+VALUES (org4,1,stuid,ov4,'Member','Active',NULL,NOW());
+END IF;
+SET i = i + 1;
+END WHILE;
+
+/* 8) Committees + roles + members */
+INSERT INTO tbl_committee (organization_id, cycle_number, name, description, created_at)
+VALUES (org1,1,'Technical Committee','Handles tech ops',NOW()),
+(org1,1,'Finance Committee','Handles finances',NOW()),
+(org1,1,'Marketing Committee','Handles promotions',NOW()),
+(org2,1,'Strategy Committee','Business strategy',NOW()),
+(org2,1,'Outreach Committee','Outreach and partners',NOW()),
+(org2,1,'Logistics Committee','Operations/logistics',NOW()),
+(org3,1,'Performance Committee','Arts performances',NOW()),
+(org3,1,'Curation Committee','Arts curation',NOW()),
+(org3,1,'Production Committee','Production and sets',NOW()),
+(org4,1,'Sustainability Committee','Green projects',NOW()),
+(org4,1,'Education Committee','Education and campaigns',NOW()),
+(org4,1,'Operations Committee','Operations',NOW());
+
+INSERT INTO tbl_committee_role (committee_id, role_name, created_at)
+SELECT c.committee_id, 'Committee Head', NOW() FROM tbl_committee c
+WHERE c.organization_id IN (org1,org2,org3,org4)
+ON DUPLICATE KEY UPDATE committee_role_id=committee_role_id;
+
+INSERT INTO tbl_committee_role (committee_id, role_name, created_at)
+SELECT c.committee_id, 'Committee Officer', NOW() FROM tbl_committee c
+WHERE c.organization_id IN (org1,org2,org3,org4)
+ON DUPLICATE KEY UPDATE committee_role_id=committee_role_id;
+
+SET i = 0;
+WHILE i < 12 DO
+SET @cid := (SELECT c2.committee_id FROM tbl_committee c2 ORDER BY c2.committee_id LIMIT i,1);
+SET @corg := (SELECT c2.organization_id FROM tbl_committee c2 WHERE c2.committee_id=@cid);
+SET @head_role := (SELECT cr.committee_role_id FROM tbl_committee_role cr WHERE cr.committee_id=@cid AND cr.role_name='Committee Head' LIMIT 1);
+SET @off_role := (SELECT cr.committee_role_id FROM tbl_committee_role cr WHERE cr.committee_id=@cid AND cr.role_name='Committee Officer' LIMIT 1);
+INSERT INTO tbl_committee_members (committee_id, user_id, committee_role_id, created_at)
+SELECT @cid, m.user_id, @head_role, NOW()
+FROM tbl_organization_members m
+WHERE m.organization_id=@corg AND m.member_type='Member'
+  AND NOT EXISTS (SELECT 1 FROM tbl_committee_members cm WHERE cm.user_id=m.user_id AND cm.committee_id=@cid)
+ORDER BY RAND() LIMIT 1;
+
+INSERT INTO tbl_committee_members (committee_id, user_id, committee_role_id, created_at)
+SELECT @cid, m.user_id, @off_role, NOW()
+FROM tbl_organization_members m
+WHERE m.organization_id=@corg AND m.member_type='Member'
+  AND NOT EXISTS (SELECT 1 FROM tbl_committee_members cm WHERE cm.user_id=m.user_id AND cm.committee_id=@cid)
+ORDER BY RAND() LIMIT 5;
+
+SET i = i + 1;
+END WHILE;
+
+SET perm_create_event = (SELECT p.permission_id FROM tbl_permission p WHERE p.permission_name='CREATE_EVENT' LIMIT 1);
+SET perm_view_committee = (SELECT p.permission_id FROM tbl_permission p WHERE p.permission_name='VIEW_COMMITTEE' LIMIT 1);
+SET perm_update_event = (SELECT p.permission_id FROM tbl_permission p WHERE p.permission_name='UPDATE_EVENT' LIMIT 1);
+SET perm_delete_event = (SELECT p.permission_id FROM tbl_permission p WHERE p.permission_name='DELETE_EVENT' LIMIT 1);
+
+INSERT INTO tbl_committee_role_permission (committee_role_id, permission_id, created_at)
+SELECT cr.committee_role_id, perm_view_committee, NOW() FROM tbl_committee_role cr
+WHERE cr.role_name IN ('Committee Head','Committee Officer');
+
+INSERT INTO tbl_committee_role_permission (committee_role_id, permission_id, created_at)
+SELECT cr.committee_role_id, perm_create_event, NOW() FROM tbl_committee_role cr
+WHERE cr.role_name='Committee Head';
+
+/* 9) Events (9/org) */
+-- Org1
+SET n = 1;
+WHILE n <= 9 DO
+IF n<=3 THEN SET mon='07'; ELSEIF n<=6 THEN SET mon='08'; ELSE SET mon='09'; END IF;
+SET idx = (n-1) MOD 3;
+IF idx=0 THEN SET day='05'; ELSEIF idx=1 THEN SET day='15'; ELSE SET day='25'; END IF;
+SET dt = STR_TO_DATE(CONCAT('2025-',mon,'-',day),'%Y-%m-%d');
+IF MOD(n,2)=0 THEN SET vt='Online'; SET vv='Zoom'; ELSE SET vt='Face to face'; SET vv='Auditorium A'; END IF;
+INSERT INTO tbl_event (organization_id, cycle_number, event_type, user_id, title, description, image, venue_type, venue, start_date, end_date, start_time, end_time, status, type, is_open_to, fee, capacity, created_at, certificate)
+VALUES (org1,1,'Organization','PRE001',CONCAT('TIS Event ',n),CONCAT('Tech Innovators Society activity #',n),NULL,vt,vv,dt,dt,'09:00:00','12:00:00','Approved','Free','Members only',NULL,200,NOW(),NULL);
+SET n = n + 1;
+END WHILE;
+
+-- Org2
+SET n = 1;
+WHILE n <= 9 DO
+IF n<=3 THEN SET mon='07'; ELSEIF n<=6 THEN SET mon='08'; ELSE SET mon='09'; END IF;
+SET idx = (n-1) MOD 3;
+IF idx=0 THEN SET day='06'; ELSEIF idx=1 THEN SET day='16'; ELSE SET day='26'; END IF;
+SET dt = STR_TO_DATE(CONCAT('2025-',mon,'-',day),'%Y-%m-%d');
+IF MOD(n,2)=0 THEN SET vt='Online'; SET vv='Google Meet'; ELSE SET vt='Face to face'; SET vv='Lecture Hall B'; END IF;
+INSERT INTO tbl_event (organization_id, cycle_number, event_type, user_id, title, description, image, venue_type, venue, start_date, end_date, start_time, end_time, status, type, is_open_to, fee, capacity, created_at, certificate)
+VALUES (org2,1,'Organization','PRE002',CONCAT('BLG Event ',n),CONCAT('Business Leaders Guild activity #',n),NULL,vt,vv,dt,dt,'13:00:00','16:00:00','Approved','Free','Members only',NULL,250,NOW(),NULL);
+SET n = n + 1;
+END WHILE;
+
+-- Org3
+SET n = 1;
+WHILE n <= 9 DO
+IF n<=3 THEN SET mon='07'; ELSEIF n<=6 THEN SET mon='08'; ELSE SET mon='09'; END IF;
+SET idx = (n-1) MOD 3;
+IF idx=0 THEN SET day='07'; ELSEIF idx=1 THEN SET day='17'; ELSE SET day='27'; END IF;
+SET dt = STR_TO_DATE(CONCAT('2025-',mon,'-',day),'%Y-%m-%d');
+IF MOD(n,2)=0 THEN SET vt='Online'; SET vv='Teams'; ELSE SET vt='Face to face'; SET vv='Black Box Theater'; END IF;
+INSERT INTO tbl_event (organization_id, cycle_number, event_type, user_id, title, description, image, venue_type, venue, start_date, end_date, start_time, end_time, status, type, is_open_to, fee, capacity, created_at, certificate)
+VALUES (org3,1,'Organization','PRE003',CONCAT('ACC Event ',n),CONCAT('Arts & Culture Circle activity #',n),NULL,vt,vv,dt,dt,'10:00:00','13:00:00','Approved','Free','Members only',NULL,180,NOW(),NULL);
+SET n = n + 1;
+END WHILE;
+
+-- Org4
+SET n = 1;
+WHILE n <= 9 DO
+IF n<=3 THEN SET mon='07'; ELSEIF n<=6 THEN SET mon='08'; ELSE SET mon='09'; END IF;
+SET idx = (n-1) MOD 3;
+IF idx=0 THEN SET day='08'; ELSEIF idx=1 THEN SET day='18'; ELSE SET day='28'; END IF;
+SET dt = STR_TO_DATE(CONCAT('2025-',mon,'-',day),'%Y-%m-%d');
+IF MOD(n,2)=0 THEN SET vt='Online'; SET vv='Zoom'; ELSE SET vt='Face to face'; SET vv='Open Grounds'; END IF;
+INSERT INTO tbl_event (organization_id, cycle_number, event_type, user_id, title, description, image, venue_type, venue, start_date, end_date, start_time, end_time, status, type, is_open_to, fee, capacity, created_at, certificate)
+VALUES (org4,1,'Organization','PRE004',CONCAT('GEA Event ',n),CONCAT('Green Earth Advocates activity #',n),NULL,vt,vv,dt,dt,'08:00:00','11:00:00','Approved','Free','Members only',NULL,220,NOW(),NULL);
+SET n = n + 1;
+END WHILE;
+
+/* 10) Collaborators (guarded to avoid dupes) */
+INSERT INTO tbl_event_collaborator (event_id, organization_id)
+SELECT e.event_id, org2
+FROM tbl_event AS e
+WHERE e.organization_id = org1
+AND NOT EXISTS (
+SELECT 1 FROM tbl_event_collaborator ec
+WHERE ec.event_id = e.event_id AND ec.organization_id = org2
+)
+ORDER BY e.event_id
+LIMIT 1;
+
+INSERT INTO tbl_event_collaborator (event_id, organization_id)
+SELECT e.event_id, org3
+FROM tbl_event AS e
+WHERE e.organization_id = org2
+AND NOT EXISTS (
+SELECT 1 FROM tbl_event_collaborator ec
+WHERE ec.event_id = e.event_id AND ec.organization_id = org3
+)
+ORDER BY e.event_id
+LIMIT 1;
+
+/* 11) Evaluation config & settings */
+INSERT INTO tbl_event_evaluation_config (event_id, group_id)
+SELECT e.event_id, g.group_id
+FROM tbl_event AS e
+JOIN tbl_evaluation_question_group AS g ON g.is_active = TRUE;
+
+INSERT INTO tbl_event_evaluation_settings (event_id, start_date, end_date, start_time, end_time, is_active)
+SELECT e.event_id, e.start_date, e.end_date, '08:00:00', '23:59:59', TRUE
+FROM tbl_event AS e
+LEFT JOIN tbl_event_evaluation_settings AS s ON s.event_id = e.event_id
+WHERE s.event_id IS NULL;
+
+/* 12) Evaluations: 30 random members per event */
+OPEN ev_cur;
+read_events: LOOP
+FETCH ev_cur INTO cur_event_id, cur_org_id, cur_start_date;
+IF done = 1 THEN LEAVE read_events; END IF;
+INSERT INTO tbl_evaluation (event_id, user_id, submitted_at, duration_seconds)
+SELECT cur_event_id, m.user_id, DATE_ADD(cur_start_date, INTERVAL 1 DAY), 120 + FLOOR(RAND()*300)
+FROM tbl_organization_members AS m
+WHERE m.organization_id = cur_org_id AND m.member_type='Member'
+ORDER BY RAND() LIMIT 30;
+END LOOP;
+CLOSE ev_cur;
+
+INSERT INTO tbl_evaluation_response (evaluation_id, question_id, response_value)
+SELECT ev.evaluation_id, q.question_id,
+CASE WHEN q.question_type='likert_4' THEN CAST(1 + FLOOR(RAND()*4) AS CHAR)
+ELSE CONCAT('Feedback for event ', ev.event_id, ' by ', ev.user_id) END
+FROM tbl_evaluation AS ev
+JOIN tbl_event_evaluation_config AS cfg ON cfg.event_id = ev.event_id
+JOIN tbl_evaluation_question AS q ON q.group_id = cfg.group_id;
+
+/* 13) Attendance (random) */
+INSERT INTO tbl_event_attendance (event_id, user_id, status, time_in, time_out, created_at, deleted_at)
+SELECT e.event_id, m.user_id,
+ELT(1+FLOOR(RAND()*4),'Registered','Evaluated','Attended','Rejected'),
+CASE WHEN RAND()>0.5 THEN CONCAT(e.start_date,' 09:05:00') ELSE NULL END,
+CASE WHEN RAND()>0.5 THEN CONCAT(e.end_date,' 12:05:00') ELSE NULL END,
+NOW(), NULL
+FROM tbl_event AS e
+JOIN tbl_organization_members AS m ON m.organization_id = e.organization_id AND m.member_type='Member'
+WHERE RAND()<0.05;
+
+/* 14) Certificates */
+INSERT INTO tbl_certificate_template (event_id, template_path, uploaded_by, created_at)
+SELECT e.event_id, CONCAT('templates/', e.event_id, '_template.pdf'), @sdao, NOW()
+FROM tbl_event AS e
+ORDER BY e.event_id LIMIT 4
+ON DUPLICATE KEY UPDATE template_path = VALUES(template_path);
+
+INSERT INTO tbl_event_certificate (event_id, user_id, template_id, certificate_path, verification_code, issued_at)
+SELECT a.event_id, a.user_id, t.template_id,
+CONCAT('certs/', a.event_id, '_', a.user_id, '.pdf'),
+UUID(), NOW()
+FROM tbl_event_attendance AS a
+JOIN tbl_certificate_template AS t ON t.event_id = a.event_id
+WHERE a.status='Attended' AND RAND()<0.5;
+
+/* 15) Project heads (sample) */
+INSERT INTO tbl_project_heads (organization_id, user_id, event_id, role_type, project_name, created_at)
+SELECT e.organization_id, 'PRE001', e.event_id, 'Executive', CONCAT('Project ', e.event_id), NOW()
+FROM tbl_event AS e WHERE e.organization_id = org1
+ORDER BY e.event_id LIMIT 2;
+
+/* 16) Application period */
+INSERT INTO tbl_application_period (start_date, end_date, start_time, end_time, is_active, created_by, created_at, updated_at)
+VALUES ('2025-06-01','2025-09-30','08:00:00','17:00:00', TRUE, @sdao, NOW(), NOW());
+SET app_period_id = LAST_INSERT_ID();
+
+/* 17) Applications (new + renewal) */
+INSERT INTO tbl_application (organization_id, cycle_number, org_version_id, submitted_org_name, submitted_org_logo, application_type, period_id, applicant_user_id, status, created_at, updated_at)
+VALUES (NULL,NULL,NULL,'Robotics Nexus',NULL,'new',app_period_id,'PRE001','Approved',NOW(),NOW()),
+(NULL,NULL,NULL,'Business Analytics Club',NULL,'new',app_period_id,'PRE002','Pending',NOW(),NOW());
+
+INSERT INTO tbl_application (organization_id, cycle_number, org_version_id, submitted_org_name, submitted_org_logo, application_type, period_id, applicant_user_id, status, created_at, updated_at)
+VALUES (org1,1,ov1,'Tech Innovators Society',NULL,'renewal',app_period_id,'PRE001','Approved',NOW(),NOW()),
+(org2,1,ov2,'Business Leaders Guild',NULL,'renewal',app_period_id,'PRE002','Approved',NOW(),NOW()),
+(org3,1,ov3,'Arts & Culture Circle',NULL,'renewal',app_period_id,'PRE003','Approved',NOW(),NOW()),
+(org4,1,ov4,'Green Earth Advocates',NULL,'renewal',app_period_id,'PRE004','Approved',NOW(),NOW());
+
+/* 18) Application executives (sample) */
+INSERT INTO tbl_application_executives (application_id, org_version_id, proposed_user_id, proposed_name, proposed_email, proposed_title, proposed_rank_id, created_at)
+SELECT a.application_id, ov1, NULL, 'Juan Dela Cruz', 'juan.dela.cruz@students.nu-dasma.edu.ph', 'Secretary', 4, NOW()
+FROM tbl_application AS a WHERE a.organization_id=org1 AND a.application_type='renewal' LIMIT 1;
+
+/* 19) Application requirements + submissions */
+INSERT INTO tbl_application_requirement (requirement_name, is_applicable_to, file_path, created_by, created_at, updated_at)
+VALUES ('Letter of Intent', 'new', NULL, @sdao, NOW(), NOW())
+ON DUPLICATE KEY UPDATE requirement_name = VALUES(requirement_name);
+
+INSERT INTO tbl_application_requirement (requirement_name, is_applicable_to, file_path, created_by, created_at, updated_at)
+VALUES ('Student Org Application Form', 'new', NULL, @sdao, NOW(), NOW())
+ON DUPLICATE KEY UPDATE requirement_name = VALUES(requirement_name);
+
+INSERT INTO tbl_application_requirement (requirement_name, is_applicable_to, file_path, created_by, created_at, updated_at)
+VALUES ('By Laws of the Organization', 'both', NULL, @sdao, NOW(), NOW())
+ON DUPLICATE KEY UPDATE requirement_name = VALUES(requirement_name);
+
+INSERT INTO tbl_organization_requirement_submission (application_id, requirement_id, cycle_number, organization_id, org_version_id, file_path, submitted_by, submitted_at, status, submitted_requirement_title, submitted_requirement_hash)
+SELECT a.application_id,
+r.requirement_id,
+1,
+a.organization_id,
+a.org_version_id,
+CONCAT('uploads/org/', a.application_id, '-', r.requirement_id, '.pdf'),
+@sdao,
+NOW(),
+'Approved',
+CONCAT('Req-', r.requirement_id),
+SHA2(CONCAT(a.application_id, '-', r.requirement_id), 256)
+FROM tbl_application AS a
+JOIN tbl_application_requirement AS r ON r.is_applicable_to IN ('renew','both')
+WHERE a.application_type='renewal';
+
+/* 20) Approval process + mapping */
+INSERT INTO tbl_approval_process (application_id, period_id, approver_id, approval_role_id, application_type, status, comment, step, timestamp)
+SELECT a.application_id, app_period_id, 'ADV001', (SELECT role_id FROM tbl_role WHERE role_name='Program Chair' LIMIT 1), a.application_type,
+IF(a.status='Approved','Approved','Pending'), 'Reviewed', 1, NOW()
+FROM tbl_application AS a;
+
+INSERT INTO tbl_approval_process (application_id, period_id, approver_id, approval_role_id, application_type, status, comment, step, timestamp)
+SELECT a.application_id, app_period_id, 'ADV004', (SELECT role_id FROM tbl_role WHERE role_name='Dean' LIMIT 1), a.application_type,
+IF(a.status='Approved','Approved','Pending'), 'Reviewed', 2, NOW()
+FROM tbl_application AS a;
+
+INSERT INTO tbl_approval_process (application_id, period_id, approver_id, approval_role_id, application_type, status, comment, step, timestamp)
+SELECT a.application_id, app_period_id, 'ADV003', (SELECT role_id FROM tbl_role WHERE role_name='Academic Director' LIMIT 1), a.application_type,
+IF(a.status='Approved','Approved','Pending'), 'Reviewed', 3, NOW()
+FROM tbl_application AS a;
+
+INSERT INTO tbl_approval_process (application_id, period_id, approver_id, approval_role_id, application_type, status, comment, step, timestamp)
+SELECT a.application_id, app_period_id, @sdao, (SELECT role_id FROM tbl_role WHERE role_name='SDAO' LIMIT 1), a.application_type,
+a.status, 'Final step', 4, NOW()
+FROM tbl_application AS a;
+
+INSERT INTO tbl_application_approval (application_id, approval_id)
+SELECT ap.application_id, ap.approval_id
+FROM tbl_approval_process AS ap;
+
+/* 21) Membership questions/apps/responses */
+INSERT INTO tbl_membership_question (organization_id, cycle_number, question_text, question_type, is_required)
+VALUES (org1,1,'Why do you want to join?', 'text', TRUE),
+(org1,1,'Preferred role?', 'text', FALSE),
+(org2,1,'What can you contribute?', 'text', TRUE),
+(org2,1,'Availability per week?', 'text', FALSE),
+(org3,1,'Your art interest?', 'text', TRUE),
+(org3,1,'Portfolio link?', 'text', FALSE),
+(org4,1,'Environmental advocacy?', 'text', TRUE),
+(org4,1,'Volunteer experience?', 'text', FALSE);
+
+INSERT INTO tbl_membership_application (organization_id, cycle_number, user_id, status, applied_at, reviewed_by, reviewed_at, remarks)
+SELECT org1,1,m.user_id,'Approved',NOW(),@sdao,NOW(),'Welcome to the org'
+FROM tbl_organization_members AS m
+WHERE m.organization_id=org1 AND m.member_type='Member'
+ORDER BY RAND() LIMIT 10;
+
+INSERT INTO tbl_membership_application (organization_id, cycle_number, user_id, status, applied_at, reviewed_by, reviewed_at, remarks)
+SELECT org2,1,m.user_id,'Approved',NOW(),@sdao,NOW(),'Welcome'
+FROM tbl_organization_members AS m
+WHERE m.organization_id=org2 AND m.member_type='Member'
+ORDER BY RAND() LIMIT 10;
+
+INSERT INTO tbl_membership_application (organization_id, cycle_number, user_id, status, applied_at, reviewed_by, reviewed_at, remarks)
+SELECT org3,1,m.user_id,'Approved',NOW(),@sdao,NOW(),'Welcome'
+FROM tbl_organization_members AS m
+WHERE m.organization_id=org3 AND m.member_type='Member'
+ORDER BY RAND() LIMIT 10;
+
+INSERT INTO tbl_membership_application (organization_id, cycle_number, user_id, status, applied_at, reviewed_by, reviewed_at, remarks)
+SELECT org4,1,m.user_id,'Approved',NOW(),@sdao,NOW(),'Welcome'
+FROM tbl_organization_members AS m
+WHERE m.organization_id=org4 AND m.member_type='Member'
+ORDER BY RAND() LIMIT 10;
+
+INSERT INTO tbl_membership_response (application_id, question_id, response_value)
+SELECT ma.application_id, mq.question_id, 'I want to grow and contribute.'
+FROM tbl_membership_application AS ma
+JOIN tbl_membership_question AS mq
+ON mq.organization_id=ma.organization_id AND mq.cycle_number=ma.cycle_number
+WHERE mq.question_type='text';
+
+/* 22) Event applications, approvals, requirements, submissions */
+INSERT INTO tbl_event_application (organization_id, cycle_number, proposed_event_id, applicant_user_id, status, created_at, updated_at)
+VALUES (org1,1,NULL,'PRE001','Approved',NOW(),NOW()),
+(org2,1,NULL,'PRE002','Pending',NOW(),NOW());
+
+INSERT INTO tbl_event_approval_process (event_application_id, approver_id, approval_role_id, status, comment, step_number, approved_at)
+SELECT ea.event_application_id, @sdao, (SELECT role_id FROM tbl_role WHERE role_name='SDAO' LIMIT 1),
+ea.status, 'Event application review', 1, IF(ea.status='Approved', NOW(), NULL)
+FROM tbl_event_application AS ea;
+
+INSERT INTO tbl_event_application_requirement (requirement_name, is_applicable_to, file_path, status, created_by, created_at, updated_at)
+VALUES ('Event Proposal', 'pre-event', NULL, 'active', @sdao, NOW(), NOW())
+ON DUPLICATE KEY UPDATE requirement_name=VALUES(requirement_name);
+
+INSERT INTO tbl_event_application_requirement (requirement_name, is_applicable_to, file_path, status, created_by, created_at, updated_at)
+VALUES ('Budget Plan', 'pre-event', NULL, 'active', @sdao, NOW(), NOW())
+ON DUPLICATE KEY UPDATE requirement_name=VALUES(requirement_name);
+
+INSERT INTO tbl_event_requirement_submissions (event_id, event_application_id, requirement_id, cycle_number, status, organization_id, file_path, submitted_by, submitted_at)
+SELECT e.event_id, ea.event_application_id, r.requirement_id, 1, 'Approved', e.organization_id,
+CONCAT('uploads/events/', e.event_id, '-', r.requirement_id, '.pdf'),
+@sdao, NOW()
+FROM tbl_event_application AS ea
+JOIN tbl_event AS e ON e.organization_id = ea.organization_id
+JOIN tbl_event_application_requirement AS r ON r.is_applicable_to='pre-event'
+WHERE ea.status='Approved'
+ORDER BY e.event_id LIMIT 4;
+
+/* 23) Course mappings (guarded) */
+INSERT INTO tbl_organization_course (organization_id, program_id)
+SELECT org1 AS organization_id, p.program_id
+FROM (SELECT program_id FROM tbl_program ORDER BY program_id LIMIT 4) AS p
+WHERE NOT EXISTS (
+SELECT 1 FROM tbl_organization_course oc
+WHERE oc.organization_id = org1 AND oc.program_id = p.program_id
+);
+
+INSERT INTO tbl_organization_course (organization_id, program_id)
+SELECT org2 AS organization_id, p.program_id
+FROM (SELECT program_id FROM tbl_program ORDER BY program_id LIMIT 4 OFFSET 4) AS p
+WHERE NOT EXISTS (
+SELECT 1 FROM tbl_organization_course oc
+WHERE oc.organization_id = org2 AND oc.program_id = p.program_id
+);
+
+INSERT INTO tbl_organization_course (organization_id, program_id)
+SELECT org3 AS organization_id, p.program_id
+FROM (SELECT program_id FROM tbl_program ORDER BY program_id LIMIT 4 OFFSET 8) AS p
+WHERE NOT EXISTS (
+SELECT 1 FROM tbl_organization_course oc
+WHERE oc.organization_id = org3 AND oc.program_id = p.program_id
+);
+
+INSERT INTO tbl_organization_course (organization_id, program_id)
+SELECT org4 AS organization_id, p.program_id
+FROM (SELECT program_id FROM tbl_program ORDER BY program_id LIMIT 4 OFFSET 12) AS p
+WHERE NOT EXISTS (
+SELECT 1 FROM tbl_organization_course oc
+WHERE oc.organization_id = org4 AND oc.program_id = p.program_id
+);
+
+INSERT INTO tbl_organization_version_course (org_version_id, program_id, created_at)
+SELECT ov1 AS org_version_id, p.program_id, NOW()
+FROM (SELECT program_id FROM tbl_program ORDER BY program_id LIMIT 4) AS p
+WHERE NOT EXISTS (
+SELECT 1 FROM tbl_organization_version_course ovc
+WHERE ovc.org_version_id = ov1 AND ovc.program_id = p.program_id
+);
+
+INSERT INTO tbl_organization_version_course (org_version_id, program_id, created_at)
+SELECT ov2 AS org_version_id, p.program_id, NOW()
+FROM (SELECT program_id FROM tbl_program ORDER BY program_id LIMIT 4 OFFSET 4) AS p
+WHERE NOT EXISTS (
+SELECT 1 FROM tbl_organization_version_course ovc
+WHERE ovc.org_version_id = ov2 AND ovc.program_id = p.program_id
+);
+
+INSERT INTO tbl_organization_version_course (org_version_id, program_id, created_at)
+SELECT ov3 AS org_version_id, p.program_id, NOW()
+FROM (SELECT program_id FROM tbl_program ORDER BY program_id LIMIT 4 OFFSET 8) AS p
+WHERE NOT EXISTS (
+SELECT 1 FROM tbl_organization_version_course ovc
+WHERE ovc.org_version_id = ov3 AND ovc.program_id = p.program_id
+);
+
+INSERT INTO tbl_organization_version_course (org_version_id, program_id, created_at)
+SELECT ov4 AS org_version_id, p.program_id, NOW()
+FROM (SELECT program_id FROM tbl_program ORDER BY program_id LIMIT 4 OFFSET 12) AS p
+WHERE NOT EXISTS (
+SELECT 1 FROM tbl_organization_version_course ovc
+WHERE ovc.org_version_id = ov4 AND ovc.program_id = p.program_id
+);
+
+/* 24) Blocked period */
+INSERT INTO tbl_blocked_period (start_date, end_date, reason, created_by, created_at, archived_at, archived_by, archived_reason, unarchived_at, unarchived_by, unarchived_reason)
+VALUES ('2025-08-10','2025-08-15','Campus week – no events', @sdao, NOW(), NULL, NULL, NULL, NULL, NULL, NULL);
+
+/* 25) Transaction setup (types, payment types, categories, mappings) */
+INSERT INTO tbl_transaction_type (code, label) VALUES ('INCOME','Income')
+ON DUPLICATE KEY UPDATE code=VALUES(code);
+INSERT INTO tbl_transaction_type (code, label) VALUES ('EXPENSE','Expense')
+ON DUPLICATE KEY UPDATE code=VALUES(code);
+
+SET txn_type_income = (SELECT tt.transaction_type_id FROM tbl_transaction_type tt WHERE tt.code='INCOME');
+SET txn_type_expense = (SELECT tt.transaction_type_id FROM tbl_transaction_type tt WHERE tt.code='EXPENSE');
+
+INSERT INTO tbl_payment_type (code, label, method_group) VALUES ('CASH','Cash','Cash')
+ON DUPLICATE KEY UPDATE code=VALUES(code);
+INSERT INTO tbl_payment_type (code, label, method_group) VALUES ('BANK','Bank','Bank')
+ON DUPLICATE KEY UPDATE code=VALUES(code);
+INSERT INTO tbl_payment_type (code, label, method_group) VALUES ('GCASH','GCash','eWallet')
+ON DUPLICATE KEY UPDATE code=VALUES(code);
+
+SET pay_cash = (SELECT pt.payment_type_id FROM tbl_payment_type pt WHERE pt.code='CASH');
+SET pay_bank = (SELECT pt.payment_type_id FROM tbl_payment_type pt WHERE pt.code='BANK');
+SET pay_gcash = (SELECT pt.payment_type_id FROM tbl_payment_type pt WHERE pt.code='GCASH');
+
+INSERT INTO tbl_financial_category (code, label, kind, parent_category_id, active)
+VALUES ('MEMBERSHIP','Membership Dues','INCOME',NULL,TRUE)
+ON DUPLICATE KEY UPDATE code=VALUES(code);
+
+INSERT INTO tbl_financial_category (code, label, kind, parent_category_id, active)
+VALUES ('SPONSORSHIP','Sponsorship','INCOME',NULL,TRUE)
+ON DUPLICATE KEY UPDATE code=VALUES(code);
+
+INSERT INTO tbl_financial_category (code, label, kind, parent_category_id, active)
+VALUES ('OFFICE_SUPPLIES','Office Supplies','EXPENSE',NULL,TRUE)
+ON DUPLICATE KEY UPDATE code=VALUES(code);
+
+INSERT INTO tbl_financial_category (code, label, kind, parent_category_id, active)
+VALUES ('EVENT_FEE','Event Fee','INCOME',NULL,TRUE)
+ON DUPLICATE KEY UPDATE code=VALUES(code);
+
+SET cat_membership = (SELECT fc.category_id FROM tbl_financial_category fc WHERE fc.code='MEMBERSHIP');
+SET cat_sponsorship = (SELECT fc.category_id FROM tbl_financial_category fc WHERE fc.code='SPONSORSHIP');
+SET cat_office = (SELECT fc.category_id FROM tbl_financial_category fc WHERE fc.code='OFFICE_SUPPLIES');
+SET cat_event_fee = (SELECT fc.category_id FROM tbl_financial_category fc WHERE fc.code='EVENT_FEE');
+
+INSERT INTO tbl_transaction_type_category (transaction_type_id, category_id)
+VALUES (txn_type_income, cat_membership)
+ON DUPLICATE KEY UPDATE transaction_type_id=transaction_type_id;
+
+INSERT INTO tbl_transaction_type_category (transaction_type_id, category_id)
+VALUES (txn_type_income, cat_sponsorship)
+ON DUPLICATE KEY UPDATE transaction_type_id=transaction_type_id;
+
+INSERT INTO tbl_transaction_type_category (transaction_type_id, category_id)
+VALUES (txn_type_income, cat_event_fee)
+ON DUPLICATE KEY UPDATE transaction_type_id=transaction_type_id;
+
+INSERT INTO tbl_transaction_type_category (transaction_type_id, category_id)
+VALUES (txn_type_expense, cat_office)
+ON DUPLICATE KEY UPDATE transaction_type_id=transaction_type_id;
+
+/* 26) Receipt sequences */
+INSERT INTO tbl_receipt_sequence (series_key, prefix, pad_length, current_value, updated_at)
+VALUES ('ORG','ORG-',6,0,NOW())
+ON DUPLICATE KEY UPDATE series_key=series_key;
+
+INSERT INTO tbl_receipt_sequence (series_key, prefix, pad_length, current_value, updated_at)
+VALUES ('EVT','EVT-',6,0,NOW())
+ON DUPLICATE KEY UPDATE series_key=series_key;
+
+/* 27) Transactions (membership, sponsorship, expenses, event income/expense) */
+SET i = 1;
+WHILE i <= 4 DO
+SET @org := CASE i WHEN 1 THEN org1 WHEN 2 THEN org2 WHEN 3 THEN org3 ELSE org4 END;
+UPDATE tbl_receipt_sequence SET current_value=current_value+1, updated_at=NOW() WHERE series_key='ORG';
+SET @num := (SELECT rs.current_value FROM tbl_receipt_sequence rs WHERE rs.series_key='ORG');
+SET @rcp := CONCAT((SELECT rs.prefix FROM tbl_receipt_sequence rs WHERE rs.series_key='ORG'),
+                   LPAD(@num, (SELECT rs.pad_length FROM tbl_receipt_sequence rs WHERE rs.series_key='ORG'),'0'));
+
+INSERT INTO tbl_transaction (user_id, payer_name, payee_name, payment_description, amount, transaction_type_id, payment_type_id, category_id, status, transaction_date, receipt_no, proof_image, created_at, updated_at, archived_at, archived_by, archived_reason)
+VALUES (NULL, CONCAT('Donor ',i,'A'), CONCAT('Org ',i), 'Membership donation', 1500.00, txn_type_income, pay_cash, cat_membership, 'Completed', NOW(), @rcp, NULL, NOW(), NOW(), NULL, NULL, NULL);
+INSERT INTO tbl_transaction_membership (transaction_id, organization_id, cycle_number)
+VALUES (LAST_INSERT_ID(), @org, 1);
+
+UPDATE tbl_receipt_sequence SET current_value=current_value+1, updated_at=NOW() WHERE series_key='ORG';
+SET @num := (SELECT rs.current_value FROM tbl_receipt_sequence rs WHERE rs.series_key='ORG');
+SET @rcp := CONCAT((SELECT rs.prefix FROM tbl_receipt_sequence rs WHERE rs.series_key='ORG'),
+                   LPAD(@num, (SELECT rs.pad_length FROM tbl_receipt_sequence rs WHERE rs.series_key='ORG'),'0'));
+
+INSERT INTO tbl_transaction (user_id, payer_name, payee_name, payment_description, amount, transaction_type_id, payment_type_id, category_id, status, transaction_date, receipt_no, proof_image, created_at, updated_at, archived_at, archived_by, archived_reason)
+VALUES (NULL, CONCAT('Sponsor ',i), CONCAT('Org ',i), 'Sponsorship', 5000.00, txn_type_income, pay_bank, cat_sponsorship, 'Completed', NOW(), @rcp, NULL, NOW(), NOW(), NULL, NULL, NULL);
+INSERT INTO tbl_transaction_membership (transaction_id, organization_id, cycle_number)
+VALUES (LAST_INSERT_ID(), @org, 1);
+
+INSERT INTO tbl_transaction (user_id, payer_name, payee_name, payment_description, amount, transaction_type_id, payment_type_id, category_id, status, transaction_date, receipt_no, proof_image, created_at, updated_at, archived_at, archived_by, archived_reason)
+VALUES (NULL, 'Org Office', CONCAT('Vendor ',i), 'Office supplies', 1200.00, txn_type_expense, pay_gcash, cat_office, 'Completed', NOW(), NULL, NULL, NOW(), NOW(), NULL, NULL, NULL);
+INSERT INTO tbl_transaction_membership (transaction_id, organization_id, cycle_number)
+VALUES (LAST_INSERT_ID(), @org, 1);
+
+SET i = i + 1;
+END WHILE;
+
+INSERT INTO tbl_transaction (user_id, payer_name, payee_name, payment_description, amount, transaction_type_id, payment_type_id, category_id, status, transaction_date, receipt_no, proof_image, created_at, updated_at, archived_at, archived_by, archived_reason)
+SELECT NULL, 'Event Ticket', 'Org', 'Event tickets', 2000.00, txn_type_income, pay_cash, cat_event_fee, 'Completed', e.start_date, NULL, NULL, NOW(), NOW(), NULL, NULL, NULL
+FROM tbl_event AS e ORDER BY e.event_id LIMIT 4;
+
+INSERT INTO tbl_transaction_event (transaction_id, event_id, remarks, payer_name_override)
+SELECT t.transaction_id, e.event_id, 'Ticket income', NULL
+FROM (
+SELECT tr.transaction_id, ROW_NUMBER() OVER (ORDER BY tr.transaction_id DESC) rn
+FROM tbl_transaction tr
+) AS t
+JOIN (
+SELECT ev.event_id, ROW_NUMBER() OVER (ORDER BY ev.event_id) rn
+FROM tbl_event ev
+) AS e ON t.rn = e.rn
+WHERE t.rn <= 4;
+
+INSERT INTO tbl_transaction (user_id, payer_name, payee_name, payment_description, amount, transaction_type_id, payment_type_id, category_id, status, transaction_date, receipt_no, proof_image, created_at, updated_at, archived_at, archived_by, archived_reason)
+SELECT NULL, 'Event Expense', 'Supplier', 'Event supplies', 800.00, txn_type_expense, pay_bank, cat_office, 'Completed', e.start_date, NULL, NULL, NOW(), NOW(), NULL, NULL, NULL
+FROM tbl_event AS e ORDER BY e.event_id LIMIT 4;
+
+INSERT INTO tbl_transaction_event (transaction_id, event_id, remarks, payer_name_override)
+SELECT t.transaction_id, e.event_id, 'Event supplies', NULL
+FROM (
+SELECT tr.transaction_id, ROW_NUMBER() OVER (ORDER BY tr.transaction_id DESC) rn
+FROM tbl_transaction tr
+) AS t
+JOIN (
+SELECT ev.event_id, ROW_NUMBER() OVER (ORDER BY ev.event_id) rn
+FROM tbl_event ev
+) AS e ON t.rn = e.rn
+WHERE t.rn <= 4;
+
+/* 28) Notifications + recipients */
+INSERT INTO tbl_notification (sender_id, entity_type, entity_id, title, message, url, action, created_at)
+VALUES (@sdao,'organization', org1, 'Welcome to the new cycle', 'Cycle 1 started for your organization.', '/org/details', NULL, NOW());
+
+INSERT INTO tbl_notification_recipient (notification_id, recipient_email, is_read, created_at)
+VALUES (LAST_INSERT_ID(), 'pre001@students.nu-dasma.edu.ph', FALSE, NOW());
+
+/* 29) Logs */
+INSERT INTO tbl_logs (user_id, timestamp, action_type, redirect_url, file_path, meta_data, type)
+VALUES (@sdao, NOW(), 'Populate Demo Data', '/admin/seed', NULL, JSON_OBJECT('result','success'), 'system');
+
+/* 30) Event courses (guarded) */
+INSERT INTO tbl_event_course (event_id, program_id)
+SELECT e.event_id, p.program_id
+FROM (
+SELECT ev.event_id, ROW_NUMBER() OVER (ORDER BY ev.event_id) rn
+FROM tbl_event ev
+) AS e
+JOIN (
+SELECT pr.program_id, ROW_NUMBER() OVER (ORDER BY pr.program_id) rn
+FROM tbl_program pr
+) AS p
+ON (e.rn % 8) = (p.rn % 8)
+WHERE NOT EXISTS (
+SELECT 1 FROM tbl_event_course ec
+WHERE ec.event_id = e.event_id AND ec.program_id = p.program_id
+);
+
+/* 31) Member permission overrides */
+INSERT INTO tbl_member_permission_override (member_id, permission_id, is_allowed)
+SELECT m.member_id, perm_update_event, TRUE
+FROM tbl_organization_members AS m
+WHERE m.member_type='Member' AND RAND()<0.01
+LIMIT 10;
+
+/* 32) Archived samples */
+INSERT INTO tbl_archived_organization_members (member_id, organization_id, cycle_number, user_id, member_type, executive_role_id, committee_id, committee_role, archived_at, archived_by)
+SELECT m.member_id, m.organization_id, m.cycle_number, m.user_id, m.member_type, m.executive_role_id, NULL, NULL, NOW(), @sdao
+FROM tbl_organization_members AS m
+WHERE m.member_type='Member'
+ORDER BY m.member_id LIMIT 2;
+
+INSERT INTO tbl_archived_committees (original_committee_id, organization_id, cycle_number, name, description, created_at, archived_at, archived_by, reason)
+SELECT c.committee_id, c.organization_id, c.cycle_number, c.name, c.description, c.created_at, NOW(), @sdao, 'Restructure'
+FROM tbl_committee AS c ORDER BY c.committee_id LIMIT 1;
+
+/* 33) AI samples */
+INSERT INTO tbl_ai_conversation (owner_id, title, system_prompt, model, temperature, top_p, entity_type, entity_id, summary, is_global, last_summary_message_id, is_archived, created_at, updated_at)
+VALUES (@sdao, 'Demo Setup Q&A', 'Be helpful and concise', 'deepseek-chat', 0.7, 1.0, 'system', NULL, NULL, TRUE, NULL, FALSE, NOW(), NOW());
+SET @conv := LAST_INSERT_ID();
+
+INSERT INTO tbl_ai_message (conversation_id, role, user_id, content, model, context_organizations, message_scope, meta, created_at)
+VALUES (@conv, 'user', @sdao, 'How to manage organizations?', NULL, NULL, 'global', NULL, NOW());
+
+INSERT INTO tbl_ai_message (conversation_id, role, user_id, content, model, context_organizations, message_scope, meta, created_at)
+VALUES (@conv, 'assistant', NULL, 'Use the admin console to manage organizations and members.', 'deepseek-chat', NULL, 'global', NULL, NOW());
+END $$
+DELIMITER ;
+CALL populate_all_demo();
+DROP PROCEDURE populate_all_demo;

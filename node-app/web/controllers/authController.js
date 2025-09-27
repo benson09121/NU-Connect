@@ -2,7 +2,9 @@ const msal = require('@azure/msal-node');
 const axios = require('axios');
 const userModel = require('../models/userModel');
 const userActivationModel = require('../models/userActivationModel');
+const accountModel = require('../models/accountModel');
 const { sendInvitationEmail } = require('../../services/emailService');
+const { subscribeToChannel, publishToChannel } = require('./sseController');
 
 require('dotenv').config();
 
@@ -56,6 +58,7 @@ async function login(req, res) {
         const wasActiveBefore = userStatusBefore?.status === 'Active';
         const permissionResult = await userModel.handleLogin(req.user);
         console.log(userStatusBefore);
+        
         // Check if user was activated during this login
         if (!wasActiveBefore && userStatusBefore?.status === 'Pending') {
             console.log(`🎉 User ${req.user.email} activated on first login!`);
@@ -70,6 +73,30 @@ async function login(req, res) {
                 req.user.email,
                 'first_login'
             );
+
+            // 🆕 BROADCAST REAL-TIME UPDATES FOR STATUS CHANGE
+            try {
+                // Update accounts list for non-students
+                if (userStatusBefore?.role_name && userStatusBefore.role_name.toLowerCase() !== 'student') {
+                    const allAccounts = await accountModel.getAccounts();
+                    publishToChannel('accounts', {
+                        operation: 'SNAPSHOT',
+                        data: allAccounts,
+                    });
+                    console.log(`📡 Broadcasted accounts update after ${req.user.email} activation`);
+                }
+
+                // Update pending applications list
+                const fullPending = await accountModel.getAllPendingUsersAndApplications();
+                publishToChannel('user-applications', {
+                    operation: 'SNAPSHOT',
+                    data: fullPending,
+                });
+                console.log(`📡 Broadcasted pending applications update after ${req.user.email} activation`);
+            } catch (broadcastError) {
+                console.error('Failed to broadcast status change updates:', broadcastError);
+                // Don't fail login if broadcast fails
+            }
         }
         
         console.log(permissionResult);

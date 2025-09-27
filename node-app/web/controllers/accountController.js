@@ -275,22 +275,34 @@ async function approveUserApplication(req, res) {
 
     const application = await accountModel.approveUserApplication(application_id);
 
-    // Update the pending applications snapshot
-    const fullPending = await accountModel.getAllPendingUsersAndApplications();
-    publishToChannel('user-applications', {
-      operation: 'SNAPSHOT',
-      data: fullPending,
-    });
-
-    // Optionally also refresh accounts list if your approval flow creates/updates an account
+    // 🆕 ENHANCED BROADCASTING FOR APPLICATION APPROVAL
     try {
-      const allAccounts = await accountModel.getAccounts();
-      publishToChannel('accounts', {
+      // Update the pending applications snapshot
+      const fullPending = await accountModel.getAllPendingUsersAndApplications();
+      publishToChannel('user-applications', {
         operation: 'SNAPSHOT',
-        data: allAccounts,
+        data: fullPending,
       });
-    } catch (e) {
-      console.warn('approveUserApplication: accounts snapshot publish skipped:', e?.message);
+      console.log(`📡 Broadcasted pending applications update for approval: ${application_id}`);
+
+      // If the approved user is non-student, also update accounts list
+      if (application && application.email) {
+        const userInfo = await userActivationModel.getUserActivationStatus(application.email);
+        const isStudent = userInfo?.role_name?.toLowerCase() === 'student';
+        
+        if (!isStudent) {
+          const allAccounts = await accountModel.getAccounts();
+          publishToChannel('accounts', {
+            operation: 'SNAPSHOT',
+            data: allAccounts,
+          });
+          console.log(`📡 Broadcasted accounts update for non-student approval: ${application.email}`);
+        } else {
+          console.log(`👤 Student ${application.email} approved - not included in accounts broadcast`);
+        }
+      }
+    } catch (broadcastError) {
+      console.error('approveUserApplication: broadcast failed:', broadcastError);
     }
 
     // Send Azure invitation and email
@@ -435,11 +447,13 @@ async function rejectUserApplication(req, res) {
       rejection_reason || 'No reason provided'
     );
 
+    // 🆕 ENHANCED BROADCASTING FOR APPLICATION REJECTION
     const fullPending = await accountModel.getAllPendingUsersAndApplications();
     publishToChannel('user-applications', {
       operation: 'SNAPSHOT',
       data: fullPending,
     });
+    console.log(`📡 Broadcasted pending applications update for rejection: ${application_id}`);
 
     res.status(200).json({ success: true, data: application });
   } catch (error) {
@@ -515,24 +529,51 @@ async function manuallyActivateUser(req, res) {
       });
     }
 
+    // 🆕 Get user info before activation to determine role
+    const userStatusBefore = await userActivationModel.getUserActivationStatus(email);
+    const isStudent = userStatusBefore?.role_name?.toLowerCase() === 'student';
+
     const result = await userActivationModel.manuallyActivateUser(
       email,
       req.user.email
     );
 
     if (result) {
-      // Publish full accounts snapshot after activation
-      const allAccounts = await accountModel.getAccounts();
-      publishToChannel('accounts', {
-        operation: 'SNAPSHOT',
-        data: allAccounts,
-      });
+      // 🆕 ENHANCED ROLE-BASED BROADCASTING
+      try {
+        // For non-student users, update accounts list
+        if (!isStudent) {
+          const allAccounts = await accountModel.getAccounts();
+          publishToChannel('accounts', {
+            operation: 'SNAPSHOT',
+            data: allAccounts,
+          });
+          console.log(`📡 Broadcasted accounts update for non-student activation: ${email}`);
+        } else {
+          console.log(`👤 Student ${email} activated - not included in accounts broadcast`);
+        }
+
+        // Always update pending applications list
+        const fullPending = await accountModel.getAllPendingUsersAndApplications();
+        publishToChannel('user-applications', {
+          operation: 'SNAPSHOT',
+          data: fullPending,
+        });
+        console.log(`📡 Broadcasted pending applications update for activation: ${email}`);
+      } catch (broadcastError) {
+        console.error('Failed to broadcast activation updates:', broadcastError);
+      }
     }
 
     res.status(200).json({
       success: true,
       message: `User ${email} has been manually activated`,
-      data: { email, activated_by: req.user.email },
+      data: { 
+        email, 
+        activated_by: req.user.email,
+        role: userStatusBefore?.role_name,
+        included_in_accounts: !isStudent
+      },
     });
   } catch (error) {
     console.error('Failed to manually activate user:', error);

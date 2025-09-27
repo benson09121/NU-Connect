@@ -5,7 +5,9 @@ const { subscribeToChannel, publishToChannel } = require('./sseController');
 const organizationsModel = require('../models/organizationsModel');
 const userCacheModel = require('../models/userCacheModel');
 const { TermPaymentModel } = require('../models/simplifiedTermPaymentModel');
+const userModel = require('../models/userModel'); // 🆕 For real-time user organizations
 const pool = require('../../config/db');
+const { notifyOrganizationApproved, notifyMembershipGranted, notifyMembershipRevoked } = require('../utils/organizationEvents'); // 🆕 Real-time org events
 
 // Helper function for unified organization hub channel
 const getOrgHubChannel = (orgId, orgVersionId) => `orghub_${orgId}_${orgVersionId}`;
@@ -549,13 +551,98 @@ async function approveApplication(req, res) {
       timestamp: new Date()
     });
 
+    console.log('🔍 [RT-DEBUG] Checking if organization is fully approved:', {
+      currentStep: result.application.step,
+      lastStep: result?.other.last_step,
+      isFullyApproved: result.application.step === result?.other.last_step,
+      result: result
+    });
+
     if (result.application.step === result?.other.last_step) {
+      console.log('🎉 [RT-DEBUG] Organization is FULLY APPROVED - triggering notifications!');
+      
       const update_data = await organizationsModel.getUpdateApplication(application_id);
       publishToChannel('organization-applications', {
         operation: 'UPDATE',
         data: Array.isArray(update_data) ? update_data : [update_data],
         timestamp: new Date()
       });
+
+      // 🆕 REAL-TIME: Notify organization members of approval
+      try {
+        console.log('🔍 [RT-DEBUG] Starting organization approval notification process...');
+        const officers = await organizationsModel.getApplicationOfficers(application_id);
+        console.log('🔍 [RT-DEBUG] Retrieved officers:', {
+          officersFound: officers ? officers.length : 0,
+          officers: officers ? officers.map(o => ({ email: o.email, name: `${o.f_name} ${o.l_name}` })) : 'none'
+        });
+        
+        if (officers && officers.length > 0) {
+          const memberEmails = officers.map(officer => officer.email).filter(email => email && email.includes('@'));
+          const organizationName = result?.organization?.name || result?.other?.organization_name || 'Organization';
+          const orgId = result?.organization?.id || organization_id;
+          
+          console.log('🎉 [Real-time] Organization fully approved - preparing notifications:', {
+            organizationId: orgId,
+            organizationName,
+            totalOfficers: officers.length,
+            validEmails: memberEmails.length,
+            memberEmails: memberEmails,
+            resultData: {
+              organization: result?.organization,
+              other: result?.other,
+              providedOrgId: organization_id
+            }
+          });
+          
+          // 🕒 Enhanced delay with better error handling and logging
+          setTimeout(async () => {
+            try {
+              console.log('🕒 [RT-DEBUG] Delay completed, sending organization approval notifications...');
+              
+              // 🔍 Debug: Log the complete result structure to identify correct field names
+              console.log('🔍 [RT-DEBUG] Available result fields:', {
+                organizationFields: result?.organization ? Object.keys(result.organization) : 'null',
+                otherFields: result?.other ? Object.keys(result.other) : 'null',
+                organizationSample: result?.organization,
+                otherSample: result?.other
+              });
+              
+              // 🎯 Pass complete organization data instead of just ID and name
+              const completeOrgData = {
+                organization_id: orgId,
+                organization_version_id: result?.organization?.current_org_version_id || result?.other?.current_org_version_id,
+                name: organizationName,
+                description: result?.organization?.description,
+                status: result?.organization?.status || 'Active',
+                ...result?.organization // Include all organization fields
+              };
+              
+              console.log('🔍 [RT-DEBUG] Complete organization data for notification:', completeOrgData);
+              
+              const notificationResult = await notifyOrganizationApproved(completeOrgData, memberEmails);
+              console.log('✅ [RT-DEBUG] Organization approval notifications sent successfully:', notificationResult);
+            } catch (delayedNotificationError) {
+              console.error('❌ [Real-time] Failed to send delayed organization approval notifications:', {
+                error: delayedNotificationError.message,
+                stack: delayedNotificationError.stack,
+                orgId,
+                organizationName,
+                memberEmails
+              });
+            }
+          }, 1000); // 1 second delay to ensure database consistency
+        } else {
+          console.warn('⚠️ [RT-DEBUG] No officers found for organization approval notification');
+        }
+      } catch (notificationError) {
+        console.error('❌ [Real-time] Failed to prepare organization approval notifications:', {
+          error: notificationError.message,
+          stack: notificationError.stack,
+          application_id,
+          organization_id
+        });
+      }
 
       // Send invitation emails to all officers (best-effort)
       try {
@@ -1280,6 +1367,28 @@ async function approveMembershipApplication(req, res) {
         const membersArray = Array.isArray(updatedMembers) ? updatedMembers : [];
         publishToChannel(`organization_members_${organization_id}_${organization_version_id}`, membersArray);
         console.log(`Published updated members list to SSE channel: ${membersArray.length} members`);
+        
+        // 🆕 REAL-TIME: Notify user of membership approval
+        try {
+          const organizationData = await organizationsModel.getOrganizationDetails(organization_id, organization_version_id);
+          const organizationName = organizationData?.name || organizationData?.organization_name || 'Organization';
+          const userEmail = newMember.email || approvedApplication?.email;
+          const userRole = newMember.role || 'Member';
+          
+          if (userEmail && userEmail.includes('@')) {
+            console.log('👤 [Real-time] Member approved - sending notification:', {
+              userEmail,
+              organizationId: organization_id,
+              organizationName,
+              role: userRole
+            });
+            
+            await notifyMembershipGranted(userEmail, organization_id, organizationName, userRole);
+          }
+        } catch (notificationError) {
+          console.error('❌ [Real-time] Failed to send membership granted notification:', notificationError);
+        }
+        
       } catch (publishError) {
         console.error('Failed to publish member updates:', publishError);
       }
@@ -1533,6 +1642,23 @@ async function archiveOrganizationMember(req, res) {
     const { member_id, reason, orgId, orgVersionId } = req.body;
     if (!member_id) return res.status(400).json({ error: "member_id is required." });
     const archived_by_email = req.user.email;
+    
+    // 🆕 REAL-TIME: Get member details before archiving for notification
+    let memberEmail = null;
+    let organizationName = null;
+    try {
+      if (orgId && orgVersionId) {
+        const currentMembers = await organizationsModel.getOrganizationMembers(orgId, orgVersionId);
+        const memberToArchive = currentMembers?.find(member => member.member_id == member_id);
+        memberEmail = memberToArchive?.email;
+        
+        const organizationData = await organizationsModel.getOrganizationDetails(orgId, orgVersionId);
+        organizationName = organizationData?.name || organizationData?.organization_name || 'Organization';
+      }
+    } catch (memberLookupError) {
+      console.warn('⚠️ [Real-time] Could not get member details for notification:', memberLookupError.message);
+    }
+    
     const result = await organizationsModel.archiveOrganizationMember({ member_id, archived_by_email, reason, orgId, orgVersionId });
 
     if (orgId && orgVersionId) {
@@ -1554,6 +1680,22 @@ async function archiveOrganizationMember(req, res) {
         console.log(`Published updated archived members list to SSE channel: ${archivedMembersArray.length} archived members`);
       } catch (publishError) {
         console.error('Failed to publish archived member updates:', publishError);
+      }
+      
+      // 🆕 REAL-TIME: Notify user of membership revocation
+      if (memberEmail && memberEmail.includes('@') && organizationName) {
+        try {
+          console.log('🚫 [Real-time] Member archived - sending revocation notification:', {
+            memberEmail,
+            organizationId: orgId,
+            organizationName,
+            reason
+          });
+          
+          await notifyMembershipRevoked(memberEmail, orgId, organizationName, reason || 'Membership archived');
+        } catch (notificationError) {
+          console.error('❌ [Real-time] Failed to send membership revoked notification:', notificationError);
+        }
       }
     }
 
@@ -2442,6 +2584,104 @@ const updateOrganizationTermOption = async (req, res) => {
   }
 };
 
+// 🆕 REAL-TIME ORGANIZATION UPDATES - Get current user's organizations with timestamp
+/**
+ * Gets the current user's organizations with real-time timestamp
+ * Used by frontend for real-time updates to user.organizations[] array
+ * 
+ * @param {Object} req - Express request object (contains authenticated user)
+ * @param {Object} res - Express response object
+ * @returns {Object} JSON response with user's organizations and timestamp
+ */
+async function getUserOrganizations(req, res) {
+  try {
+    console.log('🔄 [Real-time] Getting user organizations for:', req.user.email);
+    
+    // Get user's organization permissions (this includes their organizations)
+    const userPermissions = await userModel.getPermissions(req.user.email);
+    console.log('✅ [Real-time] Retrieved user permissions:', {
+      email: req.user.email,
+      organizationCount: userPermissions?.organizations?.length || 0,
+      orgIds: userPermissions?.organizations?.map(org => `${org.organization_id}:${org.name}`) || [],
+      orgStatuses: userPermissions?.organizations?.map(org => `${org.organization_id}:${org.status}`) || []
+    });
+    
+    // Extract just the organizations array with additional metadata
+    let organizations = userPermissions?.organizations || [];
+    
+    // 🔧 TEMPORARY FIX: Check for approved applications if no organizations found
+    // This fixes the issue where students who create org applications aren't added as members
+    if (organizations.length === 0) {
+      console.log('🔧 [TEMP-FIX] No organizations found, checking for approved applications for:', req.user.email);
+      
+      try {
+        const pool = require('../../config/db');
+        const connection = await pool.getConnection();
+        
+        // Query for approved applications where user is the applicant
+        const [approvedApps] = await connection.query(`
+          SELECT o.name, o.logo, o.status, o.organization_id, o.current_org_version_id, 
+                 rc.cycle_number, 'Applicant' AS position
+          FROM tbl_application a
+          JOIN tbl_organization o ON a.organization_id = o.organization_id
+          JOIN tbl_renewal_cycle rc ON o.organization_id = rc.organization_id 
+              AND rc.org_version_id = o.current_org_version_id
+          WHERE a.applicant_user_id = ? 
+            AND a.status = 'Approved'
+            AND o.status = 'Approved'
+        `, [req.user.email]);
+        
+        connection.release();
+        
+        if (approvedApps.length > 0) {
+          console.log('🔧 [TEMP-FIX] Found approved applications:', approvedApps.length, 'organizations');
+          organizations = approvedApps;
+        } else {
+          console.log('🔧 [TEMP-FIX] No approved applications found for user');
+        }
+        
+      } catch (dbError) {
+        console.error('🔧 [TEMP-FIX] Database query failed:', dbError);
+      }
+    }
+    
+    // Add real-time metadata
+    const responseData = {
+      organizations: organizations,
+      timestamp: new Date().toISOString(),
+      userEmail: req.user.email,
+      count: organizations.length,
+      source: 'real-time-api'
+    };
+    
+    console.log('📤 [Real-time] Sending organization data:', {
+      organizationCount: responseData.count,
+      timestamp: responseData.timestamp,
+      orgDetails: organizations.map(org => ({
+        id: org.organization_id,
+        name: org.name,
+        status: org.status,
+        role: org.role
+      }))
+    });
+    
+    res.status(200).json(responseData);
+    
+  } catch (error) {
+    console.error('❌ [Real-time] Error getting user organizations:', {
+      error: error.message,
+      stack: error.stack,
+      userEmail: req.user?.email
+    });
+    
+    res.status(500).json({
+      error: 'Failed to retrieve user organizations',
+      message: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+}
+
 module.exports = {
   getOrganizations,
   createOrganizationApplication,
@@ -2519,5 +2759,8 @@ module.exports = {
   // Mobile helper functions
   getCurrentOrganizationVersion,
   // Term option management
-  updateOrganizationTermOption
+  updateOrganizationTermOption,
+  
+  // 🆕 Real-time organization updates
+  getUserOrganizations
 };

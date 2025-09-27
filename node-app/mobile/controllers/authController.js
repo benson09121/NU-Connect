@@ -3,37 +3,134 @@ const jwt = require('jsonwebtoken');
 const msal = require('@azure/msal-node');
 const axios = require('axios');
 const { sendStudentInvitationEmail } = require('../../services/emailService');
+const userActivationModel = require('../../web/models/userActivationModel');
+const accountModel = require('../../web/models/accountModel');
+const { publishToChannel } = require('../../web/controllers/sseController');
 require('dotenv').config();
 const programsModel = require('../../web/models/programsModel');
 
 async function login(req, res) {
     try {
-        console.log('Login attempt for:', req.body.email);
+        console.log('📱 Mobile login attempt for:', req.body.email || req.body.mail);
         
         // Set request timeout
         req.setTimeout(30000);
         
-        const { mail } = req.body;
+        const email = req.body.mail || req.body.email;
         
-        // Get user
-        console.log('Getting user...');
-        const user = await userModel.getUser(mail);
-        
-        if (!user) {
-            return res.status(401).json({ message: 'Invalid credentials' });
+        if (!email) {
+            return res.status(400).json({ message: 'Email is required' });
         }
         
-        console.log('Generating token...');
-        const token = await userModel.generateToken(mail);
-        console.log('Token generated, sending response...');
+        // 🆕 MOBILE AUTO-ACTIVATION LOGIC - Check user status before login
+        console.log('📱 Checking user activation status before login...');
+        const userStatusBefore = await userActivationModel.getUserActivationStatus(email);
+        const wasActiveBefore = userStatusBefore?.status === 'Active';
+        const wasPendingBefore = userStatusBefore?.status === 'Pending';
+        
+        console.log('📱 User status before login:', {
+            email,
+            status: userStatusBefore?.status,
+            wasActiveBefore,
+            wasPendingBefore
+        });
+        
+        // 🆕 ENHANCED: Handle login with potential status transition using stored procedure
+        // Get names from various sources for the HandleLogin procedure
+        let firstName = 'User';  // Default fallback
+        let lastName = 'Student'; // Default fallback
+        
+        // Try to get names from request body (if mobile app sends them)
+        if (req.body.first_name || req.body.f_name) {
+            firstName = req.body.first_name || req.body.f_name;
+        }
+        if (req.body.last_name || req.body.l_name) {
+            lastName = req.body.last_name || req.body.l_name;
+        }
+        
+        // If we have existing user data, use those names if request doesn't provide them
+        if (userStatusBefore) {
+            firstName = req.body.first_name || req.body.f_name || userStatusBefore.f_name || firstName;
+            lastName = req.body.last_name || req.body.l_name || userStatusBefore.l_name || lastName;
+        }
+        
+        console.log('📱 Using names for login/activation:', { email, firstName, lastName });
+        
+        // Use the HandleLogin stored procedure (same as web) which handles Pending → Active automatically
+        console.log('📱 Calling HandleLogin stored procedure...');
+        const loginResult = await userModel.handleMobileLogin(email, firstName, lastName);
+        
+        if (!loginResult || loginResult.length === 0) {
+            return res.status(401).json({ message: 'Login failed - invalid credentials' });
+        }
+        
+        // Check if user was activated during this login
+        let userActivated = false;
+        if (wasPendingBefore && !wasActiveBefore) {
+            // Check current status after HandleLogin
+            const userStatusAfter = await userActivationModel.getUserActivationStatus(email);
+            if (userStatusAfter?.status === 'Active') {
+                userActivated = true;
+                console.log(`🎉 Mobile user ${email} activated on first login!`);
+                
+                // Log the activation event
+                const userInfo = await userModel.getUserByEmail(email);
+                if (userInfo?.user_id) {
+                    await userActivationModel.logUserActivation(
+                        userInfo.user_id,
+                        email,
+                        'mobile_first_login'
+                    );
+                }
+                
+                // 🆕 BROADCAST REAL-TIME UPDATES FOR MOBILE STATUS CHANGE
+                try {
+                    // Check if user is a student (mobile users are typically students)
+                    const isStudent = userStatusAfter?.role_name?.toLowerCase() === 'student';
+                    
+                    // Update accounts list for non-students only
+                    if (!isStudent) {
+                        const allAccounts = await accountModel.getAccounts();
+                        publishToChannel('accounts', {
+                            operation: 'SNAPSHOT',
+                            data: allAccounts,
+                        });
+                        console.log(`📡 [MOBILE] Broadcasted accounts update for non-student activation: ${email}`);
+                    } else {
+                        console.log(`👤 [MOBILE] Student ${email} activated - not included in accounts broadcast`);
+                    }
+                    
+                    // Always update pending applications list
+                    const fullPending = await accountModel.getAllPendingUsersAndApplications();
+                    publishToChannel('user-applications', {
+                        operation: 'SNAPSHOT',
+                        data: fullPending,
+                    });
+                    console.log(`📡 [MOBILE] Broadcasted pending applications update after activation: ${email}`);
+                } catch (broadcastError) {
+                    console.error('📱 Failed to broadcast mobile status change updates:', broadcastError);
+                    // Don't fail login if broadcast fails
+                }
+            }
+        }
+        
+        console.log('📱 Generating JWT token...');
+        const token = await userModel.generateToken(email);
+        console.log('📱 Token generated, sending response...');
         
         res.json({
             message: 'User Authenticated',
             token: token,
+            user_activated: userActivated, // Let mobile app know if user was activated
+            activation_info: userActivated ? {
+                was_just_activated: true,
+                activation_method: 'mobile_first_login',
+                activation_date: new Date().toISOString()
+            } : null
         });
         
     } catch (error) {
-        console.error('Login error:', error);
+        console.error('📱 Mobile login error:', error);
         res.status(500).json({ 
             message: 'Internal server error',
             error: error.message 
