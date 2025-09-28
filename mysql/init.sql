@@ -4306,7 +4306,7 @@ CREATE DEFINER='admin'@'%' PROCEDURE InitiateApprovalProcess(
     IN p_initiated_by VARCHAR(200)
 )
 BEGIN
-    -- Declarations
+    -- All DECLARE statements must come first in MySQL stored procedures
     DECLARE v_period_id INT;
     DECLARE v_application_type ENUM('new', 'renewal');
     DECLARE v_role_id INT;
@@ -4320,6 +4320,15 @@ BEGIN
     DECLARE v_submitted_org_name VARCHAR(255);
     DECLARE v_url VARCHAR(512);
     DECLARE v_org_category ENUM('Co-Curricular Organization','Extra Curricular Organization') DEFAULT 'Co-Curricular Organization';
+    
+    -- Cursor declaration with ALL roles (filtering happens in the loop)
+    DECLARE role_cursor CURSOR FOR
+        SELECT role_id, hierarchy_order
+        FROM tbl_role
+        WHERE is_approver = TRUE
+          AND hierarchy_order IS NOT NULL
+        ORDER BY hierarchy_order;
+    DECLARE CONTINUE HANDLER FOR NOT FOUND SET v_done = TRUE;
 
     -- Get period, application type, and organization category FIRST
     SELECT a.period_id, a.application_type, a.submitted_org_name, 
@@ -4329,15 +4338,6 @@ BEGIN
     LEFT JOIN tbl_organization_version ov ON a.org_version_id = ov.org_version_id
     WHERE a.application_id = p_application_id
     LIMIT 1;
-
-    -- Cursor declaration with ALL roles (filtering happens in the loop)
-    DECLARE role_cursor CURSOR FOR
-        SELECT role_id, hierarchy_order
-        FROM tbl_role
-        WHERE is_approver = TRUE
-          AND hierarchy_order IS NOT NULL
-        ORDER BY hierarchy_order;
-    DECLARE CONTINUE HANDLER FOR NOT FOUND SET v_done = TRUE;
 
     SET v_url = CONCAT('/organizations/app-details/', p_application_id, '/', COALESCE(v_submitted_org_name, ''));
 
@@ -7176,6 +7176,7 @@ BEGIN
         o.logo AS organization_logo,
         o.status AS organization_status,
         o.category,
+        o.current_org_version_id AS organization_version_id,
         p.name AS program_name,
         o.created_at
     FROM tbl_organization o
@@ -19440,14 +19441,14 @@ INSERT INTO tbl_program (college_id, name, abbreviation) VALUES
 (3,"Bachelor of Science in Computer Science with specialization in Machine Learning", "BSCS-ML");
 
 INSERT INTO tbl_user (user_id, f_name, l_name, email, program_id, role_id) VALUES
--- ('_ExbgMDtE-90mt0wLlA74VFYH5I1freBLw4NMY9RcBU', ' Geraldine', 'Aris', 'arisgc@students.nu-dasma.edu.ph', '1', '2'),
-('6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0', 'Benson', 'Javier', 'javierbb@students.nu-dasma.edu.ph', NULL, '4'),
-('cyQuRJT6GaT0Y89NFQua6nMhFJF6E-SAIk_rpryVY1k', ' Carl Roehl', 'Falcon', 'falconcs@students.nu-dasma.edu.ph', NULL, '6'),
-('dumalagim@students.nu-dasma.edu.ph', 'Iver', 'Dumalag', 'dumalagim@students.nu-dasma.edu.ph', '1', '1'),
-('LBmQ-WzvRhVmb55Ucidrc14aL39ae9Ei-7xfbOrPeEA', ' Samantha Joy', 'Madrunio', 'madruniosm@students.nu-dasma.edu.ph', '13', '2'),
-('NqBfAZcMXHZF5g9ztwkQ1ykPgtNmZwYRcIPKKK40ROc', ' Alister Dylan Emmanuel', 'Realo', 'realoam@students.nu-dasma.edu.ph', '13', '1'),
-('CyTLmjW4Edhvk2WvWFDNuWLYjW0WJETBPbY2HWk-ZqE', ' Loraine', 'Miraballes', 'miraballesl@students.nu-dasma.edu.ph', NULL, '1'),
-('CY4e1GmCXysMRn8VYudhqDy7CDJ8xVidGO1v8RnRj1E', ' Shamiah M', 'Mendoza', 'mendozasm@students.nu-dasma.edu.ph', '13', '3');
+-- ('_ExbgMDtE-90mt0wLlA74VFYH5I1freBLw4NMY9RcBU', ' Geraldine', 'Aris', 'arisgc@students.nu-dasma.edu.ph', 1, 2),
+('6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0', 'Benson', 'Javier', 'javierbb@students.nu-dasma.edu.ph', NULL, 4),
+('cyQuRJT6GaT0Y89NFQua6nMhFJF6E-SAIk_rpryVY1k', ' Carl Roehl', 'Falcon', 'falconcs@students.nu-dasma.edu.ph', NULL, 6),
+('dumalagim@students.nu-dasma.edu.ph', 'Iver', 'Dumalag', 'dumalagim@students.nu-dasma.edu.ph', 1, 1),
+('LBmQ-WzvRhVmb55Ucidrc14aL39ae9Ei-7xfbOrPeEA', ' Samantha Joy', 'Madrunio', 'madruniosm@students.nu-dasma.edu.ph', 13, 2),
+('NqBfAZcMXHZF5g9ztwkQ1ykPgtNmZwYRcIPKKK40ROc', ' Alister Dylan Emmanuel', 'Realo', 'realoam@students.nu-dasma.edu.ph', 13, 1),
+('CyTLmjW4Edhvk2WvWFDNuWLYjW0WJETBPbY2HWk-ZqE', ' Loraine', 'Miraballes', 'miraballesl@students.nu-dasma.edu.ph', NULL, 1),
+('CY4e1GmCXysMRn8VYudhqDy7CDJ8xVidGO1v8RnRj1E', ' Shamiah M', 'Mendoza', 'mendozasm@students.nu-dasma.edu.ph', 13, 3);
 
 
 -- INSERT INTO tbl_application_requirement (requirement_name, is_applicable_to, file_path, created_by) VALUES

@@ -137,7 +137,7 @@ async function getOrganizations(req, res) {
   try {
     if (sessionId) {
       if (user_role === 'Program Chair') {
-        const organizations = await organizationsModel.getOrganizationByProgram(program_id);
+        const organizations = await organizationsModel.getOrganizationByProgram(parseInt(program_id));
         subscribeToChannel(sessionId, `organizations_${user_role}_${program_id}`);
         return res.json(organizations);
       } else if (user_role === 'Adviser') {
