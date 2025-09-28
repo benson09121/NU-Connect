@@ -105,9 +105,41 @@ async function create(req, res) {
       org_version_id: organization_version_id
     }, proofImagePath);
 
-    publishToChannel('transactions', { type: 'created', data: txn });
+    console.log(`🟢 [TRANSACTION-CREATE] Created transaction ID: ${txn?.transaction_id}, Organization ID: ${organization_id}, User: ${req.user?.email}`);
+
+    // Publish to general transactions channel (for backwards compatibility)
+    publishToChannel('transactions', {
+      operation: 'CREATE',
+      data: txn,
+      user: req.user?.email || null,
+      timestamp: new Date()
+    });
+    
+    // Publish to transaction-specific channel (for backwards compatibility)
     if (txn && txn.transaction_id) {
-      publishToChannel(`transactions:${txn.transaction_id}`, { type: 'created', data: txn });
+      publishToChannel(`transactions:${txn.transaction_id}`, {
+        operation: 'CREATE',
+        data: txn,
+        user: req.user?.email || null,
+        timestamp: new Date()
+      });
+    }
+    
+    // Publish fresh transaction list to organization-specific channel for real-time updates
+    if (organization_id) {
+      try {
+        console.log(`🟢 [TRANSACTION-CREATE-REALTIME] Publishing to organization channel: transactions:organization:${organization_id}`);
+        // Get fresh transactions list for this organization
+        const updatedTransactions = await transactionModel.getTransactionsByOrganization(organization_id);
+        const transactionsArray = Array.isArray(updatedTransactions) ? updatedTransactions : [];
+        const channelName = `transactions:organization:${organization_id}`;
+        publishToChannel(channelName, transactionsArray);
+        console.log(`🟢 [TRANSACTION-CREATE-REALTIME] Published updated transactions list to SSE channel: ${channelName}, data count: ${transactionsArray.length}, transaction IDs: ${transactionsArray.map(t => t.transaction_id).join(', ')}`);
+      } catch (publishError) {
+        console.error('🔴 [TRANSACTION-CREATE-REALTIME] Failed to publish transaction updates:', publishError);
+      }
+    } else {
+      console.log(`🔴 [TRANSACTION-CREATE-REALTIME] No organization_id provided, cannot publish to org-specific channel`);
     }
 
     res.status(201).json(txn);
@@ -325,12 +357,15 @@ async function update(req, res) {
 
     // Publish real-time update
     try {
+      // Publish to general transactions channel (for backwards compatibility)
       publishToChannel('transactions', {
         operation: 'UPDATE',
         data: payload,
         user: req.user?.email || null,
         timestamp: new Date(),
       });
+      
+      // Publish to transaction-specific channel
       if (payload?.transaction_id) {
         publishToChannel(`transactions:${payload.transaction_id}`, {
           operation: 'UPDATE',
@@ -338,6 +373,16 @@ async function update(req, res) {
           user: req.user?.email || null,
           timestamp: new Date(),
         });
+      }
+      
+      // Publish fresh transaction list to organization-specific channel
+      if (payload?.organization_id) {
+        // Get fresh transactions list for this organization
+        const updatedTransactions = await transactionModel.getTransactionsByOrganization(payload.organization_id);
+        const transactionsArray = Array.isArray(updatedTransactions) ? updatedTransactions : [];
+        const channelName = `transactions:organization:${payload.organization_id}`;
+        publishToChannel(channelName, transactionsArray);
+        console.log(`🟢 [TRANSACTION-UPDATE-REALTIME] Published updated transactions list to SSE channel: ${channelName}, data count: ${transactionsArray.length}`);
       }
     } catch (pubErr) {
       console.warn('[transactions.update] publish error:', pubErr.message);
@@ -364,12 +409,23 @@ async function archive(req,res){
 
     // Publish real-time event
     try {
+      // Publish to general transactions channel (for backwards compatibility)
       publishToChannel('transactions', {
         operation: 'ARCHIVE',
         data: payload,
         user: req.user?.email || null,
         timestamp: new Date()
       });
+      
+      // Publish fresh transaction list to organization-specific channel
+      if (payload?.organization_id) {
+        // Get fresh transactions list for this organization
+        const updatedTransactions = await transactionModel.getTransactionsByOrganization(payload.organization_id);
+        const transactionsArray = Array.isArray(updatedTransactions) ? updatedTransactions : [];
+        const channelName = `transactions:organization:${payload.organization_id}`;
+        publishToChannel(channelName, transactionsArray);
+        console.log(`🟢 [TRANSACTION-ARCHIVE-REALTIME] Published updated transactions list to SSE channel: ${channelName}, data count: ${transactionsArray.length}`);
+      }
     } catch (pubErr) {
       console.warn('[transactions.archive] publish error:', pubErr.message);
     }
@@ -394,12 +450,23 @@ async function unarchive(req,res){
 
     // Publish real-time event
     try {
+      // Publish to general transactions channel (for backwards compatibility)
       publishToChannel('transactions', {
         operation: 'UNARCHIVE',
         data: payload,
         user: req.user?.email || null,
         timestamp: new Date()
       });
+      
+      // Publish fresh transaction list to organization-specific channel
+      if (payload?.organization_id) {
+        // Get fresh transactions list for this organization
+        const updatedTransactions = await transactionModel.getTransactionsByOrganization(payload.organization_id);
+        const transactionsArray = Array.isArray(updatedTransactions) ? updatedTransactions : [];
+        const channelName = `transactions:organization:${payload.organization_id}`;
+        publishToChannel(channelName, transactionsArray);
+        console.log(`🟢 [TRANSACTION-UNARCHIVE-REALTIME] Published updated transactions list to SSE channel: ${channelName}, data count: ${transactionsArray.length}`);
+      }
     } catch (pubErr) {
       console.warn('[transactions.unarchive] publish error:', pubErr.message);
     }
