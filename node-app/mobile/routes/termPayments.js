@@ -12,14 +12,16 @@ const MobileTermPaymentController = require('../controllers/termPaymentControlle
 // ===================
 
 /**
- * @route   GET /api/mobile/term-payments/check-payment-status/:organizationId
- * @desc    Check if user needs to pay for current academic term and get payment status
+ * @route   GET /api/mobile/term-payments/check-payment-status/:organizationId/:organizationVersionId
+ * @desc    Check if user needs to pay for current academic term and get payment status with enhanced parameters
+ * @query   application_date (ISO string), current_term_id (int), include_history (bool), future_terms_count (int)
  * @access  Private
  */
-router.get('/term-payments/check-payment-status/:organizationId', 
+router.get('/term-payments/check-payment-status/:organizationId/:organizationVersionId?', 
     (req, res, next) => {
-        console.log('DEBUG ROUTE: check-payment-status route HIT!');
+        console.log('DEBUG ROUTE: Enhanced check-payment-status route HIT!');
         console.log('DEBUG ROUTE: Request params:', req.params);
+        console.log('DEBUG ROUTE: Request query:', req.query);
         console.log('DEBUG ROUTE: Request headers:', req.headers);
         console.log('DEBUG ROUTE: Request URL:', req.url);
         console.log('DEBUG ROUTE: Request method:', req.method);

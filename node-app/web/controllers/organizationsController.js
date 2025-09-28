@@ -20,6 +20,7 @@ function publishOrgHub({ orgId, orgVersionId, entity, operation, data }) {
   const hubEvent = {
     channel: hubChannel,
     operation,
+    entity, // Include entity type for proper frontend identification
     data: Array.isArray(data) ? data : [data],
     timestamp: Date.now()
   };
@@ -1213,6 +1214,27 @@ async function addCommitteeMember(req, res) {
     if (!action_by_email) return res.status(400).json({ error: 'action_by_email is required' });
     if (!user_email) return res.status(400).json({ error: 'user_email is required from frontend' });
 
+    // Committee Head validation - check if committee already has a head
+    if (role === 'Committee Head') {
+      try {
+        const existingCommitteeMembers = await organizationsModel.getAllCommitteeMembers(orgId, orgVersionId);
+        const existingHead = existingCommitteeMembers.find(member => 
+          member.committee_id === parseInt(committee_id) && 
+          member.role === 'Committee Head' &&
+          member.status !== 'Archived'
+        );
+        
+        if (existingHead) {
+          return res.status(400).json({ 
+            error: `This committee already has a Committee Head: ${existingHead.f_name} ${existingHead.l_name} (${existingHead.email})` 
+          });
+        }
+      } catch (validationError) {
+        console.error('Committee Head validation error:', validationError);
+        // Continue with the operation if validation check fails (fail-safe)
+      }
+    }
+
     const result = await organizationsModel.addCommitteeMember({
       committee_id,
       user_email,
@@ -1271,6 +1293,36 @@ async function updateCommitteeMember(req, res) {
   try {
     const { committee_member_id, new_role, orgId, orgVersionId } = req.body;
     const action_by_email = req.user.email;
+
+    // Committee Head validation - check if changing to Committee Head and another head exists
+    if (new_role === 'Committee Head') {
+      try {
+        const existingCommitteeMembers = await organizationsModel.getAllCommitteeMembers(orgId, orgVersionId);
+        
+        // Find the member being updated to get their committee_id
+        const memberBeingUpdated = existingCommitteeMembers.find(member => 
+          member.id === parseInt(committee_member_id)
+        );
+        
+        if (memberBeingUpdated) {
+          const existingHead = existingCommitteeMembers.find(member => 
+            member.committee_id === memberBeingUpdated.committee_id && 
+            member.role === 'Committee Head' &&
+            member.status !== 'Archived' &&
+            member.id !== parseInt(committee_member_id) // Exclude the member being updated
+          );
+          
+          if (existingHead) {
+            return res.status(400).json({ 
+              error: `This committee already has a Committee Head: ${existingHead.f_name} ${existingHead.l_name} (${existingHead.email})` 
+            });
+          }
+        }
+      } catch (validationError) {
+        console.error('Committee Head validation error:', validationError);
+        // Continue with the operation if validation check fails (fail-safe)
+      }
+    }
 
     const result = await organizationsModel.updateCommitteeMember({
       committee_member_id,
@@ -1670,41 +1722,38 @@ async function archiveOrganizationMember(req, res) {
     
     const result = await organizationsModel.archiveOrganizationMember({ member_id, archived_by_email, reason, orgId, orgVersionId });
 
+    // Publish updated members list for real-time updates
+    try {
+      const updatedMembers = await organizationsModel.getOrganizationMembers(orgId, orgVersionId);
+      const membersArray = Array.isArray(updatedMembers) ? updatedMembers : [];
+      publishToChannel(`organization_members_${orgId}_${orgVersionId}`, membersArray);
+      console.log(`Published updated members list to SSE channel: ${membersArray.length} members`);
+    } catch (publishError) {
+      console.error('Failed to publish member updates:', publishError);
+    }
+
+    // Publish updated archived members list for real-time updates
+    try {
+      const updatedArchivedMembers = await organizationsModel.getArchivedOrganizationMembers(orgId, orgVersionId);
+      const archivedMembersArray = Array.isArray(updatedArchivedMembers) ? updatedArchivedMembers : [];
+      publishToChannel(`organization_archivedMembers_${orgId}_${orgVersionId}`, archivedMembersArray);
+      console.log(`Published updated archived members list to SSE channel: ${archivedMembersArray.length} archived members`);
+    } catch (publishError) {
+      console.error('Failed to publish archived member updates:', publishError);
+    }
+
     if (orgId && orgVersionId) {
-      // Update members list (remove archived member)
       try {
-        const updatedMembers = await organizationsModel.getOrganizationMembers(orgId, orgVersionId);
-        const membersArray = Array.isArray(updatedMembers) ? updatedMembers : [];
-        publishToChannel(`organization_members_${orgId}_${orgVersionId}`, membersArray);
-        console.log(`Published updated members list to SSE channel: ${membersArray.length} members`);
-      } catch (publishError) {
-        console.error('Failed to publish member updates:', publishError);
-      }
-      
-      // Update archived members list (add newly archived member)
-      try {
-        const updatedArchivedMembers = await organizationsModel.getArchivedOrganizationMembers(orgId, orgVersionId);
-        const archivedMembersArray = Array.isArray(updatedArchivedMembers) ? updatedArchivedMembers : [];
-        publishToChannel(`organization_archivedMembers_${orgId}_${orgVersionId}`, archivedMembersArray);
-        console.log(`Published updated archived members list to SSE channel: ${archivedMembersArray.length} archived members`);
-      } catch (publishError) {
-        console.error('Failed to publish archived member updates:', publishError);
-      }
-      
-      // 🆕 REAL-TIME: Notify user of membership revocation
-      if (memberEmail && memberEmail.includes('@') && organizationName) {
-        try {
-          console.log('🚫 [Real-time] Member archived - sending revocation notification:', {
-            memberEmail,
-            organizationId: orgId,
-            organizationName,
-            reason
-          });
-          
-          await notifyMembershipRevoked(memberEmail, orgId, organizationName, reason || 'Membership archived');
-        } catch (notificationError) {
-          console.error('❌ [Real-time] Failed to send membership revoked notification:', notificationError);
-        }
+        console.log('🚫 [Real-time] Member archived - sending revocation notification:', {
+          memberEmail,
+          organizationId: orgId,
+          organizationName,
+          reason
+        });
+        
+        await notifyMembershipRevoked(memberEmail, orgId, organizationName, reason || 'Membership archived');
+      } catch (notificationError) {
+        console.error('❌ [Real-time] Failed to send membership revoked notification:', notificationError);
       }
     }
 
@@ -1730,25 +1779,38 @@ async function unarchiveOrganizationMember(req, res) {
       orgId,
       orgVersionId
     );
-
-    // Remove from archived, add back to active members
-    publishOrgHub({
-      orgId, 
-      orgVersionId,
-      entity: 'archived_members',
-      operation: 'DELETE',
-      data: result,
-      legacyChannel: `archived_organization_members_${orgId}_${orgVersionId}`
-    });
     
-    publishOrgHub({
-      orgId, 
-      orgVersionId,
-      entity: 'members',
-      operation: 'CREATE',
-      data: result,
-      legacyChannel: `organization_members_${orgId}_${orgVersionId}`
-    });
+    console.log('🔄 [UNARCHIVE DEBUG] Database operation result:', result);
+
+    // Publish updated archived members list for real-time updates
+    try {
+      const updatedArchivedMembers = await organizationsModel.getArchivedOrganizationMembers(orgId, orgVersionId);
+      const archivedMembersArray = Array.isArray(updatedArchivedMembers) ? updatedArchivedMembers : [];
+      publishToChannel(`organization_archivedMembers_${orgId}_${orgVersionId}`, archivedMembersArray);
+      console.log(`🔄 [UNARCHIVE DEBUG] Published updated archived members list to SSE channel: ${archivedMembersArray.length} archived members`);
+      console.log('🔄 [UNARCHIVE DEBUG] Archived members data:', archivedMembersArray.map(m => ({ id: m.id, name: m.first_name + ' ' + m.last_name })));
+    } catch (publishError) {
+      console.error('Failed to publish archived member updates:', publishError);
+    }
+
+    // Publish updated members list for real-time updates
+    try {
+      const updatedMembers = await organizationsModel.getOrganizationMembers(orgId, orgVersionId);
+      const membersArray = Array.isArray(updatedMembers) ? updatedMembers : [];
+      publishToChannel(`organization_members_${orgId}_${orgVersionId}`, membersArray);
+      console.log(`🔄 [UNARCHIVE DEBUG] Published updated members list to SSE channel: ${membersArray.length} members`);
+      console.log('🔄 [UNARCHIVE DEBUG] Active members data:', membersArray.map(m => ({ id: m.id, name: m.first_name + ' ' + m.last_name })));
+      
+      // Check if the unarchived member is in the list
+      const unarchivedMember = membersArray.find(m => m.id == member_id);
+      if (unarchivedMember) {
+        console.log('✅ [UNARCHIVE DEBUG] Unarchived member found in active members list:', unarchivedMember);
+      } else {
+        console.log('❌ [UNARCHIVE DEBUG] Unarchived member NOT found in active members list! member_id:', member_id);
+      }
+    } catch (publishError) {
+      console.error('Failed to publish member updates:', publishError);
+    }
 
     res.status(200).json({ message: 'Organization member unarchived successfully.' });
   } catch (error) {
@@ -2030,15 +2092,15 @@ async function updateCommitteePermissions(req, res) {
 
     const result = await organizationsModel.updateCommitteePermissions(targetCommitteeId, dbRoleType, permissions);
 
-    // Publish to both old channel (backward compatibility) and new hub
-    publishOrgHub({
-      orgId: organization_id, 
-      orgVersionId: organization_version_id,
-      entity: 'committee_roles',
-      operation: 'UPDATE',
-      data: result,
-      legacyChannel: `committee_roles_${organization_id}_${organization_version_id}`
-    });
+    // Publish updated committee roles for real-time updates
+    try {
+      const updatedCommitteeRoles = await organizationsModel.getOrganizationCommitteeRoles(organization_id, organization_version_id);
+      const committeeRolesArray = Array.isArray(updatedCommitteeRoles) ? updatedCommitteeRoles : [];
+      publishToChannel(`committee_roles_${organization_id}_${organization_version_id}`, committeeRolesArray);
+      console.log(`Published updated committee roles to SSE channel: ${committeeRolesArray.length} roles`);
+    } catch (publishError) {
+      console.error('Failed to publish committee roles updates:', publishError);
+    }
 
     res.json({
       success: true,
@@ -2071,15 +2133,15 @@ async function updateExecutivePermissions(req, res) {
     else if (Array.isArray(result)) formattedResult = result;
     else formattedResult = [result];
 
-    // Publish to both old channel (backward compatibility) and new hub
-    publishOrgHub({
-      orgId: organization_id, 
-      orgVersionId: organization_version_id,
-      entity: 'executives',
-      operation: 'UPDATE',
-      data: formattedResult,
-      legacyChannel: `executives_${organization_id}_${organization_version_id}`
-    });
+    // Publish updated executive roles for real-time updates  
+    try {
+      const updatedExecutiveRoles = await organizationsModel.getOrganizationExecutivesRoles(organization_id, organization_version_id);
+      const executiveRolesArray = Array.isArray(updatedExecutiveRoles) ? updatedExecutiveRoles : [];
+      publishToChannel(`executives_${organization_id}_${organization_version_id}`, executiveRolesArray);
+      console.log(`Published updated executive roles to SSE channel: ${executiveRolesArray.length} roles`);
+    } catch (publishError) {
+      console.error('Failed to publish executive roles updates:', publishError);
+    }
 
     res.json({
       success: true,

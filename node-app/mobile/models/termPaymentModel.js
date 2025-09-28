@@ -137,7 +137,279 @@ class MobileTermPaymentModel {
         }
     }
 
-    // Check payment status for current term and organization
+    // Enhanced payment status check with exclusion logic and additional parameters
+    static async checkEnhancedPaymentStatus(userId, organizationId, organizationVersionId = null, options = {}) {
+        const connection = await pool.getConnection();
+        try {
+            const {
+                application_date,
+                current_term_id,
+                include_history = false,
+                future_terms_count = 4
+            } = options;
+            
+            console.log(`DEBUG MODEL: Enhanced check payment status called for userId: ${userId}, organizationId: ${organizationId}, organizationVersionId: ${organizationVersionId}`);
+            console.log(`DEBUG MODEL: Options:`, options);
+            
+            // Step 1: Get organization payment settings and rules
+            const [orgSettings] = await connection.query(`
+                SELECT 
+                    o.organization_id,
+                    o.name as organization_name,
+                    o.current_org_version_id,
+                    o.membership_fee_amount,
+                    o.membership_fee_type,
+                    o.status as org_status,
+                    ov.org_version_id,
+                    -- Default exclusion policy if column doesn't exist yet
+                    'CURRENT_TERM' as term_exclusion_policy
+                FROM tbl_organization o
+                LEFT JOIN tbl_organization_version ov ON o.current_org_version_id = ov.org_version_id
+                WHERE o.organization_id = ?
+                AND o.status = 'Approved'
+                AND (? IS NULL OR ov.org_version_id IS NULL OR ov.org_version_id = ?)
+            `, [organizationId, organizationVersionId, organizationVersionId]);
+
+            if (orgSettings.length === 0) {
+                return {
+                    success: false,
+                    message: 'Organization not found or not approved'
+                };
+            }
+
+            const orgData = orgSettings[0];
+            console.log('DEBUG MODEL: Organization settings:', orgData);
+
+            // Step 2: Get user membership information including application date
+            const [membershipInfo] = await connection.query(`
+                SELECT 
+                    om.user_id,
+                    om.organization_id,
+                    om.org_version_id as organization_version_id,
+                    om.joined_at,
+                    om.status as membership_status,
+                    om.payment_start_term_id,
+                    om.excluded_terms,
+                    -- Get application date from membership_application table
+                    ma.applied_at as application_date,
+                    ma.status as application_status
+                FROM tbl_organization_members om
+                LEFT JOIN tbl_membership_application ma ON (
+                    ma.organization_id = om.organization_id 
+                    AND ma.cycle_number = om.cycle_number 
+                    AND ma.user_id = om.user_id
+                    AND ma.status = 'Approved'
+                )
+                WHERE om.user_id = ? 
+                AND om.organization_id = ?
+                AND (? IS NULL OR om.org_version_id = ?)
+                AND om.status = 'Active'
+                ORDER BY om.joined_at DESC
+                LIMIT 1
+            `, [userId, organizationId, organizationVersionId, organizationVersionId]);
+
+            if (membershipInfo.length === 0) {
+                return {
+                    success: false,
+                    message: 'User is not an active member of this organization'
+                };
+            }
+
+            const memberData = membershipInfo[0];
+            const userApplicationDate = application_date || memberData.application_date;
+            console.log('DEBUG MODEL: Membership info:', memberData);
+            console.log('DEBUG MODEL: Using application date:', userApplicationDate);
+
+            // Step 3: Get current term and relevant terms
+            const currentDate = new Date().toISOString().split('T')[0];
+            const [terms] = await connection.query(`
+                SELECT 
+                    term_id,
+                    academic_year,
+                    term_name,
+                    start_date,
+                    end_date,
+                    is_active,
+                    DATE(?) BETWEEN start_date AND end_date as is_current_term
+                FROM tbl_academic_term 
+                ORDER BY start_date DESC
+                LIMIT ?
+            `, [currentDate, future_terms_count + 2]);
+
+            const currentTerm = current_term_id 
+                ? terms.find(t => t.term_id === current_term_id)
+                : terms.find(t => t.is_current_term === 1);
+
+            if (!currentTerm) {
+                return {
+                    success: false,
+                    message: 'No current term found',
+                    available_terms: terms
+                };
+            }
+
+            console.log('DEBUG MODEL: Current term:', currentTerm);
+
+            // Step 4: Apply exclusion logic
+            const shouldExcludeCurrentTerm = this.shouldExcludeFromCurrentTerm(
+                userApplicationDate,
+                currentTerm.start_date,
+                orgData.membership_fee_type
+            );
+
+            console.log('DEBUG MODEL: Exclusion logic result:', {
+                shouldExcludeCurrentTerm,
+                userApplicationDate,
+                currentTermStart: currentTerm.start_date,
+                paymentType: orgData.membership_fee_type
+            });
+
+            // Step 5: Get existing payments
+            const [existingPayments] = await connection.query(`
+                SELECT 
+                    tp.payment_id,
+                    tp.user_id,
+                    tp.organization_id,
+                    tp.organization_version_id,
+                    tp.term_id,
+                    tp.payment_status,
+                    tp.created_at,
+                    tp.verified_at,
+                    at.term_name,
+                    at.start_date,
+                    at.end_date,
+                    t.amount as transaction_amount,
+                    t.transaction_date
+                FROM tbl_term_payments tp
+                LEFT JOIN tbl_academic_term at ON tp.term_id = at.term_id
+                LEFT JOIN tbl_transaction t ON tp.transaction_id = t.transaction_id
+                WHERE tp.user_id = ?
+                AND tp.organization_id = ?
+                AND (? IS NULL OR tp.organization_version_id = ?)
+                ${include_history ? '' : 'AND tp.payment_status != "Rejected"'}
+                ORDER BY at.start_date DESC
+            `, [userId, organizationId, organizationVersionId, organizationVersionId]);
+
+            console.log('DEBUG MODEL: Existing payments:', existingPayments);
+
+            // Step 6: Calculate payment schedule
+            const paymentSchedule = this.calculatePaymentSchedule(
+                terms,
+                existingPayments,
+                currentTerm,
+                shouldExcludeCurrentTerm,
+                orgData.membership_fee_amount,
+                future_terms_count
+            );
+
+            // Step 7: Prepare enhanced response
+            const response = {
+                success: true,
+                organization_info: {
+                    organization_id: orgData.organization_id,
+                    organization_name: orgData.organization_name,
+                    fee_amount: orgData.membership_fee_amount,
+                    fee_type: orgData.membership_fee_type,
+                    exclusion_policy: orgData.term_exclusion_policy
+                },
+                current_term: currentTerm,
+                exclusion_info: {
+                    excluded_from_current_term: shouldExcludeCurrentTerm,
+                    reason: shouldExcludeCurrentTerm 
+                        ? 'Applied after term start date' 
+                        : 'Applied before or on term start date',
+                    application_date: userApplicationDate,
+                    term_start_date: currentTerm.start_date
+                },
+                payment_schedule: paymentSchedule,
+                existing_payments: existingPayments,
+                next_payment_required: paymentSchedule.find(p => p.status === 'required'),
+                user_message: this.generateUserMessage(shouldExcludeCurrentTerm, currentTerm, paymentSchedule)
+            };
+
+            return response;
+
+        } catch (error) {
+            console.error('ERROR MODEL: Error in enhanced payment status check:', error);
+            throw error;
+        } finally {
+            connection.release();
+        }
+    }
+
+    // Helper method to determine if user should be excluded from current term payment
+    static shouldExcludeFromCurrentTerm(applicationDate, termStartDate, paymentType) {
+        if (paymentType !== 'PER_TERM') {
+            return false; // Only applies to per-term organizations
+        }
+        
+        if (!applicationDate || !termStartDate) {
+            return false; // Default to not exclude if dates are missing
+        }
+        
+        const appDate = new Date(applicationDate);
+        const termStart = new Date(termStartDate);
+        
+        // If application is on or after term start, exclude current term
+        return appDate >= termStart;
+    }
+
+    // Helper method to calculate payment schedule
+    static calculatePaymentSchedule(terms, existingPayments, currentTerm, shouldExcludeCurrentTerm, feeAmount, futureTermsCount) {
+        const schedule = [];
+        const relevantTerms = terms.slice(0, futureTermsCount + 1);
+        
+        for (const term of relevantTerms) {
+            const existingPayment = existingPayments.find(p => p.term_id === term.term_id);
+            
+            let status = 'required';
+            let reason = '';
+            
+            if (existingPayment) {
+                status = existingPayment.payment_status.toLowerCase();
+                reason = 'Payment exists';
+            } else if (term.term_id === currentTerm.term_id && shouldExcludeCurrentTerm) {
+                status = 'excluded';
+                reason = 'Excluded due to application date';
+            } else if (new Date(term.end_date) < new Date()) {
+                status = 'overdue';
+                reason = 'Term has ended';
+            }
+            
+            schedule.push({
+                term_id: term.term_id,
+                term_name: term.term_name,
+                start_date: term.start_date,
+                end_date: term.end_date,
+                amount: feeAmount,
+                status: status,
+                reason: reason,
+                existing_payment: existingPayment || null
+            });
+        }
+        
+        return schedule;
+    }
+
+    // Helper method to generate user-friendly message
+    static generateUserMessage(shouldExcludeCurrentTerm, currentTerm, paymentSchedule) {
+        const requiredPayment = paymentSchedule.find(p => p.status === 'required');
+        
+        if (shouldExcludeCurrentTerm) {
+            const nextTerm = paymentSchedule.find(p => p.term_id !== currentTerm.term_id && p.status === 'required');
+            if (nextTerm) {
+                return `Since you applied during the current term, you're not required to pay for ${currentTerm.term_name}. Your payments will begin with ${nextTerm.term_name} starting on ${nextTerm.start_date}.`;
+            } else {
+                return `Since you applied during the current term, you're not required to pay for ${currentTerm.term_name}. No immediate payment required.`;
+            }
+        } else if (requiredPayment) {
+            return `Your term payments begin with ${requiredPayment.term_name}. Payment of ₱${requiredPayment.amount} is required.`;
+        } else {
+            return 'All required payments are up to date.';
+        }
+    }
+
+    // Original method kept for backward compatibility
     static async checkCurrentTermPaymentStatus(userId, organizationId, organizationVersionId = null) {
         const connection = await pool.getConnection();
         try {

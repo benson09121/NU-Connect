@@ -99,6 +99,8 @@ const publicRoutes = require('./web/routes/public');
 const analytics = require('./web/routes/analytics');
 const novaRoutes = require('./web/routes/nova');
 const termPaymentRoutes = require('./web/routes/termPaymentRoutes');
+const qrVerificationRoutes = require('./web/routes/qrVerification');
+const filesRoutes = require('./web/routes/files');
 
 
 // Routes on Mobile
@@ -127,10 +129,12 @@ app.use('/api/web', sse);
 app.use('/api/web', emailSuggestionsRoutes);
 app.use('/api/web', notificationsRoutes);
 app.use('/api/web', transactionsRoutes);
+app.use('/api/web', qrVerificationRoutes);
 app.use('/api/web', analytics);
 app.use('/api/web', novaRoutes);
 app.use('/api/web', termPaymentRoutes);
 app.use('/api/web/term-payments', termPaymentRoutes); // Temporary fallback for old path
+app.use('/api/web', filesRoutes);
 
 
 // Initialize cron jobs

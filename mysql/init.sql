@@ -124,6 +124,9 @@ CREATE TABLE tbl_organization (
     is_recruiting BOOLEAN DEFAULT TRUE,
     term_option BOOLEAN DEFAULT NULL,
     is_open_to_all_courses BOOLEAN DEFAULT FALSE,
+    -- Enhanced payment system fields
+    term_exclusion_policy ENUM('NONE', 'CURRENT_TERM', 'PRORATED') DEFAULT 'CURRENT_TERM',
+    payment_calculation_rules JSON DEFAULT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     archived_at TIMESTAMP NULL,
     archived_by VARCHAR(200) NULL,
@@ -197,6 +200,21 @@ CREATE TABLE tbl_organization_version_course (
     UNIQUE KEY ux_orgversion_program (org_version_id, program_id)
 );
 
+CREATE TABLE tbl_academic_term (
+    term_id INT PRIMARY KEY AUTO_INCREMENT,
+    term_name VARCHAR(100) NOT NULL UNIQUE,
+    term_description TEXT NULL,
+    academic_year VARCHAR(20) NULL, -- e.g., '2024-2025', '2025'
+    start_date DATE NOT NULL,
+    end_date DATE NOT NULL,
+    is_active BOOLEAN DEFAULT FALSE,
+    status ENUM('Draft', 'Active', 'Completed', 'Archived') DEFAULT 'Draft',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    created_by VARCHAR(200) NOT NULL,
+    FOREIGN KEY (created_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE
+);
+
 CREATE TABLE tbl_executive_rank (
     rank_id INT AUTO_INCREMENT PRIMARY KEY,
     rank_level INT UNIQUE NOT NULL,
@@ -234,10 +252,14 @@ CREATE TABLE tbl_organization_members (
     status ENUM('Active', 'Pending', 'Archived') DEFAULT 'Active',
     executive_role_id INT DEFAULT NULL,
     joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    -- Enhanced payment system fields
+    payment_start_term_id INT DEFAULT NULL,
+    excluded_terms JSON DEFAULT NULL,
     FOREIGN KEY (organization_id, cycle_number) REFERENCES tbl_renewal_cycle(organization_id, cycle_number) ON DELETE CASCADE,
     FOREIGN KEY (user_id) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
     FOREIGN KEY (executive_role_id) REFERENCES tbl_executive_role (executive_role_id) ON DELETE SET NULL,
-    FOREIGN KEY (org_version_id) REFERENCES tbl_organization_version(org_version_id) ON DELETE SET NULL
+    FOREIGN KEY (org_version_id) REFERENCES tbl_organization_version(org_version_id) ON DELETE SET NULL,
+    FOREIGN KEY (payment_start_term_id) REFERENCES tbl_academic_term(term_id) ON DELETE SET NULL
 );
 
 CREATE TABLE tbl_application_period (
@@ -791,6 +813,43 @@ CREATE TABLE tbl_transaction (
     INDEX idx_txn_org_version (org_version_id),
     INDEX idx_txn_org_version_date (org_version_id, transaction_date)
 );
+
+-- QR VERIFICATION SYSTEM TABLES AND PROCEDURES
+-- Transaction verification tokens for QR code authentication
+CREATE TABLE tbl_transaction_verification (
+    verification_id INT AUTO_INCREMENT PRIMARY KEY,
+    transaction_id INT NOT NULL,
+    jwt_token_id VARCHAR(255) NOT NULL UNIQUE,     -- The 'jti' claim from JWT
+    token_hash VARCHAR(255) NOT NULL,              -- SHA-256 of the JWT token
+    generated_by VARCHAR(200) NOT NULL,            -- User who generated the QR
+    generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP NOT NULL,
+    verification_count INT DEFAULT 0,
+    last_verified_at TIMESTAMP NULL,
+    last_verified_ip VARCHAR(45) NULL,
+    last_verified_user_agent TEXT NULL,
+    is_revoked BOOLEAN DEFAULT FALSE,
+    revoked_at TIMESTAMP NULL,
+    revoked_by VARCHAR(200) NULL,
+    revoke_reason VARCHAR(255) NULL,
+    
+    FOREIGN KEY (transaction_id) REFERENCES tbl_transaction(transaction_id) ON DELETE CASCADE,
+    FOREIGN KEY (generated_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
+    FOREIGN KEY (revoked_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
+    
+    INDEX idx_token_hash (token_hash),
+    INDEX idx_jwt_id (jwt_token_id),
+    INDEX idx_transaction_id (transaction_id),
+    INDEX idx_expires_at (expires_at),
+    INDEX idx_verification_count (verification_count),
+    INDEX idx_generated_by (generated_by)
+);
+
+-- Add QR token field to transaction table
+ALTER TABLE tbl_transaction 
+ADD COLUMN qr_token VARCHAR(500) NULL COMMENT 'Encrypted QR verification token',
+ADD COLUMN qr_enabled BOOLEAN DEFAULT TRUE COMMENT 'Whether QR verification is enabled for this transaction',
+ADD INDEX idx_qr_token (qr_token);
 
 CREATE TABLE tbl_event_attendance (
     attendance_id INT AUTO_INCREMENT PRIMARY KEY,
@@ -1533,6 +1592,9 @@ BEGIN
         p_payer_name,
         'Event payment transaction'
     );
+    
+    -- Generate QR verification token
+    CALL GenerateTransactionQRToken(v_transaction_id, v_user_id);
     
     -- Log the action
     CALL LogAction(
@@ -3019,6 +3081,9 @@ BEGIN
     INSERT INTO tbl_transaction_membership (transaction_id, organization_id, cycle_number)
     VALUES (v_transaction_id, p_organization_id, v_cycle_number);
 
+    -- Generate QR verification token
+    CALL GenerateTransactionQRToken(v_transaction_id, v_user_id);
+
     -- Log the action
     CALL LogAction(
         p_user_email,
@@ -4254,8 +4319,18 @@ BEGIN
     DECLARE v_last_approver_email VARCHAR(100);
     DECLARE v_submitted_org_name VARCHAR(255);
     DECLARE v_url VARCHAR(512);
+    DECLARE v_org_category ENUM('Co-Curricular Organization','Extra Curricular Organization') DEFAULT 'Co-Curricular Organization';
 
-    -- Cursor and handler declarations
+    -- Get period, application type, and organization category FIRST
+    SELECT a.period_id, a.application_type, a.submitted_org_name, 
+           COALESCE(ov.category, 'Co-Curricular Organization') as category
+    INTO v_period_id, v_application_type, v_submitted_org_name, v_org_category
+    FROM tbl_application a
+    LEFT JOIN tbl_organization_version ov ON a.org_version_id = ov.org_version_id
+    WHERE a.application_id = p_application_id
+    LIMIT 1;
+
+    -- Cursor declaration with ALL roles (filtering happens in the loop)
     DECLARE role_cursor CURSOR FOR
         SELECT role_id, hierarchy_order
         FROM tbl_role
@@ -4263,13 +4338,6 @@ BEGIN
           AND hierarchy_order IS NOT NULL
         ORDER BY hierarchy_order;
     DECLARE CONTINUE HANDLER FOR NOT FOUND SET v_done = TRUE;
-
-    -- Get period and application type
-    SELECT a.period_id, a.application_type, a.submitted_org_name
-    INTO v_period_id, v_application_type, v_submitted_org_name
-    FROM tbl_application a
-    WHERE a.application_id = p_application_id
-    LIMIT 1;
 
     SET v_url = CONCAT('/organizations/app-details/', p_application_id, '/', COALESCE(v_submitted_org_name, ''));
 
@@ -4282,6 +4350,13 @@ BEGIN
         FETCH role_cursor INTO v_role_id, v_hierarchy_order;
         IF v_done THEN
             LEAVE approval_loop;
+        END IF;
+
+        -- Skip Program Chair (hierarchy_order = 2) and Dean (hierarchy_order = 3) 
+        -- for Extra Curricular organizations
+        IF v_org_category = 'Extra Curricular Organization' 
+           AND v_hierarchy_order IN (2, 3) THEN
+            ITERATE approval_loop; -- Skip this iteration and continue with next role
         END IF;
 
         -- For the first step (adviser role), handle differently based on application type
@@ -12965,7 +13040,15 @@ BEGIN
            o.current_org_version_id,
            u.f_name AS user_first_name,
            u.l_name AS user_last_name,
-           u.email AS user_email
+           u.email AS user_email,
+           -- QR verification fields
+           t.qr_token,
+           t.qr_enabled,
+           tv.jwt_token_id AS qr_jwt_id,
+           tv.verification_count,
+           tv.generated_at AS qr_generated_at,
+           tv.expires_at AS qr_expires_at,
+           tv.last_verified_at AS qr_last_verified_at
     FROM tbl_transaction t
     JOIN tbl_payment_type pt ON t.payment_type_id = pt.payment_type_id
     JOIN tbl_transaction_type tt ON t.transaction_type_id = tt.transaction_type_id
@@ -12974,6 +13057,8 @@ BEGIN
     LEFT JOIN tbl_transaction_membership tm ON t.transaction_id = tm.transaction_id
     LEFT JOIN tbl_organization o ON tm.organization_id = o.organization_id
     LEFT JOIN tbl_user u ON t.user_id = u.user_id
+    LEFT JOIN tbl_transaction_verification tv ON t.transaction_id = tv.transaction_id 
+        AND tv.is_revoked = FALSE AND tv.expires_at > CURRENT_TIMESTAMP
     WHERE t.transaction_id = p_transaction_id;
 END $$
 DELIMITER ;
@@ -13031,7 +13116,15 @@ BEGIN
            COALESCE(t.org_version_id, rc.org_version_id) AS organization_version_id,
            u.f_name AS user_first_name,
            u.l_name AS user_last_name,
-           u.email AS user_email
+           u.email AS user_email,
+           -- QR verification fields
+           t.qr_token,
+           t.qr_enabled,
+           tv.jwt_token_id AS qr_jwt_id,
+           tv.verification_count,
+           tv.generated_at AS qr_generated_at,
+           tv.expires_at AS qr_expires_at,
+           tv.last_verified_at AS qr_last_verified_at
     FROM tbl_transaction t
     JOIN tbl_payment_type pt ON t.payment_type_id = pt.payment_type_id
     JOIN tbl_transaction_type tt ON t.transaction_type_id = tt.transaction_type_id
@@ -13040,6 +13133,8 @@ BEGIN
     LEFT JOIN tbl_transaction_membership tm ON t.transaction_id = tm.transaction_id
     LEFT JOIN tbl_renewal_cycle rc ON tm.organization_id = rc.organization_id AND tm.cycle_number = rc.cycle_number
     LEFT JOIN tbl_user u ON t.user_id = u.user_id
+    LEFT JOIN tbl_transaction_verification tv ON t.transaction_id = tv.transaction_id 
+        AND tv.is_revoked = FALSE AND tv.expires_at > CURRENT_TIMESTAMP
     WHERE (v_user_id IS NULL OR t.user_id = v_user_id)
       AND (p_status IS NULL OR t.status = p_status)
       AND (p_include_archived OR t.archived_at IS NULL)
@@ -13318,6 +13413,9 @@ BEGIN
         NULL,
         p_proof_image
     );
+
+    -- Generate QR verification token
+    CALL GenerateTransactionQRToken(v_transaction_id, v_user_id);
 
     -- Return the created transaction
     CALL GetTransaction(v_transaction_id);
@@ -15869,6 +15967,293 @@ BEGIN
 
     COMMIT;
 END$$
+DELIMITER ;
+
+-- QR VERIFICATION SYSTEM PROCEDURES
+
+-- Helper Procedure: Generate QR Token for Transaction
+DELIMITER $$
+CREATE PROCEDURE GenerateTransactionQRToken(
+    IN p_transaction_id INT,
+    IN p_user_id VARCHAR(200)
+)
+BEGIN
+    DECLARE v_jwt_token_id VARCHAR(255);
+    DECLARE v_token_hash VARCHAR(255);
+    DECLARE v_expires_at TIMESTAMP;
+    DECLARE v_encrypted_token VARCHAR(500);
+    
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        RESIGNAL;
+    END;
+
+    START TRANSACTION;
+    
+    -- Generate unique token ID and hash
+    SET v_jwt_token_id = CONCAT('qr_', p_transaction_id, '_', UNIX_TIMESTAMP(), '_', SUBSTRING(MD5(RAND()), 1, 8));
+    SET v_token_hash = SHA2(v_jwt_token_id, 256);
+    SET v_expires_at = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 1 YEAR);
+    
+    -- Generate encrypted token (simplified - actual encryption would be done by backend)
+    SET v_encrypted_token = CONCAT('QR_', UPPER(MD5(CONCAT(p_transaction_id, v_jwt_token_id, CURRENT_TIMESTAMP))));
+    
+    -- Call the token generation procedure
+    CALL GenerateQRVerificationToken(p_transaction_id, v_jwt_token_id, v_token_hash, p_user_id, v_expires_at);
+    
+    -- Update transaction with encrypted QR token
+    UPDATE tbl_transaction 
+    SET qr_token = v_encrypted_token,
+        qr_enabled = TRUE
+    WHERE transaction_id = p_transaction_id;
+    
+    COMMIT;
+    
+    -- Return success
+    SELECT 
+        p_transaction_id AS transaction_id,
+        v_jwt_token_id AS token_id,
+        v_encrypted_token AS qr_token,
+        'QR token generated successfully' AS message;
+END $$
+DELIMITER ;
+
+-- Stored Procedure: Generate QR Verification Token
+DELIMITER $$
+CREATE PROCEDURE GenerateQRVerificationToken(
+    IN p_transaction_id INT,
+    IN p_jwt_token_id VARCHAR(255),
+    IN p_token_hash VARCHAR(255),
+    IN p_generated_by VARCHAR(200),
+    IN p_expires_at TIMESTAMP
+)
+BEGIN
+    DECLARE user_exists INT DEFAULT 0;
+    DECLARE actual_generated_by VARCHAR(200);
+    
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        RESIGNAL;
+    END;
+
+    START TRANSACTION;
+    
+    -- Check if the user exists, fallback to system user if not
+    SELECT COUNT(*) INTO user_exists 
+    FROM tbl_user 
+    WHERE user_id = p_generated_by AND status = 'Active';
+    
+    SET actual_generated_by = CASE 
+        WHEN user_exists > 0 THEN p_generated_by 
+        ELSE 'SYSTEM_QR_GENERATOR' 
+    END;
+
+    -- Revoke any existing active token for this transaction
+    -- Set revoked_by to NULL since this is automatic revocation
+    UPDATE tbl_transaction_verification 
+    SET is_revoked = TRUE, 
+        revoked_at = CURRENT_TIMESTAMP,
+        revoked_by = NULL,
+        revoke_reason = 'Replaced by new token'
+    WHERE transaction_id = p_transaction_id 
+      AND is_revoked = FALSE
+      AND expires_at > CURRENT_TIMESTAMP;
+    
+    -- Insert new verification token with actual_generated_by
+    INSERT INTO tbl_transaction_verification (
+        transaction_id, jwt_token_id, token_hash, 
+        generated_by, expires_at
+    ) VALUES (
+        p_transaction_id, p_jwt_token_id, p_token_hash,
+        actual_generated_by, p_expires_at
+    );
+    
+    -- Update transaction record with encrypted QR token (will be set by application)
+    UPDATE tbl_transaction 
+    SET qr_enabled = TRUE
+    WHERE transaction_id = p_transaction_id;
+    
+    COMMIT;
+    
+    -- Return the created verification record
+    SELECT 
+        verification_id, 
+        jwt_token_id, 
+        expires_at,
+        generated_at,
+        actual_generated_by as generated_by
+    FROM tbl_transaction_verification 
+    WHERE jwt_token_id = p_jwt_token_id;
+END $$
+DELIMITER ;
+
+-- Stored Procedure: Verify QR Token
+DELIMITER $$
+CREATE PROCEDURE VerifyQRToken(
+    IN p_jwt_token_id VARCHAR(255),
+    IN p_client_ip VARCHAR(45),
+    IN p_user_agent TEXT
+)
+BEGIN
+    DECLARE v_verification_id INT DEFAULT NULL;
+    DECLARE v_transaction_id INT DEFAULT NULL;
+    DECLARE v_is_revoked BOOLEAN DEFAULT FALSE;
+    DECLARE v_expires_at TIMESTAMP DEFAULT NULL;
+    
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        RESIGNAL;
+    END;
+
+    START TRANSACTION;
+    
+    -- Get verification record
+    SELECT verification_id, transaction_id, is_revoked, expires_at
+    INTO v_verification_id, v_transaction_id, v_is_revoked, v_expires_at
+    FROM tbl_transaction_verification
+    WHERE jwt_token_id = p_jwt_token_id;
+    
+    -- Check if token exists
+    IF v_verification_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Invalid verification token';
+    END IF;
+    
+    -- Check if token is revoked
+    IF v_is_revoked = TRUE THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Verification token has been revoked';
+    END IF;
+    
+    -- Check if token is expired
+    IF v_expires_at < CURRENT_TIMESTAMP THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Verification token has expired';
+    END IF;
+    
+    -- Update verification stats
+    UPDATE tbl_transaction_verification
+    SET verification_count = verification_count + 1,
+        last_verified_at = CURRENT_TIMESTAMP,
+        last_verified_ip = p_client_ip,
+        last_verified_user_agent = p_user_agent
+    WHERE verification_id = v_verification_id;
+    
+    COMMIT;
+    
+    -- Return transaction details with verification info
+    SELECT 
+        t.transaction_id,
+        t.receipt_no,
+        t.amount,
+        'PHP' AS currency,
+        t.transaction_date,
+        t.status,
+        t.payer_name,
+        pt.label AS payment_type,
+        tt.label AS transaction_type,
+        COALESCE(o.name, 'NU Connect') AS organization_name,
+        tv.verification_count,
+        tv.generated_at AS token_generated_at,
+        tv.last_verified_at,
+        CURRENT_TIMESTAMP AS verified_at,
+        TRUE AS is_authentic
+    FROM tbl_transaction t
+    JOIN tbl_transaction_verification tv ON t.transaction_id = tv.transaction_id
+    LEFT JOIN tbl_payment_type pt ON t.payment_type_id = pt.payment_type_id
+    LEFT JOIN tbl_transaction_type tt ON t.transaction_type_id = tt.transaction_type_id
+    LEFT JOIN tbl_transaction_membership tm ON t.transaction_id = tm.transaction_id
+    LEFT JOIN tbl_organization o ON tm.organization_id = o.organization_id
+    WHERE tv.jwt_token_id = p_jwt_token_id;
+END $$
+DELIMITER ;
+
+-- Stored Procedure: Revoke QR Token
+DELIMITER $$
+CREATE PROCEDURE RevokeQRToken(
+    IN p_transaction_id INT,
+    IN p_revoked_by VARCHAR(200),
+    IN p_reason VARCHAR(255)
+)
+BEGIN
+    DECLARE v_token_id VARCHAR(255) DEFAULT NULL;
+    
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        RESIGNAL;
+    END;
+
+    START TRANSACTION;
+    
+    -- Get the current active token
+    SELECT jwt_token_id INTO v_token_id
+    FROM tbl_transaction_verification
+    WHERE transaction_id = p_transaction_id
+      AND is_revoked = FALSE
+      AND expires_at > CURRENT_TIMESTAMP
+    ORDER BY generated_at DESC
+    LIMIT 1;
+    
+    IF v_token_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'No active verification token found for this transaction';
+    END IF;
+    
+    -- Revoke the token
+    UPDATE tbl_transaction_verification
+    SET is_revoked = TRUE,
+        revoked_at = CURRENT_TIMESTAMP,
+        revoked_by = p_revoked_by,
+        revoke_reason = p_reason
+    WHERE jwt_token_id = v_token_id;
+    
+    -- Update transaction record
+    UPDATE tbl_transaction
+    SET qr_enabled = FALSE
+    WHERE transaction_id = p_transaction_id;
+    
+    COMMIT;
+    
+    -- Return success info
+    SELECT 
+        v_token_id AS revoked_token_id,
+        CURRENT_TIMESTAMP AS revoked_at,
+        p_reason AS reason;
+END $$
+DELIMITER ;
+
+-- Clean up expired tokens (can be run as a scheduled job)
+DELIMITER $$
+CREATE PROCEDURE CleanupExpiredQRTokens()
+BEGIN
+    DECLARE cleaned_count INT DEFAULT 0;
+    
+    -- Count expired tokens
+    SELECT COUNT(*) INTO cleaned_count
+    FROM tbl_transaction_verification
+    WHERE expires_at < CURRENT_TIMESTAMP
+      AND is_revoked = FALSE;
+    
+    -- Mark expired tokens as revoked
+    UPDATE tbl_transaction_verification
+    SET is_revoked = TRUE,
+        revoked_at = CURRENT_TIMESTAMP,
+        revoke_reason = 'Expired automatically'
+    WHERE expires_at < CURRENT_TIMESTAMP
+      AND is_revoked = FALSE;
+    
+    -- Update transaction records
+    UPDATE tbl_transaction t
+    SET qr_enabled = TRUE  -- Keep enabled, but token is expired
+    WHERE EXISTS (
+        SELECT 1 FROM tbl_transaction_verification tv
+        WHERE tv.transaction_id = t.transaction_id
+          AND tv.expires_at < CURRENT_TIMESTAMP
+          AND tv.revoke_reason = 'Expired automatically'
+    );
+    
+    SELECT CONCAT('Cleaned up ', cleaned_count, ' expired QR tokens') AS result;
+END $$
 DELIMITER ;
 
 
@@ -18706,6 +19091,9 @@ BEGIN
         'Pending'
     );
     
+    -- Generate QR verification token
+    CALL GenerateTransactionQRToken(v_transaction_id, p_user_id);
+    
     -- Return success details
     SELECT 
         v_transaction_id as transaction_id,
@@ -18872,6 +19260,36 @@ JOIN tbl_ai_conversation c ON m.conversation_id = c.conversation_id
 WHERE m.message_scope IN ('multi_org', 'global')
   AND c.is_archived = 0;
 
+-- QR VERIFICATION SYSTEM VIEW
+-- Optional: Create a view for easy token status checking
+CREATE VIEW v_transaction_qr_status AS
+SELECT 
+    t.transaction_id,
+    t.receipt_no,
+    t.qr_enabled,
+    t.qr_token,
+    tv.jwt_token_id,
+    tv.expires_at,
+    tv.is_revoked,
+    tv.verification_count,
+    tv.last_verified_at,
+    CASE 
+        WHEN tv.jwt_token_id IS NULL THEN 'No Token'
+        WHEN tv.is_revoked = TRUE THEN 'Revoked'
+        WHEN tv.expires_at < CURRENT_TIMESTAMP THEN 'Expired'
+        ELSE 'Active'
+    END AS token_status
+FROM tbl_transaction t
+LEFT JOIN tbl_transaction_verification tv ON t.transaction_id = tv.transaction_id
+  AND tv.is_revoked = FALSE 
+  AND tv.expires_at = (
+    SELECT MAX(expires_at) 
+    FROM tbl_transaction_verification tv2 
+    WHERE tv2.transaction_id = t.transaction_id 
+    AND tv2.is_revoked = FALSE
+  )
+ORDER BY t.transaction_id DESC;
+
 -- SAMPLE DATAS
 INSERT INTO tbl_role(role_name, is_approver, hierarchy_order)
 VALUES("Student",0,null), 
@@ -18888,6 +19306,18 @@ VALUES (
     'System',
     'User',
     'system@nu-dasma.edu.ph',
+    (SELECT role_id FROM tbl_role WHERE LOWER(role_name) = 'sdao' LIMIT 1),
+    'Active',
+    CURRENT_TIMESTAMP
+);
+
+-- Create system user for QR verification operations
+INSERT INTO tbl_user (user_id, f_name, l_name, email, role_id, status, created_at)
+VALUES (
+    'SYSTEM_QR_GENERATOR',
+    'System',
+    'QR Generator',
+    'system-qr@nu-dasma.edu.ph',
     (SELECT role_id FROM tbl_role WHERE LOWER(role_name) = 'sdao' LIMIT 1),
     'Active',
     CURRENT_TIMESTAMP
@@ -19109,21 +19539,6 @@ INSERT INTO tbl_rank_permission(rank_id, permission_id) VALUES
 -- =====================================
 
 -- Academic Terms Table
-CREATE TABLE tbl_academic_term (
-    term_id INT PRIMARY KEY AUTO_INCREMENT,
-    term_name VARCHAR(100) NOT NULL UNIQUE,
-    term_description TEXT NULL,
-    academic_year VARCHAR(20) NULL, -- e.g., '2024-2025', '2025'
-    start_date DATE NOT NULL,
-    end_date DATE NOT NULL,
-    is_active BOOLEAN DEFAULT FALSE,
-    status ENUM('Draft', 'Active', 'Completed', 'Archived') DEFAULT 'Draft',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    created_by VARCHAR(200) NOT NULL,
-    FOREIGN KEY (created_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE
-);
-
 -- Individual Member Term Payments (Simplified)
 CREATE TABLE tbl_term_payments (
     payment_id INT AUTO_INCREMENT PRIMARY KEY,
@@ -19764,6 +20179,9 @@ BEGIN
     INSERT INTO tbl_transaction_membership 
     (transaction_id, organization_id, cycle_number)
     VALUES (p_transaction_id, p_organization_id, v_cycle_number);
+    
+    -- Generate QR verification token
+    CALL GenerateTransactionQRToken(p_transaction_id, p_user_id);
     
     SET p_cycle_number = v_cycle_number;
     SET p_amount = v_membership_fee_amount;
@@ -20543,8 +20961,10 @@ SET @rcp := CONCAT((SELECT rs.prefix FROM tbl_receipt_sequence rs WHERE rs.serie
 
 INSERT INTO tbl_transaction (user_id, payer_name, payee_name, payment_description, amount, transaction_type_id, payment_type_id, category_id, status, transaction_date, receipt_no, proof_image, created_at, updated_at, archived_at, archived_by, archived_reason)
 VALUES (NULL, CONCAT('Donor ',i,'A'), CONCAT('Org ',i), 'Membership donation', 1500.00, txn_type_income, pay_cash, cat_membership, 'Completed', NOW(), @rcp, NULL, NOW(), NOW(), NULL, NULL, NULL);
+SET @txn_id = LAST_INSERT_ID();
 INSERT INTO tbl_transaction_membership (transaction_id, organization_id, cycle_number)
-VALUES (LAST_INSERT_ID(), @org, 1);
+VALUES (@txn_id, @org, 1);
+-- CALL GenerateTransactionQRToken(@txn_id, @sdao);
 
 UPDATE tbl_receipt_sequence SET current_value=current_value+1, updated_at=NOW() WHERE series_key='ORG';
 SET @num := (SELECT rs.current_value FROM tbl_receipt_sequence rs WHERE rs.series_key='ORG');
@@ -20553,13 +20973,17 @@ SET @rcp := CONCAT((SELECT rs.prefix FROM tbl_receipt_sequence rs WHERE rs.serie
 
 INSERT INTO tbl_transaction (user_id, payer_name, payee_name, payment_description, amount, transaction_type_id, payment_type_id, category_id, status, transaction_date, receipt_no, proof_image, created_at, updated_at, archived_at, archived_by, archived_reason)
 VALUES (NULL, CONCAT('Sponsor ',i), CONCAT('Org ',i), 'Sponsorship', 5000.00, txn_type_income, pay_bank, cat_sponsorship, 'Completed', NOW(), @rcp, NULL, NOW(), NOW(), NULL, NULL, NULL);
+SET @txn_id = LAST_INSERT_ID();
 INSERT INTO tbl_transaction_membership (transaction_id, organization_id, cycle_number)
-VALUES (LAST_INSERT_ID(), @org, 1);
+VALUES (@txn_id, @org, 1);
+-- CALL GenerateTransactionQRToken(@txn_id, @sdao);
 
 INSERT INTO tbl_transaction (user_id, payer_name, payee_name, payment_description, amount, transaction_type_id, payment_type_id, category_id, status, transaction_date, receipt_no, proof_image, created_at, updated_at, archived_at, archived_by, archived_reason)
 VALUES (NULL, 'Org Office', CONCAT('Vendor ',i), 'Office supplies', 1200.00, txn_type_expense, pay_gcash, cat_office, 'Completed', NOW(), NULL, NULL, NOW(), NOW(), NULL, NULL, NULL);
+SET @txn_id = LAST_INSERT_ID();
 INSERT INTO tbl_transaction_membership (transaction_id, organization_id, cycle_number)
-VALUES (LAST_INSERT_ID(), @org, 1);
+VALUES (@txn_id, @org, 1);
+-- CALL GenerateTransactionQRToken(@txn_id, @sdao);
 
 SET i = i + 1;
 END WHILE;
@@ -20580,6 +21004,16 @@ FROM tbl_event ev
 ) AS e ON t.rn = e.rn
 WHERE t.rn <= 4;
 
+/* Generate QR tokens for event ticket transactions */
+SET @ticket_txn_id1 = (SELECT MIN(t.transaction_id) FROM tbl_transaction t JOIN tbl_transaction_event te ON t.transaction_id = te.transaction_id WHERE t.payment_description = 'Event tickets');
+SET @ticket_txn_id2 = (SELECT MIN(t.transaction_id) FROM tbl_transaction t JOIN tbl_transaction_event te ON t.transaction_id = te.transaction_id WHERE t.payment_description = 'Event tickets' AND t.transaction_id > @ticket_txn_id1);
+SET @ticket_txn_id3 = (SELECT MIN(t.transaction_id) FROM tbl_transaction t JOIN tbl_transaction_event te ON t.transaction_id = te.transaction_id WHERE t.payment_description = 'Event tickets' AND t.transaction_id > @ticket_txn_id2);
+SET @ticket_txn_id4 = (SELECT MIN(t.transaction_id) FROM tbl_transaction t JOIN tbl_transaction_event te ON t.transaction_id = te.transaction_id WHERE t.payment_description = 'Event tickets' AND t.transaction_id > @ticket_txn_id3);
+-- IF @ticket_txn_id1 IS NOT NULL THEN CALL GenerateTransactionQRToken(@ticket_txn_id1, @sdao); END IF;
+-- IF @ticket_txn_id2 IS NOT NULL THEN CALL GenerateTransactionQRToken(@ticket_txn_id2, @sdao); END IF;
+-- IF @ticket_txn_id3 IS NOT NULL THEN CALL GenerateTransactionQRToken(@ticket_txn_id3, @sdao); END IF;
+-- IF @ticket_txn_id4 IS NOT NULL THEN CALL GenerateTransactionQRToken(@ticket_txn_id4, @sdao); END IF;
+
 INSERT INTO tbl_transaction (user_id, payer_name, payee_name, payment_description, amount, transaction_type_id, payment_type_id, category_id, status, transaction_date, receipt_no, proof_image, created_at, updated_at, archived_at, archived_by, archived_reason)
 SELECT NULL, 'Event Expense', 'Supplier', 'Event supplies', 800.00, txn_type_expense, pay_bank, cat_office, 'Completed', e.start_date, NULL, NULL, NOW(), NOW(), NULL, NULL, NULL
 FROM tbl_event AS e ORDER BY e.event_id LIMIT 4;
@@ -20595,6 +21029,63 @@ SELECT ev.event_id, ROW_NUMBER() OVER (ORDER BY ev.event_id) rn
 FROM tbl_event ev
 ) AS e ON t.rn = e.rn
 WHERE t.rn <= 4;
+
+/* Generate QR tokens for event expense transactions */
+SET @expense_txn_id1 = (SELECT MIN(t.transaction_id) FROM tbl_transaction t JOIN tbl_transaction_event te ON t.transaction_id = te.transaction_id WHERE t.payment_description = 'Event supplies');
+SET @expense_txn_id2 = (SELECT MIN(t.transaction_id) FROM tbl_transaction t JOIN tbl_transaction_event te ON t.transaction_id = te.transaction_id WHERE t.payment_description = 'Event supplies' AND t.transaction_id > @expense_txn_id1);
+SET @expense_txn_id3 = (SELECT MIN(t.transaction_id) FROM tbl_transaction t JOIN tbl_transaction_event te ON t.transaction_id = te.transaction_id WHERE t.payment_description = 'Event supplies' AND t.transaction_id > @expense_txn_id2);
+SET @expense_txn_id4 = (SELECT MIN(t.transaction_id) FROM tbl_transaction t JOIN tbl_transaction_event te ON t.transaction_id = te.transaction_id WHERE t.payment_description = 'Event supplies' AND t.transaction_id > @expense_txn_id3);
+-- IF @expense_txn_id1 IS NOT NULL THEN CALL GenerateTransactionQRToken(@expense_txn_id1, @sdao); END IF;
+-- IF @expense_txn_id2 IS NOT NULL THEN CALL GenerateTransactionQRToken(@expense_txn_id2, @sdao); END IF;
+-- IF @expense_txn_id3 IS NOT NULL THEN CALL GenerateTransactionQRToken(@expense_txn_id3, @sdao); END IF;
+-- IF @expense_txn_id4 IS NOT NULL THEN CALL GenerateTransactionQRToken(@expense_txn_id4, @sdao); END IF;
+
+/* 27.5) Sample QR Verification Activities */
+-- Simulate some QR verification attempts for realistic audit trail data
+INSERT INTO tbl_transaction_verification (
+    transaction_id, 
+    jwt_token_id,
+    token_hash, 
+    generated_by,
+    expires_at, 
+    generated_at, 
+    last_verified_at, 
+    verification_count,
+    last_verified_ip,
+    last_verified_user_agent
+)
+SELECT 
+    t.transaction_id,
+    CONCAT('demo_jwt_', t.transaction_id, '_', UNIX_TIMESTAMP(NOW())),
+    SHA2(CONCAT('demo_token_', t.transaction_id, '_', NOW()), 256),
+    @sdao,
+    DATE_ADD(t.created_at, INTERVAL 30 DAY),
+    t.created_at,
+    CASE 
+        WHEN RAND() > 0.7 THEN DATE_ADD(t.created_at, INTERVAL FLOOR(RAND() * 7) DAY)
+        ELSE NULL 
+    END,
+    CASE 
+        WHEN RAND() > 0.7 THEN FLOOR(RAND() * 3) + 1
+        ELSE 0 
+    END,
+    CASE 
+        WHEN RAND() > 0.7 THEN CONCAT('192.168.1.', FLOOR(RAND() * 255))
+        ELSE NULL 
+    END,
+    CASE 
+        WHEN RAND() > 0.7 THEN ELT(
+            FLOOR(RAND() * 3) + 1,
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15',
+            'Mozilla/5.0 (Android 11; Mobile; rv:68.0) Gecko/68.0 Firefox/88.0'
+        )
+        ELSE NULL 
+    END
+FROM tbl_transaction t 
+WHERE t.qr_token IS NOT NULL
+ON DUPLICATE KEY UPDATE 
+    jwt_token_id = VALUES(jwt_token_id);
 
 /* 28) Notifications + recipients */
 INSERT INTO tbl_notification (sender_id, entity_type, entity_id, title, message, url, action, created_at)

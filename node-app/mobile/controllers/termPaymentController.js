@@ -97,24 +97,42 @@ class MobileTermPaymentController {
         }
     }
 
-    // Check payment status for current term
+    // Enhanced check payment status for current term with exclusion logic
     static async checkPaymentStatus(req, res) {
         try {
-            const { organizationId } = req.params;
-            const { organizationVersionId } = req.query; // Add organization_version_id from query params
+            const { organizationId, organizationVersionId } = req.params;
+            const { 
+                application_date, 
+                current_term_id, 
+                include_history = false, 
+                future_terms_count = 4 
+            } = req.query;
+            
             const user = await userModel.getUser(req.user.email);
             const userId = user.user_id;
             
-            console.log(`DEBUG CONTROLLER: Check payment status called for userId: ${userId}, organizationId: ${organizationId}, organizationVersionId: ${organizationVersionId}`);
+            console.log(`DEBUG CONTROLLER: Enhanced check payment status called for userId: ${userId}, organizationId: ${organizationId}, organizationVersionId: ${organizationVersionId}`);
+            console.log(`DEBUG CONTROLLER: Additional params - application_date: ${application_date}, current_term_id: ${current_term_id}, include_history: ${include_history}`);
 
-            const statusData = await MobileTermPaymentModel.checkCurrentTermPaymentStatus(userId, organizationId, organizationVersionId);
+            // Get enhanced payment status data with exclusion logic
+            const statusData = await MobileTermPaymentModel.checkEnhancedPaymentStatus(
+                userId, 
+                organizationId, 
+                organizationVersionId, 
+                {
+                    application_date,
+                    current_term_id: current_term_id ? parseInt(current_term_id) : null,
+                    include_history: include_history === 'true',
+                    future_terms_count: parseInt(future_terms_count) || 4
+                }
+            );
             
             res.json({
                 success: true,
                 data: statusData
             });
         } catch (error) {
-            console.error('ERROR CONTROLLER: Error in checkPaymentStatus:', error);
+            console.error('ERROR CONTROLLER: Error in enhanced checkPaymentStatus:', error);
             res.status(500).json({
                 success: false,
                 message: 'Failed to check payment status',
