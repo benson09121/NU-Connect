@@ -389,17 +389,88 @@ async function scanTicket(req, res) {
 }
 
 async function getEventPublicationImage(req, res) {
-  let { organization_id, organization_version_id, event_id, image } = req.query;
- console.log('getEventPublicationImage: Received parameters:', { organization_id, organization_version_id, event_id, image });
+  let { organization_id, organization_version_id, event_id, image, image_name } = req.query;
+
+  // Support both 'image' and 'image_name' parameters for backward compatibility
+  const finalImageName = image_name || image;
+
+  console.log('getEventPublicationImage: Received parameters:', {
+    organization_id,
+    organization_version_id,
+    event_id,
+    image: image || 'not provided',
+    image_name: image_name || 'not provided',
+    finalImageName
+  });
+
+  if (!event_id || !finalImageName) {
+    return res.status(400).json({
+      error: "Missing required parameters: event_id and image (or image_name)"
+    });
+  }
+
+  // Encode parameters for URL safety
+  organization_id = organization_id ? encodeURIComponent(organization_id) : '';
+  organization_version_id = organization_version_id ? encodeURIComponent(organization_version_id) : '';
+
+  // Determine if it's an SDAO event
+  const isSDAO = !organization_id || organization_id === 'null' || organization_id === '' || organization_id === 'undefined';
+
+  const image_name_encoded = encodeURIComponent(finalImageName);
+
+  let xAccelPath;
+  let physicalPath;
+
+  if (isSDAO) {
+    // SDAO event: serve from /app/events/SDAO/{event_id}/publication_images/{image_name}
+    xAccelPath = `/protected-events/SDAO/${event_id}/publication_images/${image_name_encoded}`;
+    physicalPath = path.join('/app/events/SDAO', String(event_id), 'publication_images', finalImageName);
+  } else {
+    // Organization event: use the complex path
+    if (!organization_version_id) {
+      return res.status(400).json({
+        error: "Missing required parameter: organization_version_id for organization event"
+      });
+    }
+    physicalPath = path.join(
+      '/app/organizations',
+      String(organization_id),
+      String(organization_version_id),
+      'events',
+      String(event_id),
+      'publication_images',
+      finalImageName
+    );
+    xAccelPath = `/protected-organization-requirements/${organization_id}/${organization_version_id}/events/${event_id}/publication_images/${image_name_encoded}`;
+  }
+
+  // Log for debugging
+  console.log(`getEventPublicationImage: Attempting to serve image`, {
+    event_id,
+    finalImageName,
+    organization_id,
+    isSDAO,
+    xAccelPath,
+    physicalPath,
+    exists: physicalPath ? fs.existsSync(physicalPath) : false
+  });
+
+  // Check if file exists before trying to serve it
+  if (!fs.existsSync(physicalPath)) {
+    console.error(`getEventPublicationImage: File not found at ${physicalPath}`);
+    return res.status(404).json({
+      error: "Image not found",
+      message: "The requested image file does not exist."
+    });
+  }
+
   try {
     res.header('Access-Control-Allow-Methods', 'GET, OPTIONS');
     res.header('Access-Control-Allow-Headers', 'Authorization, Content-Type, Accept');
-    res.setHeader('Content-Type', getContentType(image));
-    res.setHeader('Content-Disposition', `inline; filename="${image}"`);
-    res.setHeader(
-      'X-Accel-Redirect',
-      `/protected-organization-requirements/${organization_id}/${organization_version_id}/events/${event_id}/publication_images/${image}`
-    );
+    res.setHeader('Content-Type', getContentType(finalImageName));
+    res.setHeader('Content-Disposition', `inline; filename="${finalImageName}"`);
+    res.setHeader('Cache-Control', 'public, max-age=3600'); // Cache for 1 hour
+    res.setHeader('X-Accel-Redirect', xAccelPath);
     res.end();
   } catch (error) {
     console.error('getEventPublicationImage error:', error);
