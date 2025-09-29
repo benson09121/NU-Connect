@@ -13,6 +13,31 @@ const { get } = require('http');
 const certificateQueue = require('../../jobs/certificateQueue');
 const { subscribeToChannel, publishToChannel } = require('../../web/controllers/sseController');
 
+// robust extractor for mysql/mysql2 SP return shapes
+function extractTransactionId(spResult) {
+  const q = [spResult];
+  while (q.length) {
+    const cur = q.shift();
+    if (!cur) continue;
+
+    if (Array.isArray(cur)) {
+      for (const item of cur) q.push(item);
+      continue;
+    }
+    if (typeof cur === 'object') {
+      // final SELECT v_transaction_id AS transaction_id
+      if ('transaction_id' in cur && cur.transaction_id != null) {
+        return Number(cur.transaction_id);
+      }
+      // fallback for OkPacket (if ever used)
+      if ('insertId' in cur && cur.insertId) {
+        return Number(cur.insertId);
+      }
+    }
+  }
+  return null;
+}
+
 function getContentType(filename) {
   const ext = path.extname(filename).toLowerCase();
   const contentTypes = {
@@ -105,19 +130,22 @@ async function registerEvent(req, res) {
                 eventDetails.organization_id,
                 eventDetails.organization_version_id
             );
-            transaction_id = transactionResult[0].transaction_id;
+            
+            // ✅ FIX: pull id from the SP result
+            transaction_id = extractTransactionId(transactionResult);
+            if (!transaction_id) {
+                return res.status(500).json({ message: 'Failed to create transaction id' });
+            }
             
             publishToChannel('transactions', { 
                 type: 'created', 
                 data: transactionResult 
             });
 
-            if (transactionResult && transactionResult[0].transaction_id) {
-                publishToChannel(`transactions:organization:${eventDetails.organization_id}`, { 
-                    type: 'created', 
-                    data: transactionResult 
-                });
-            }
+            publishToChannel(`transactions:organization:${eventDetails.organization_id}`, { 
+                type: 'created', 
+                data: transactionResult 
+            });
             
             status = 'Pending';
 
@@ -133,7 +161,8 @@ async function registerEvent(req, res) {
 
             res.status(201).json({
                 message: 'Event payment transaction created successfully',
-                transaction: transactionResult
+                transactionId: transaction_id,
+                attendee: newAttendee
             });
         } else {
             // Handle free event registration (existing logic)

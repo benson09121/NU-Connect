@@ -1615,6 +1615,7 @@ BEGIN
     
     -- Return the created transaction using existing GetTransaction procedure
     CALL GetTransaction(v_transaction_id);
+    SELECT v_transaction_id AS transaction_id;
     
 END $$
 DELIMITER ;

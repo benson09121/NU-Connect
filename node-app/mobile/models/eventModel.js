@@ -163,7 +163,7 @@ async function createEventTransaction(userEmail, payerName, amount, paymentMetho
             'CALL CreateEventTransaction(?, ?, ?, ?, ?, ?, ?, ?)',
             [userEmail, payerName, amount, paymentMethod, proofImage, eventId, organizationId, organizationVersionId]
         );
-        return result[0];
+        return result; // Return the full result array, not just result[0]
     } catch (error) {
         console.error('Error creating event transaction:', error);
         throw error;
