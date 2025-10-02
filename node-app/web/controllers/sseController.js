@@ -160,9 +160,61 @@ function cleanupSession(sessionId) {
     }
 }
 
+// Helper to get org hub channel name
+function getOrgHubChannel(orgId, orgVersionId) {
+    return `orghub_${orgId}_${orgVersionId}`;
+}
+
+// Unified publishing function for organization hub pattern
+// Publishes to BOTH hub channel and entity-specific channel
+function publishOrgHub({ orgId, orgVersionId, entity, operation, data }) {
+  const hubChannel = getOrgHubChannel(orgId, orgVersionId);
+  
+  console.log(`📡 [PUBLISH-ORG-HUB] Called with:`, {
+    orgId,
+    orgVersionId,
+    entity,
+    operation,
+    dataCount: Array.isArray(data) ? data.length : 1,
+    hubChannel
+  });
+  
+  // Format that matches what RealTimeContext expects
+  const hubEvent = {
+    channel: hubChannel,
+    operation,
+    entity, // Include entity type for proper frontend identification
+    data: Array.isArray(data) ? data : [data],
+    timestamp: Date.now()
+  };
+  
+  console.log(`📡 [PUBLISH-ORG-HUB] Publishing hub event to ${hubChannel}:`, {
+    operation: hubEvent.operation,
+    entity: hubEvent.entity,
+    dataCount: hubEvent.data.length
+  });
+  
+  // Publish to hub channel
+  publishToChannel(hubChannel, hubEvent);
+  
+  // Also publish to entity-specific channel for backward compatibility
+  const entityChannel = `${entity}_${orgId}_${orgVersionId}`;
+  
+  console.log(`📡 [PUBLISH-ORG-HUB] Publishing to entity channel ${entityChannel}`);
+  
+  publishToChannel(entityChannel, {
+    operation,
+    data: Array.isArray(data) ? data : [data],
+    timestamp: Date.now()
+  });
+  
+  console.log(`✅ [PUBLISH-ORG-HUB] Published to both channels successfully`);
+}
+
 module.exports = {
     handleSSEConnection,
     subscribeToChannel,
     unsubscribeFromChannel,
-    publishToChannel
+    publishToChannel,
+    publishOrgHub
 };

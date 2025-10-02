@@ -1,8 +1,9 @@
 const fs = require('fs');
 const path = require('path');
-const { publishToChannel } = require('../../web/controllers/sseController');
+const { publishToChannel, publishOrgHub } = require('../../web/controllers/sseController');
 const organizationModel = require('../models/organizationModel'); 
 const userModel = require('../models/userModel');
+const webOrganizationsModel = require('../../web/models/organizationsModel'); // Import web model for getPendingOrganizationMembers
 
 
 async function getOrganizations(req, res) {
@@ -189,10 +190,25 @@ async function submitOrganizationApplication(req, res) {
         
         console.log('Membership application result:', membershipResult);
         
-        publishToChannel(`pending_organization_members_${org_id}_${organization_version_id}`, {
-            operation: 'CREATE',
-            data: membershipResult,
-        });
+        // 🔧 FIX: Changed channel name to match web real-time subscriptions
+        // Was: pending_organization_members_${org_id}_${organization_version_id}
+        // Now: organization_pendingMembers_${org_id}_${organization_version_id}
+        
+        // Fetch updated pending members list for real-time broadcast
+        try {
+            const updatedPendingMembers = await webOrganizationsModel.getPendingOrganizationMembers(org_id, organization_version_id);
+            const pendingMembersArray = Array.isArray(updatedPendingMembers) ? updatedPendingMembers : [];
+            publishOrgHub({
+                orgId: org_id,
+                orgVersionId: organization_version_id,
+                entity: 'organization_pendingMembers',
+                operation: 'UPDATE',
+                data: pendingMembersArray
+            });
+            console.log(`📱 [MOBILE] 📡 Published pending members to hub - ${pendingMembersArray.length} items`);
+        } catch (publishError) {
+            console.error('❌ [MOBILE] Failed to publish pending members:', publishError);
+        }
 
         console.log('Final membership result:', membershipResult);
         console.log('Transaction result:', transactionResult);
@@ -215,12 +231,12 @@ async function leaveOrganization(req, res) {
         const user = await userModel.getUser(req.user.email);
         const { organization_id, organization_version_id, leave_reason } = req.query;
         const result = await organizationModel.leaveOrganization(organization_id, organization_version_id, user.user_id, leave_reason);
-        publishToChannel(`leave_organization_${organization_id}_${organization_version_id}`,
-            {
-                operation: 'CREATE',
-                data: result,
-            }
-        );
+        publishToChannel(`organization_leaveApplications_${organization_id}_${organization_version_id}`, {
+            operation: 'CREATE',
+            data: Array.isArray(result) ? result : [result],
+            timestamp: new Date()
+        });
+        console.log(`📱 [MOBILE] 📡 Leave Application Published to channel - 1 item`);
         res.status(200).json({ message: "Leave application submitted successfully"});
     } catch (error) {
         console.error('Error leaving organization:', error);

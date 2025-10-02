@@ -148,10 +148,14 @@ class MobileTermPaymentModel {
                 future_terms_count = 4
             } = options;
             
-            console.log(`DEBUG MODEL: Enhanced check payment status called for userId: ${userId}, organizationId: ${organizationId}, organizationVersionId: ${organizationVersionId}`);
-            console.log(`DEBUG MODEL: Options:`, options);
+            console.log('\n🚀 ========== ENHANCED PAYMENT STATUS CHECK START ==========');
+            console.log('👤 User ID:', userId);
+            console.log('🏢 Organization ID:', organizationId);
+            console.log('📦 Organization Version ID:', organizationVersionId);
+            console.log('⚙️ Options:', options);
             
             // Step 1: Get organization payment settings and rules
+            console.log('\n📋 STEP 1: Fetching organization settings...');
             const [orgSettings] = await connection.query(`
                 SELECT 
                     o.organization_id,
@@ -171,6 +175,8 @@ class MobileTermPaymentModel {
             `, [organizationId, organizationVersionId, organizationVersionId]);
 
             if (orgSettings.length === 0) {
+                console.log('❌ Organization not found or not approved');
+                console.log('🚀 ========== ENHANCED PAYMENT STATUS CHECK END: FAILED ==========\n');
                 return {
                     success: false,
                     message: 'Organization not found or not approved'
@@ -178,7 +184,13 @@ class MobileTermPaymentModel {
             }
 
             const orgData = orgSettings[0];
-            console.log('DEBUG MODEL: Organization settings:', orgData);
+            console.log('✅ Organization found:', {
+                organization_id: orgData.organization_id,
+                organization_name: orgData.organization_name,
+                fee_amount: orgData.membership_fee_amount,
+                fee_type: orgData.membership_fee_type,
+                org_status: orgData.org_status
+            });
 
             // Step 2: Get user membership information including application date
             const [membershipInfo] = await connection.query(`
@@ -209,6 +221,8 @@ class MobileTermPaymentModel {
             `, [userId, organizationId, organizationVersionId, organizationVersionId]);
 
             if (membershipInfo.length === 0) {
+                console.log('❌ User is not an active member of this organization');
+                console.log('🚀 ========== ENHANCED PAYMENT STATUS CHECK END: FAILED ==========\n');
                 return {
                     success: false,
                     message: 'User is not an active member of this organization'
@@ -217,10 +231,16 @@ class MobileTermPaymentModel {
 
             const memberData = membershipInfo[0];
             const userApplicationDate = application_date || memberData.application_date;
-            console.log('DEBUG MODEL: Membership info:', memberData);
-            console.log('DEBUG MODEL: Using application date:', userApplicationDate);
+            console.log('✅ Membership found:', {
+                user_id: memberData.user_id,
+                joined_at: memberData.joined_at,
+                membership_status: memberData.membership_status,
+                payment_start_term_id: memberData.payment_start_term_id,
+                application_date: userApplicationDate
+            });
 
             // Step 3: Get current term and relevant terms
+            console.log('\n📋 STEP 3: Fetching current term...');
             const currentDate = new Date().toISOString().split('T')[0];
             const [terms] = await connection.query(`
                 SELECT 
@@ -241,6 +261,9 @@ class MobileTermPaymentModel {
                 : terms.find(t => t.is_current_term === 1);
 
             if (!currentTerm) {
+                console.log('❌ No current term found');
+                console.log('📅 Available terms:', terms);
+                console.log('🚀 ========== ENHANCED PAYMENT STATUS CHECK END: FAILED ==========\n');
                 return {
                     success: false,
                     message: 'No current term found',
@@ -248,23 +271,33 @@ class MobileTermPaymentModel {
                 };
             }
 
-            console.log('DEBUG MODEL: Current term:', currentTerm);
-
-            // Step 4: Apply exclusion logic
-            const shouldExcludeCurrentTerm = this.shouldExcludeFromCurrentTerm(
-                userApplicationDate,
-                currentTerm.start_date,
-                orgData.membership_fee_type
-            );
-
-            console.log('DEBUG MODEL: Exclusion logic result:', {
-                shouldExcludeCurrentTerm,
-                userApplicationDate,
-                currentTermStart: currentTerm.start_date,
-                paymentType: orgData.membership_fee_type
+            console.log('✅ Current term found:', {
+                term_id: currentTerm.term_id,
+                term_name: currentTerm.term_name,
+                start_date: currentTerm.start_date,
+                end_date: currentTerm.end_date,
+                is_active: currentTerm.is_active
             });
 
-            // Step 5: Get existing payments
+            // Step 4: Apply enhanced exclusion logic with payment verification
+            console.log('\n📋 STEP 4: Checking if user should be excluded from current term payment...');
+            const shouldExcludeCurrentTerm = await this.shouldExcludeFromCurrentTermEnhanced(
+                userId,
+                organizationId,
+                currentTerm.term_id,
+                userApplicationDate,
+                currentTerm.start_date,
+                orgData.membership_fee_type,
+                connection
+            );
+
+            console.log('📊 Exclusion result:', shouldExcludeCurrentTerm);
+            console.log('💡 This means:', shouldExcludeCurrentTerm 
+                ? '✅ User is EXEMPT from current term (should show PAID)' 
+                : '❌ User MUST PAY for current term (should show PAYMENT REQUIRED)');
+
+            // Step 5: Get existing payments with transaction status
+            console.log('\n📋 STEP 5: Fetching existing payments...');
             const [existingPayments] = await connection.query(`
                 SELECT 
                     tp.payment_id,
@@ -279,7 +312,8 @@ class MobileTermPaymentModel {
                     at.start_date,
                     at.end_date,
                     t.amount as transaction_amount,
-                    t.transaction_date
+                    t.transaction_date,
+                    t.status as transaction_status
                 FROM tbl_term_payments tp
                 LEFT JOIN tbl_academic_term at ON tp.term_id = at.term_id
                 LEFT JOIN tbl_transaction t ON tp.transaction_id = t.transaction_id
@@ -290,9 +324,18 @@ class MobileTermPaymentModel {
                 ORDER BY at.start_date DESC
             `, [userId, organizationId, organizationVersionId, organizationVersionId]);
 
-            console.log('DEBUG MODEL: Existing payments:', existingPayments);
+            console.log('✅ Found', existingPayments.length, 'existing payment(s)');
+            if (existingPayments.length > 0) {
+                console.log('💳 Payment details:', existingPayments.map(p => ({
+                    payment_id: p.payment_id,
+                    term_name: p.term_name,
+                    payment_status: p.payment_status,
+                    transaction_status: p.transaction_status
+                })));
+            }
 
             // Step 6: Calculate payment schedule
+            console.log('\n📋 STEP 6: Calculating payment schedule...');
             const paymentSchedule = this.calculatePaymentSchedule(
                 terms,
                 existingPayments,
@@ -302,7 +345,17 @@ class MobileTermPaymentModel {
                 future_terms_count
             );
 
+            console.log('✅ Payment schedule calculated:');
+            paymentSchedule.forEach((item, index) => {
+                console.log(`  ${index + 1}. ${item.term_name}:`, {
+                    status: item.status,
+                    amount: item.amount,
+                    reason: item.reason
+                });
+            });
+
             // Step 7: Prepare enhanced response
+            console.log('\n📋 STEP 7: Preparing response...');
             const response = {
                 success: true,
                 organization_info: {
@@ -327,19 +380,177 @@ class MobileTermPaymentModel {
                 user_message: this.generateUserMessage(shouldExcludeCurrentTerm, currentTerm, paymentSchedule)
             };
 
+            const nextPaymentRequired = paymentSchedule.find(p => p.status === 'required');
+            console.log('\n🎯 FINAL RESULT:');
+            console.log('  • User should be excluded from current term?', shouldExcludeCurrentTerm);
+            console.log('  • Next payment required?', nextPaymentRequired ? 'YES' : 'NO');
+            if (nextPaymentRequired) {
+                console.log('  • Next payment details:', {
+                    term: nextPaymentRequired.term_name,
+                    amount: nextPaymentRequired.amount,
+                    due_date: nextPaymentRequired.end_date
+                });
+            }
+            console.log('  • User message:', response.user_message);
+            console.log('🚀 ========== ENHANCED PAYMENT STATUS CHECK END: SUCCESS ==========\n');
+
             return response;
 
         } catch (error) {
-            console.error('ERROR MODEL: Error in enhanced payment status check:', error);
+            console.error('\n❌ ========== ERROR IN PAYMENT STATUS CHECK ==========');
+            console.error('Error details:', error);
+            console.error('Stack trace:', error.stack);
+            console.error('🚀 ========== ENHANCED PAYMENT STATUS CHECK END: ERROR ==========\n');
             throw error;
         } finally {
             connection.release();
         }
     }
 
-    // Helper method to determine if user should be excluded from current term payment
+    // Enhanced exclusion logic that checks actual payment verification
+    static async shouldExcludeFromCurrentTermEnhanced(userId, organizationId, currentTermId, applicationDate, termStartDate, paymentType, connection) {
+        console.log('\n🔍 ========== PAYMENT EXCLUSION CHECK START ==========');
+        console.log('📋 Input Parameters:', {
+            userId,
+            organizationId,
+            currentTermId,
+            applicationDate,
+            termStartDate,
+            paymentType
+        });
+        
+        // Fix case sensitivity - database uses 'Per Term', not 'PER_TERM'
+        if (paymentType !== 'Per Term') {
+            console.log('❌ Not a Per Term organization - payment type:', paymentType);
+            console.log('🔍 ========== PAYMENT EXCLUSION CHECK END: FALSE ==========\n');
+            return false; // Only applies to per-term organizations
+        }
+        
+        if (!currentTermId) {
+            console.log('❌ No current term ID provided');
+            console.log('🔍 ========== PAYMENT EXCLUSION CHECK END: FALSE ==========\n');
+            return false; // Can't check without term ID
+        }
+        
+        try {
+            // SIMPLIFIED LOGIC: Check if user's joined_at date falls within the current term's date range
+            // If YES → User already paid during application (application fee covers this term)
+            // If NO → Check if explicit payment exists in tbl_term_payments
+            
+            console.log('🔎 Executing database query to check membership and payment...');
+            const [termCheck] = await connection.query(`
+                SELECT 
+                    om.joined_at,
+                    om.user_id,
+                    om.organization_id,
+                    at.term_id,
+                    at.term_name,
+                    at.start_date,
+                    at.end_date,
+                    -- Check if joined_at falls within term date range
+                    DATE(om.joined_at) BETWEEN at.start_date AND at.end_date as joined_during_term,
+                    -- Check if explicit payment exists
+                    tp.payment_id,
+                    tp.payment_status,
+                    -- Extra debug info
+                    DATE(om.joined_at) as joined_date_only,
+                    om.status as membership_status
+                FROM tbl_organization_members om
+                CROSS JOIN tbl_academic_term at
+                LEFT JOIN tbl_term_payments tp ON (
+                    tp.user_id = om.user_id 
+                    AND tp.organization_id = om.organization_id
+                    AND tp.term_id = at.term_id
+                )
+                WHERE om.user_id = ?
+                AND om.organization_id = ?
+                AND at.term_id = ?
+                AND om.status = 'Active'
+                LIMIT 1
+            `, [userId, organizationId, currentTermId]);
+            
+            console.log('📊 Query returned', termCheck.length, 'row(s)');
+            
+            if (termCheck.length === 0) {
+                console.log('⚠️ No membership record found for user');
+                console.log('🔍 ========== PAYMENT EXCLUSION CHECK END: FALSE ==========\n');
+                return false;
+            }
+            
+            if (termCheck.length > 0) {
+                const data = termCheck[0];
+                
+                console.log('📄 Database Result:', {
+                    user_id: data.user_id,
+                    organization_id: data.organization_id,
+                    term_id: data.term_id,
+                    term_name: data.term_name,
+                    membership_status: data.membership_status,
+                    joined_at: data.joined_at,
+                    joined_date_only: data.joined_date_only,
+                    term_start_date: data.start_date,
+                    term_end_date: data.end_date,
+                    joined_during_term: data.joined_during_term,
+                    payment_id: data.payment_id,
+                    payment_status: data.payment_status
+                });
+                
+                // CASE 1: User has explicit payment in tbl_term_payments
+                console.log('\n🔍 CASE 1: Checking for explicit payment in tbl_term_payments...');
+                if (data.payment_id) {
+                    console.log('✅ Payment record found:', {
+                        payment_id: data.payment_id,
+                        payment_status: data.payment_status
+                    });
+                    
+                    if (data.payment_status === 'Paid' || data.payment_status === 'Pending') {
+                        console.log('✅ Payment status is Paid or Pending - User is EXEMPT');
+                        console.log('🔍 ========== PAYMENT EXCLUSION CHECK END: TRUE ==========\n');
+                        return true; // User is EXEMPT because they have a payment record
+                    } else {
+                        console.log('⚠️ Payment exists but status is:', data.payment_status);
+                    }
+                } else {
+                    console.log('❌ No payment record found in tbl_term_payments');
+                }
+                
+                // CASE 2: User joined during the current term's date range
+                console.log('\n🔍 CASE 2: Checking if user joined during term period...');
+                console.log('📅 Date Comparison:', {
+                    joined_at: data.joined_at,
+                    joined_date: data.joined_date_only,
+                    term_start: data.start_date,
+                    term_end: data.end_date,
+                    joined_during_term_flag: data.joined_during_term
+                });
+                
+                if (data.joined_during_term === 1) {
+                    console.log('✅ User joined DURING term period - User is EXEMPT');
+                    console.log('💡 Reason: Application fee covers this term');
+                    console.log('🔍 ========== PAYMENT EXCLUSION CHECK END: TRUE ==========\n');
+                    return true; // User is EXEMPT because application fee covered this term
+                } else {
+                    console.log('❌ User joined BEFORE term started');
+                }
+            }
+            
+            // CASE 3: User joined before term started → Must pay
+            console.log('\n🔍 CASE 3: User must pay');
+            console.log('📝 Reason: User joined before term started AND no explicit payment exists');
+            console.log('🔍 ========== PAYMENT EXCLUSION CHECK END: FALSE ==========\n');
+            return false;
+            
+        } catch (error) {
+            console.error('Error checking if user should be excluded from current term:', error);
+            // On error, default to NOT excluding (safer - requires payment)
+            return false;
+        }
+    }
+
+    // Legacy method kept for backward compatibility
     static shouldExcludeFromCurrentTerm(applicationDate, termStartDate, paymentType) {
-        if (paymentType !== 'PER_TERM') {
+        // Fix case sensitivity - database uses 'Per Term', not 'PER_TERM'
+        if (paymentType !== 'Per Term') {
             return false; // Only applies to per-term organizations
         }
         
@@ -350,11 +561,13 @@ class MobileTermPaymentModel {
         const appDate = new Date(applicationDate);
         const termStart = new Date(termStartDate);
         
-        // If application is on or after term start, exclude current term
+        // CORRECTED LOGIC: If user applied during or after the current term start,
+        // they should be EXEMPT from current term payment because they already paid application fee
+        // Their term payments should start from the NEXT term
         return appDate >= termStart;
     }
 
-    // Helper method to calculate payment schedule
+    // Helper method to calculate payment schedule with enhanced status logic
     static calculatePaymentSchedule(terms, existingPayments, currentTerm, shouldExcludeCurrentTerm, feeAmount, futureTermsCount) {
         const schedule = [];
         const relevantTerms = terms.slice(0, futureTermsCount + 1);
@@ -366,11 +579,28 @@ class MobileTermPaymentModel {
             let reason = '';
             
             if (existingPayment) {
-                status = existingPayment.payment_status.toLowerCase();
-                reason = 'Payment exists';
+                // Enhanced status checking with transaction status
+                if (existingPayment.payment_status === 'Paid' || 
+                    (existingPayment.payment_status === 'Pending' && existingPayment.transaction_status === 'Completed')) {
+                    status = 'paid';
+                    reason = 'Payment completed';
+                } else if (existingPayment.payment_status === 'Pending') {
+                    status = 'pending';
+                    reason = 'Payment pending verification';
+                } else if (existingPayment.payment_status === 'Rejected') {
+                    status = 'rejected';
+                    reason = 'Payment rejected';
+                } else if (existingPayment.payment_status === 'Cancelled') {
+                    status = 'cancelled';
+                    reason = 'Payment cancelled';
+                } else {
+                    status = existingPayment.payment_status.toLowerCase();
+                    reason = 'Payment exists';
+                }
             } else if (term.term_id === currentTerm.term_id && shouldExcludeCurrentTerm) {
-                status = 'excluded';
-                reason = 'Excluded due to application date';
+                // User is exempt from current term (joined during term or has payment)
+                status = 'paid';  // Changed from 'excluded' to 'paid' for mobile display
+                reason = 'Automatically paid - joined during term (application fee covered this term)';
             } else if (new Date(term.end_date) < new Date()) {
                 status = 'overdue';
                 reason = 'Term has ended';

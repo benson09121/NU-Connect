@@ -1,41 +1,13 @@
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
-const { subscribeToChannel, publishToChannel } = require('./sseController');
+const { subscribeToChannel, publishToChannel, publishOrgHub } = require('./sseController');
 const organizationsModel = require('../models/organizationsModel');
 const userCacheModel = require('../models/userCacheModel');
 const { TermPaymentModel } = require('../models/simplifiedTermPaymentModel');
 const userModel = require('../models/userModel'); // 🆕 For real-time user organizations
 const pool = require('../../config/db');
 const { notifyOrganizationApproved, notifyMembershipGranted, notifyMembershipRevoked } = require('../utils/organizationEvents'); // 🆕 Real-time org events
-
-// Helper function for unified organization hub channel
-const getOrgHubChannel = (orgId, orgVersionId) => `orghub_${orgId}_${orgVersionId}`;
-
-// Keep the publishOrgHub function simple - just publish to the hub channel
-function publishOrgHub({ orgId, orgVersionId, entity, operation, data }) {
-  const hubChannel = getOrgHubChannel(orgId, orgVersionId);
-  
-  // Format that matches what RealTimeContext expects
-  const hubEvent = {
-    channel: hubChannel,
-    operation,
-    entity, // Include entity type for proper frontend identification
-    data: Array.isArray(data) ? data : [data],
-    timestamp: Date.now()
-  };
-  
-  // Publish to hub channel
-  publishToChannel(hubChannel, hubEvent);
-  
-  // Also publish to entity-specific channel for backward compatibility
-  const entityChannel = `${entity}_${orgId}_${orgVersionId}`;
-  publishToChannel(entityChannel, {
-    operation,
-    data: Array.isArray(data) ? data : [data],
-    timestamp: Date.now()
-  });
-}
 
 //////////////////   
 
@@ -98,15 +70,21 @@ async function getOrganizationHubData(req, res) {
       subscribeToChannel(sessionId, `organization_pendingMembers_${org_id}_${org_version_id}`);
       subscribeToChannel(sessionId, `organization_archivedMembers_${org_id}_${org_version_id}`);
       subscribeToChannel(sessionId, `organization_leaveApplications_${org_id}_${org_version_id}`);
-      subscribeToChannel(sessionId, `term_payment_submissions_${org_id}`);
+      subscribeToChannel(sessionId, `organization_termPayments_${org_id}_${org_version_id}`);
       console.log(`🟡 [BACKEND-SSE-DEBUG] All organization subscriptions set up for session: ${sessionId}`);
       
-      // Publish initial term payments data to SSE channel
+      // Publish initial term payments data using hub pattern
       try {
-        publishToChannel(`term_payment_submissions_${org_id}`, termPayments);
-        console.log(`🟢 Published initial term payments to SSE channel: ${termPayments.length} payments`);
+        publishOrgHub({
+          orgId: org_id,
+          orgVersionId: org_version_id,
+          entity: 'organization_termPayments',
+          operation: 'UPDATE',
+          data: termPayments
+        });
+        console.log(`� [TERM-PAYMENTS] Published to hub - ${termPayments.length} payments`);
       } catch (sseError) {
-        console.error('🔴 Failed to publish initial term payments to SSE:', sseError);
+        console.error('❌ [TERM-PAYMENTS] Failed to publish:', sseError);
       }
     }
     
@@ -1145,14 +1123,41 @@ async function updateCommittee(req, res) {
       action_by_email
     });
 
-    // Publish updated committees list for real-time updates (like Term Payments)
+    // Publish updated committees list for real-time updates
     try {
       const updatedCommittees = await organizationsModel.getOrganizationCommittees(orgId, orgVersionId);
       const committeesArray = Array.isArray(updatedCommittees) ? updatedCommittees : [];
-      publishToChannel(`organization_committees_${orgId}_${orgVersionId}`, committeesArray);
-      console.log(`Published updated committees list to SSE channel: ${committeesArray.length} committees`);
+      
+      publishOrgHub({
+        orgId,
+        orgVersionId,
+        entity: 'organization_committees',
+        operation: 'UPDATE',
+        data: committeesArray
+      });
+      
+      console.log(`📝 [UPDATE-COMMITTEE] Published committees to hub - ${committeesArray.length} committees`);
     } catch (publishError) {
-      console.error('Failed to publish committee updates:', publishError);
+      console.error('❌ [UPDATE-COMMITTEE] Failed to publish committees:', publishError);
+    }
+
+    // Also publish updated committee members (their committee_name field needs to be updated)
+    try {
+      const updatedCommitteeMembers = await organizationsModel.getAllCommitteeMembers(orgId, orgVersionId);
+      const committeeMembersArray = Array.isArray(updatedCommitteeMembers) ? updatedCommitteeMembers : [];
+      
+      publishOrgHub({
+        orgId,
+        orgVersionId,
+        entity: 'organization_committeeMembers',
+        operation: 'UPDATE',
+        data: committeeMembersArray
+      });
+      
+      console.log(`📝 [UPDATE-COMMITTEE] Published committee members to hub - ${committeeMembersArray.length} members`);
+      console.log(`📝 [UPDATE-COMMITTEE] Sample:`, committeeMembersArray.slice(0, 2));
+    } catch (publishError) {
+      console.error('❌ [UPDATE-COMMITTEE] Failed to publish members:', publishError);
     }
 
     res.status(200).json({ message: 'Committee updated successfully.' });
@@ -1173,16 +1178,15 @@ async function archiveCommittee(req, res) {
       archived_by_email
     });
 
-    // Publish updated committees list for real-time updates (like Term Payments)
+    // Publish updated committees list for real-time updates
     try {
       const updatedCommittees = await organizationsModel.getOrganizationCommittees(orgId, orgVersionId);
       const committeesArray = Array.isArray(updatedCommittees) ? updatedCommittees : [];
       const channelName = `organization_committees_${orgId}_${orgVersionId}`;
       publishToChannel(channelName, committeesArray);
-      console.log(`🟢 [ORG-BACKEND-DEBUG] Published updated committees list to SSE channel: ${channelName}, data count: ${committeesArray.length}`);
-      console.log(`🟢 [ORG-BACKEND-DEBUG] Published data:`, committeesArray);
+      console.log(`�️ [ARCHIVE-COMMITTEE] Published to ${channelName} - ${committeesArray.length} committees remaining`);
     } catch (publishError) {
-      console.error('Failed to publish committee updates:', publishError);
+      console.error('❌ [ARCHIVE-COMMITTEE] Failed to publish:', publishError);
     }
 
     res.status(200).json({
@@ -1257,26 +1261,32 @@ async function addCommitteeMember(req, res) {
       }
     }
 
-    // Publish updated committee members list for real-time updates (like Term Payments)
+    // 🔄 SNAPSHOT UPDATE: Refresh both members and committee members lists
+    // When a member is added to a committee, they move from members to committeeMembers
     try {
+      // Update members list (member is now removed from query since they're in a committee)
+      const updatedMembers = await organizationsModel.getOrganizationMembers(orgId, orgVersionId);
+      publishOrgHub({
+        orgId: orgId,
+        orgVersionId: orgVersionId,
+        entity: 'organization_members',
+        operation: 'UPDATE',
+        data: Array.isArray(updatedMembers) ? updatedMembers : []
+      });
+      
+      // Update committee members list (new member added)
       const updatedCommitteeMembers = await organizationsModel.getAllCommitteeMembers(orgId, orgVersionId);
-      const committeeMembersArray = Array.isArray(updatedCommitteeMembers) ? updatedCommitteeMembers : [];
-      publishToChannel(`organization_committeeMembers_${orgId}_${orgVersionId}`, committeeMembersArray);
-      console.log(`Published updated committee members list to SSE channel: ${committeeMembersArray.length} committee members`);
+      publishOrgHub({
+        orgId: orgId,
+        orgVersionId: orgVersionId,
+        entity: 'organization_committeeMembers',
+        operation: 'UPDATE',
+        data: Array.isArray(updatedCommitteeMembers) ? updatedCommitteeMembers : []
+      });
+      
+      console.log(`📡 [COMMITTEE-MEMBER-ADD] Published snapshot updates - ${updatedMembers.length} members, ${updatedCommitteeMembers.length} committee members`);
     } catch (publishError) {
-      console.error('Failed to publish committee member updates:', publishError);
-    }
-
-    // Also update members list since member was moved from regular to committee
-    if (emailUpdate) {
-      try {
-        const updatedMembers = await organizationsModel.getOrganizationMembers(orgId, orgVersionId);
-        const membersArray = Array.isArray(updatedMembers) ? updatedMembers : [];
-        publishToChannel(`organization_members_${orgId}_${orgVersionId}`, membersArray);
-        console.log(`Published updated members list to SSE channel: ${membersArray.length} members`);
-      } catch (publishError) {
-        console.error('Failed to publish member updates:', publishError);
-      }
+      console.error('❌ [COMMITTEE-MEMBER-ADD] Failed to publish updates:', publishError);
     }
 
     res.status(201).json({
@@ -1355,20 +1365,63 @@ async function archiveCommitteeMember(req, res) {
     const { committee_member_id, reason, orgId, orgVersionId } = req.body;
     const action_by_email = req.user.email;
 
+    console.log(`🟢 [ARCHIVE-MEMBER-START] Request received:`, {
+      committee_member_id,
+      orgId,
+      orgVersionId,
+      reason: reason?.substring(0, 50)
+    });
+
     const result = await organizationsModel.archiveCommitteeMember({
       committee_member_id,
       reason,
       action_by_email
     });
 
-    // Publish updated committee members list for real-time updates (like Term Payments)
+    console.log(`🟢 [ARCHIVE-MEMBER-DB] Database operation complete:`, {
+      rows_archived: result
+    });
+
+    // Publish updated committee members list for real-time updates
     try {
       const updatedCommitteeMembers = await organizationsModel.getAllCommitteeMembers(orgId, orgVersionId);
       const committeeMembersArray = Array.isArray(updatedCommitteeMembers) ? updatedCommitteeMembers : [];
-      publishToChannel(`organization_committeeMembers_${orgId}_${orgVersionId}`, committeeMembersArray);
-      console.log(`Published updated committee members list to SSE channel: ${committeeMembersArray.length} committee members`);
+      
+      console.log(`🟢 [ARCHIVE-MEMBER-FETCH] Fetched ${committeeMembersArray.length} remaining members from DB`);
+      console.log(`🟢 [ARCHIVE-MEMBER-DATA] First 2 members:`, committeeMembersArray.slice(0, 2));
+      
+      publishOrgHub({
+        orgId,
+        orgVersionId,
+        entity: 'organization_committeeMembers',
+        operation: 'UPDATE',
+        data: committeeMembersArray
+      });
+      
+      console.log(`🗑️ [ARCHIVE-MEMBER] Published to hub - ${committeeMembersArray.length} members remaining`);
+      console.log(`🗑️ [ARCHIVE-MEMBER] Archived ID: ${committee_member_id}`);
+      console.log(`🗑️ [ARCHIVE-MEMBER] Hub channel: orghub_${orgId}_${orgVersionId}`);
+      console.log(`🗑️ [ARCHIVE-MEMBER] Entity channel: organization_committeeMembers_${orgId}_${orgVersionId}`);
+      
+      // Also publish updated archived members list for archive tab
+      const archivedMembers = await organizationsModel.getArchivedOrganizationMembers(orgId, orgVersionId);
+      const archivedMembersArray = Array.isArray(archivedMembers) ? archivedMembers : [];
+      
+      console.log(`🗑️ [ARCHIVE-MEMBER-FETCH] Fetched ${archivedMembersArray.length} archived members from DB`);
+      
+      publishOrgHub({
+        orgId,
+        orgVersionId,
+        entity: 'organization_archivedMembers',
+        operation: 'UPDATE',
+        data: archivedMembersArray
+      });
+      
+      console.log(`🗑️ [ARCHIVE-MEMBER] Published archived members to hub - ${archivedMembersArray.length} archived members`);
+      console.log(`🗑️ [ARCHIVE-MEMBER] Archived entity channel: organization_archivedMembers_${orgId}_${orgVersionId}`);
     } catch (publishError) {
-      console.error('Failed to publish committee member updates:', publishError);
+      console.error('❌ [ARCHIVE-MEMBER] Failed to publish:', publishError);
+      console.error('❌ [ARCHIVE-MEMBER] Stack trace:', publishError.stack);
     }
 
     res.status(200).json({
@@ -1406,10 +1459,18 @@ async function approveMembershipApplication(req, res) {
       try {
         const updatedPendingMembers = await organizationsModel.getPendingOrganizationMembers(organization_id, organization_version_id);
         const pendingMembersArray = Array.isArray(updatedPendingMembers) ? updatedPendingMembers : [];
-        publishToChannel(`organization_pendingMembers_${organization_id}_${organization_version_id}`, pendingMembersArray);
-        console.log(`Published updated pending members list to SSE channel: ${pendingMembersArray.length} pending members`);
+        
+        publishOrgHub({
+          orgId: organization_id,
+          orgVersionId: organization_version_id,
+          entity: 'organization_pendingMembers',
+          operation: 'UPDATE',
+          data: pendingMembersArray
+        });
+        
+        console.log(`📡 [PENDING-MEMBERS] Published to hub - ${pendingMembersArray.length} pending members`);
       } catch (publishError) {
-        console.error('Failed to publish pending member updates:', publishError);
+        console.error('❌ [PENDING-MEMBERS] Failed to publish:', publishError);
       }
     }
 
@@ -1494,15 +1555,18 @@ async function rejectMembershipApplication(req, res) {
     const rejectedApplication = result.rejectedApplication?.[0] || null;
     const failedTransaction = result.failedTransaction?.[0] || null;
 
+    // Remove rejected application from pending members list (DELETE operation)
     if (rejectedApplication) {
-      // Remove from pending members list
       try {
-        const updatedPendingMembers = await organizationsModel.getPendingOrganizationMembers(organization_id, organization_version_id);
-        const pendingMembersArray = Array.isArray(updatedPendingMembers) ? updatedPendingMembers : [];
-        publishToChannel(`organization_pendingMembers_${organization_id}_${organization_version_id}`, pendingMembersArray);
-        console.log(`Published updated pending members list to SSE channel: ${pendingMembersArray.length} pending members`);
+        publishToChannel(`organization_pendingMembers_${organization_id}_${organization_version_id}`, {
+          operation: 'DELETE',
+          data: rejectedApplication,
+          timestamp: new Date()
+        });
+        
+        console.log(`📡 [PENDING-MEMBERS-REJECTION] Published DELETE to hub - removed application_id: ${rejectedApplication.application_id}`);
       } catch (publishError) {
-        console.error('Failed to publish pending member updates:', publishError);
+        console.error('❌ [PENDING-MEMBERS-REJECTION] Failed to publish:', publishError);
       }
     }
     if (failedTransaction) {
@@ -1543,14 +1607,17 @@ async function approveLeaveApplication(req, res) {
     const archivedMembers = result.archivedMembers || null;
 
     if (approvedApplication) {
-      // Update leave applications list (remove approved application)
+      // Delete approved application from leave applications list
       try {
-        const updatedLeaveApplications = await organizationsModel.getLeaveApplications(organization_id, organization_version_id);
-        const leaveApplicationsArray = Array.isArray(updatedLeaveApplications) ? updatedLeaveApplications : [];
-        publishToChannel(`organization_leaveApplications_${organization_id}_${organization_version_id}`, leaveApplicationsArray);
-        console.log(`Published updated leave applications list to SSE channel: ${leaveApplicationsArray.length} leave applications`);
+        publishToChannel(`organization_leaveApplications_${organization_id}_${organization_version_id}`, {
+          operation: 'DELETE',
+          data: [approvedApplication],
+          timestamp: new Date()
+        });
+        
+        console.log(`📡 [LEAVE-APPS] Published DELETE to channel - removed 1 approved application (ID: ${approvedApplication.id})`);
       } catch (publishError) {
-        console.error('Failed to publish leave application updates:', publishError);
+        console.error('❌ [LEAVE-APPS] Failed to publish:', publishError);
       }
       
       // Update members list (remove member who left)
@@ -1604,14 +1671,17 @@ async function rejectLeaveApplication(req, res) {
     );
 
     if (rejectedApplication && rejectedApplication.length > 0) {
-      // Update leave applications list (remove rejected application)
+      // Delete rejected application from leave applications list
       try {
-        const updatedLeaveApplications = await organizationsModel.getLeaveApplications(organization_id, organization_version_id);
-        const leaveApplicationsArray = Array.isArray(updatedLeaveApplications) ? updatedLeaveApplications : [];
-        publishToChannel(`organization_leaveApplications_${organization_id}_${organization_version_id}`, leaveApplicationsArray);
-        console.log(`Published updated leave applications list to SSE channel: ${leaveApplicationsArray.length} leave applications`);
+        publishToChannel(`organization_leaveApplications_${organization_id}_${organization_version_id}`, {
+          operation: 'DELETE',
+          data: rejectedApplication,
+          timestamp: new Date()
+        });
+        
+        console.log(`📡 [LEAVE-APPS] Published DELETE to channel - removed 1 rejected application (ID: ${rejectedApplication[0]?.id})`);
       } catch (publishError) {
-        console.error('Failed to publish leave application updates:', publishError);
+        console.error('❌ [LEAVE-APPS] Failed to publish:', publishError);
       }
     }
 

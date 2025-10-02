@@ -1,3 +1,14 @@
 node_modules
 *.env
 .env
+
+# Facebook Scraper Authentication (SECURITY: Never commit these!)
+.auth/
+facebook-cookies.json
+facebook-session.json
+
+# Playwright cache
+.playwright/
+
+# Crawlee storage
+storage/

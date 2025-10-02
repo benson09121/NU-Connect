@@ -309,24 +309,75 @@ class FacebookScraper {
         }
     }
 
-    // Create browser with stealth settings
+    // Create browser with stealth settings (Enhanced for Azure Ubuntu)
     async createBrowser() {
-        return await puppeteer.launch({
-            headless: 'new',
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--no-first-run',
-                '--no-zygote',
-                '--disable-gpu',
-                '--disable-web-security',
-                '--disable-features=VizDisplayCompositor',
-                '--window-size=1920,1080'
-            ],
-            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined
-        });
+        const browserArgs = [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
+            '--single-process', // Better for constrained server environments
+            '--disable-gpu',
+            '--disable-web-security',
+            '--disable-features=IsolateOrigins,site-per-process',
+            '--disable-blink-features=AutomationControlled',
+            '--disable-extensions',
+            '--disable-background-networking',
+            '--disable-background-timer-throttling',
+            '--disable-backgrounding-occluded-windows',
+            '--disable-breakpad',
+            '--disable-component-extensions-with-background-pages',
+            '--disable-default-apps',
+            '--disable-hang-monitor',
+            '--disable-ipc-flooding-protection',
+            '--disable-popup-blocking',
+            '--disable-prompt-on-repost',
+            '--disable-renderer-backgrounding',
+            '--disable-sync',
+            '--force-color-profile=srgb',
+            '--metrics-recording-only',
+            '--enable-automation',
+            '--password-store=basic',
+            '--use-mock-keychain',
+            '--window-size=1920,1080',
+            '--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        ];
+
+        try {
+            console.log('🚀 Launching Puppeteer in headless mode for Azure Ubuntu...');
+            
+            const browser = await puppeteer.launch({
+                headless: 'new', // Use new headless mode
+                args: browserArgs,
+                executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || 
+                               (process.platform === 'linux' ? '/usr/bin/chromium-browser' : undefined),
+                ignoreHTTPSErrors: true,
+                dumpio: false, // Set to true for debugging
+                timeout: 30000
+            });
+
+            console.log('✅ Browser launched successfully');
+            return browser;
+            
+        } catch (error) {
+            console.error('❌ Failed to launch browser:', error.message);
+            
+            // Try fallback with minimal args
+            console.log('🔄 Trying fallback browser configuration...');
+            return await puppeteer.launch({
+                headless: 'new',
+                args: [
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu'
+                ],
+                ignoreHTTPSErrors: true,
+                timeout: 30000
+            });
+        }
     }
 
     // Setup page security and stealth
@@ -358,6 +409,28 @@ class FacebookScraper {
                 request.continue();
             }
         });
+    }
+
+    // OPTIONAL: Load Facebook cookies for authenticated scraping
+    // This allows access to more content and reduces rate limiting
+    async loadFacebookCookies(page) {
+        // Check if FB_COOKIES environment variable exists
+        const cookiesJson = process.env.FB_COOKIES;
+        
+        if (!cookiesJson) {
+            console.log('ℹ️  No Facebook cookies found - scraping as guest');
+            return false;
+        }
+
+        try {
+            const cookies = JSON.parse(cookiesJson);
+            await page.setCookie(...cookies);
+            console.log('✅ Loaded Facebook authentication cookies');
+            return true;
+        } catch (error) {
+            console.error('❌ Failed to load Facebook cookies:', error.message);
+            return false;
+        }
     }
 
     // Close Facebook popups and modals that may block scrolling
@@ -576,6 +649,9 @@ class FacebookScraper {
             const browser = await this.createBrowser();
             const page = await browser.newPage();
             await this.setupPageSecurity(page);
+            
+            // OPTIONAL: Load Facebook cookies for authenticated scraping
+            await this.loadFacebookCookies(page);
 
             // Add random delay to avoid detection
             await this.randomDelay(2000, 5000);
@@ -891,11 +967,13 @@ class FacebookScraper {
     }
 
     // Auto scroll to load more posts
-    async autoScrollPage(page, maxPosts = 3) {
+    async autoScrollPage(page, maxPosts = 20) { // Increased from 3 to 20 posts
         let postCount = 0;
         let scrollAttempts = 0;
-        const maxScrollAttempts = 2; // Increased attempts
+        const maxScrollAttempts = 15; // Increased from 2 to 15 attempts
         let previousHeight = 0;
+        let consecutiveNoNewContent = 0; // Track how many times no new content loaded
+        const maxConsecutiveNoNewContent = 3; // Stop after 3 failed attempts
 
         console.log(`📜 Starting auto-scroll to load ${maxPosts} posts...`);
 
@@ -950,7 +1028,13 @@ class FacebookScraper {
             const newHeight = await page.evaluate(() => document.body.scrollHeight);
 
             if (newHeight === previousHeight && newHeight === currentHeight) {
-                console.log(`⚠️  No new content loaded after scroll ${scrollAttempts + 1}`);
+                consecutiveNoNewContent++;
+                console.log(`⚠️  No new content loaded after scroll ${scrollAttempts + 1} (strike ${consecutiveNoNewContent}/${maxConsecutiveNoNewContent})`);
+                
+                if (consecutiveNoNewContent >= maxConsecutiveNoNewContent) {
+                    console.log('🛑 Stopping: No new content after 3 consecutive attempts');
+                    break;
+                }
                 
                 // Try to close any popups that might be blocking scrolling
                 console.log('🚫 Checking for popups during scroll...');
@@ -971,6 +1055,10 @@ class FacebookScraper {
                     ["button", "span", "a", "div"].forEach(tag => clickButtonsByText(tag, seeMoreTexts));
                 });
                 await this.randomDelay(2000, 3000);
+            } else {
+                // New content loaded successfully
+                consecutiveNoNewContent = 0;
+                console.log(`✅ New content loaded (height: ${previousHeight} → ${newHeight})`);
             }
 
             previousHeight = newHeight;

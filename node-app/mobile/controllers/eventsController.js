@@ -421,7 +421,14 @@ async function getEventPublicationImage(req, res) {
   let { organization_id, organization_version_id, event_id, image, image_name } = req.query;
 
   // Support both 'image' and 'image_name' parameters for backward compatibility
-  const finalImageName = image_name || image;
+  let finalImageName = image_name || image;
+  
+  // CRITICAL: Explicitly decode the image name if it's still URL-encoded
+  // Sometimes Express doesn't decode query params depending on how the URL is constructed
+  if (finalImageName && finalImageName.includes('%')) {
+    finalImageName = decodeURIComponent(finalImageName);
+    console.log('getEventPublicationImage: Decoded image name from URL encoding');
+  }
 
   console.log('getEventPublicationImage: Received parameters:', {
     organization_id,
@@ -429,7 +436,10 @@ async function getEventPublicationImage(req, res) {
     event_id,
     image: image || 'not provided',
     image_name: image_name || 'not provided',
-    finalImageName
+    finalImageName,
+    finalImageNameType: typeof finalImageName,
+    finalImageNameHasSpace: finalImageName?.includes(' '),
+    finalImageNameHasPercent: finalImageName?.includes('%')
   });
 
   if (!event_id || !finalImageName) {
@@ -438,13 +448,17 @@ async function getEventPublicationImage(req, res) {
     });
   }
 
-  // Encode parameters for URL safety
-  organization_id = organization_id ? encodeURIComponent(organization_id) : '';
-  organization_version_id = organization_version_id ? encodeURIComponent(organization_version_id) : '';
-
+  // NOTE: Express already URL-decodes query parameters automatically
+  // So finalImageName = "Organizational_Logo (6).png" (with space, not %20)
+  // We should NOT encode it again for the physical path
+  
+  // Keep IDs as-is (already decoded by Express)
+  // Only encode when building X-Accel-Redirect path for nginx
+  
   // Determine if it's an SDAO event
   const isSDAO = !organization_id || organization_id === 'null' || organization_id === '' || organization_id === 'undefined';
 
+  // Only encode for nginx X-Accel-Redirect path, NOT for physical filesystem path
   const image_name_encoded = encodeURIComponent(finalImageName);
 
   let xAccelPath;
@@ -487,18 +501,51 @@ async function getEventPublicationImage(req, res) {
   // Check if file exists before trying to serve it
   if (!fs.existsSync(physicalPath)) {
     console.error(`getEventPublicationImage: File not found at ${physicalPath}`);
+    
+    // Try to list what files actually exist in the directory
+    const dirPath = path.dirname(physicalPath);
+    try {
+      if (fs.existsSync(dirPath)) {
+        const files = fs.readdirSync(dirPath);
+        console.error(`getEventPublicationImage: Files in directory ${dirPath}:`, files);
+      } else {
+        console.error(`getEventPublicationImage: Directory does not exist: ${dirPath}`);
+      }
+    } catch (err) {
+      console.error(`getEventPublicationImage: Error reading directory: ${err.message}`);
+    }
+    
     return res.status(404).json({
       error: "Image not found",
-      message: "The requested image file does not exist."
+      message: "The requested image file does not exist.",
+      debug: {
+        requestedFile: finalImageName,
+        physicalPath: physicalPath,
+        directory: dirPath
+      }
     });
   }
 
   try {
+    // Get file stats for ETag and Last-Modified headers
+    const stats = fs.statSync(physicalPath);
+    const etag = `"${stats.mtime.getTime()}-${stats.size}"`;
+    const lastModified = stats.mtime.toUTCString();
+    
+    // Check If-None-Match (ETag) header
+    const clientEtag = req.headers['if-none-match'];
+    if (clientEtag === etag) {
+      console.log('getEventPublicationImage: Client has current version (ETag match), returning 304');
+      return res.status(304).end();
+    }
+    
     res.header('Access-Control-Allow-Methods', 'GET, OPTIONS');
     res.header('Access-Control-Allow-Headers', 'Authorization, Content-Type, Accept');
     res.setHeader('Content-Type', getContentType(finalImageName));
     res.setHeader('Content-Disposition', `inline; filename="${finalImageName}"`);
-    res.setHeader('Cache-Control', 'public, max-age=3600'); // Cache for 1 hour
+    res.setHeader('Cache-Control', 'public, max-age=3600, must-revalidate'); // Cache but validate
+    res.setHeader('ETag', etag); // Add ETag for cache validation
+    res.setHeader('Last-Modified', lastModified); // Add Last-Modified header
     res.setHeader('X-Accel-Redirect', xAccelPath);
     res.end();
   } catch (error) {

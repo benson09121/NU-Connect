@@ -114,7 +114,7 @@ class TermModel {
         try {
             // First check if there are any payment records for this term
             const [paymentCheck] = await connection.query(`
-                SELECT COUNT(*) as count FROM tbl_term_payments WHERE term_id = ?
+                SELECT COUNT(*) as count FROM tbl_membership_term_payment WHERE term_id = ?
             `, [termId]);
             
             if (paymentCheck[0].count > 0) {
@@ -221,7 +221,7 @@ class TermPaymentModel {
                     t.receipt_no,
                     t.proof_of_payment,
                     t.notes
-                FROM tbl_term_payments mtp
+                FROM tbl_membership_term_payment mtp
                 JOIN tbl_academic_term at ON mtp.term_id = at.term_id
                 JOIN tbl_organization o ON mtp.organization_id = o.organization_id
                 LEFT JOIN tbl_transaction t ON mtp.transaction_id = t.transaction_id
@@ -389,7 +389,7 @@ class TermPaymentModel {
             }
             
             const [result] = await connection.query(`
-                UPDATE tbl_term_payments 
+                UPDATE tbl_membership_term_payment 
                 SET 
                     payment_status = ?,
                     paid_date = CASE WHEN ? = 'Paid' THEN NOW() ELSE paid_date END,
@@ -411,7 +411,7 @@ class TermPaymentModel {
                         ELSE mtp.payment_status
                     END as payment_status,
                     CONCAT(u.f_name, ' ', u.l_name) as submitter_name
-                FROM tbl_term_payments mtp
+                FROM tbl_membership_term_payment mtp
                 LEFT JOIN tbl_user u ON mtp.user_id = u.user_id
                 WHERE mtp.payment_id = ?
             `, [paymentId]);
@@ -440,7 +440,7 @@ class TermPaymentModel {
                     t.receipt_no,
                     t.proof_of_payment,
                     t.notes
-                FROM tbl_term_payments mtp
+                FROM tbl_membership_term_payment mtp
                 JOIN tbl_academic_term at ON mtp.term_id = at.term_id
                 JOIN tbl_organization o ON mtp.organization_id = o.organization_id
                 LEFT JOIN tbl_transaction t ON mtp.transaction_id = t.transaction_id
@@ -462,7 +462,7 @@ class TermPaymentModel {
         const connection = await pool.getConnection();
         try {
             const [result] = await connection.query(`
-                DELETE FROM tbl_term_payments 
+                DELETE FROM tbl_membership_term_payment 
                 WHERE payment_id = ? AND payment_status = 'Pending'
             `, [paymentId]);
             

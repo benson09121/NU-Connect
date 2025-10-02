@@ -2336,8 +2336,8 @@ DELIMITER ;
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE UnRegisterEvent(IN
-    event_id INT,
-    user_id VARCHAR(200)
+    p_event_id INT,
+    p_user_id VARCHAR(200)
 )
 BEGIN
 -- Select the record first for real-time updates
@@ -2364,10 +2364,10 @@ LEFT JOIN tbl_user u ON ea.user_id = u.user_id
 LEFT JOIN tbl_transaction_event te ON ea.event_id = te.event_id 
 LEFT JOIN tbl_transaction t ON te.transaction_id = t.transaction_id AND ea.user_id = t.user_id
 LEFT JOIN tbl_transaction_type tt ON t.transaction_type_id = tt.transaction_type_id
-WHERE ea.event_id = event_id AND ea.user_id = user_id;
+WHERE ea.event_id = p_event_id AND ea.user_id = p_user_id;
 
 -- Then delete the record
-DELETE FROM tbl_event_attendance WHERE event_id = event_id AND user_id = user_id;
+DELETE FROM tbl_event_attendance WHERE event_id = p_event_id AND user_id = p_user_id;
 END $$
 DELIMITER ;
 
@@ -4332,7 +4332,7 @@ BEGIN
     DECLARE CONTINUE HANDLER FOR NOT FOUND SET v_done = TRUE;
 
     -- Get period, application type, and organization category FIRST
-    SELECT a.period_id, a.application_type, a.submitted_org_name, 
+    SELECT a.period_id, a.application_t ype, a.subm itted_org_name, 
            COALESCE(ov.category, 'Co-Curricular Organization') as category
     INTO v_period_id, v_application_type, v_submitted_org_name, v_org_category
     FROM tbl_application a
@@ -10724,17 +10724,35 @@ BEGIN
         SET MESSAGE_TEXT = 'User not authorized to verify tickets for this event';
     END IF;
     
-    -- Find existing attendance record
-    SELECT attendance_id INTO v_attendance_id
+    -- Find existing attendance record and check status
+    SELECT attendance_id, status INTO v_attendance_id, @current_status
     FROM tbl_event_attendance
     WHERE event_id = p_event_id
     AND user_id = v_user_id
-    AND status IN ('Registered')  -- Only allow scan for these statuses
     AND deleted_at IS NULL;  -- Not deleted
     
+    -- Check if user is registered at all
     IF v_attendance_id IS NULL THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'No valid registration found for this user and event';
+    END IF;
+    
+    -- Check if user has already attended
+    IF @current_status = 'Attended' THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'User has already been marked as attended for this event';
+    END IF;
+    
+    -- Check if user has already evaluated
+    IF @current_status = 'Evaluated' THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'User has already completed evaluation for this event';
+    END IF;
+    
+    -- Check if user status is Registered or Pending
+    IF @current_status NOT IN ('Registered', 'Pending') THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'User registration status is not valid for attendance scanning';
     END IF;
     
     -- Update attendance record
@@ -11299,7 +11317,7 @@ BEGIN
     WHERE org_version_id = p_org_version_id AND organization_id = p_org_id;
 
     SELECT
-        ma.application_id as id,
+        ma.application_id,
         ma.organization_id,
         ma.cycle_number,
         ma.user_id,
@@ -17828,7 +17846,7 @@ BEGIN
     -- Get all pending leave applications for this organization and cycle
     -- Use DISTINCT and GROUP BY to eliminate duplicates
     SELECT DISTINCT
-        la.leave_application_id as id,
+        la.leave_application_id,
         la.organization_id,
         la.cycle_number,
         la.user_id,
@@ -17966,7 +17984,7 @@ BEGIN
     
     -- Return the created application
     SELECT 
-        la.leave_application_id as id,
+        la.leave_application_id,
         la.organization_id,
         la.cycle_number,
         la.user_id,
@@ -18210,7 +18228,7 @@ BEGIN
     
     -- Return the approved application with all details
     SELECT 
-        la.leave_application_id as id,
+        la.leave_application_id,
         la.organization_id,
         la.cycle_number,
         la.user_id,
@@ -18368,7 +18386,7 @@ BEGIN
     
     -- Return the rejected application with all details
     SELECT 
-        la.leave_application_id as id,
+        la.leave_application_id,
         la.organization_id,
         la.cycle_number,
         la.user_id,
@@ -18456,6 +18474,12 @@ BEGIN
     DECLARE v_new_member_id INT;
     DECLARE v_org_version_id INT;
     DECLARE v_is_reactivating BOOLEAN DEFAULT FALSE;
+    -- Variables for payment start term logic
+    DECLARE v_current_term_id INT DEFAULT NULL;
+    DECLARE v_next_term_id INT DEFAULT NULL;
+    DECLARE v_payment_start_term_id INT DEFAULT NULL;
+    DECLARE v_membership_fee_type VARCHAR(50);
+    DECLARE v_application_date TIMESTAMP;
     
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
@@ -18466,13 +18490,14 @@ BEGIN
     START TRANSACTION;
     
     -- Check if application exists and get details
-    SELECT user_id, organization_id, cycle_number, status
-    INTO v_user_id, v_organization_id, v_cycle_number, v_application_status
+    SELECT user_id, organization_id, cycle_number, status, applied_at
+    INTO v_user_id, v_organization_id, v_cycle_number, v_application_status, v_application_date
     FROM tbl_membership_application 
     WHERE application_id = p_application_id;
     
-    -- Get the current organization version ID
-    SELECT current_org_version_id INTO v_org_version_id
+    -- Get the current organization version ID and membership fee type
+    SELECT current_org_version_id, membership_fee_type 
+    INTO v_org_version_id, v_membership_fee_type
     FROM tbl_organization 
     WHERE organization_id = v_organization_id;
     
@@ -18565,16 +18590,134 @@ BEGIN
         -- Set flag that we're reactivating an archived member
         SET v_is_reactivating = TRUE;
         
-        -- Reactivate existing archived member
+        -- Calculate payment start term for reactivated members (Per Term organizations only)
+        IF v_membership_fee_type = 'Per Term' THEN
+            -- Get current active term
+            SELECT term_id INTO v_current_term_id 
+            FROM tbl_academic_term 
+            WHERE is_active = 1 LIMIT 1;
+            
+            -- Get next term after current term
+            SELECT term_id INTO v_next_term_id
+            FROM tbl_academic_term 
+            WHERE start_date > (
+                SELECT end_date FROM tbl_academic_term WHERE term_id = v_current_term_id
+            )
+            ORDER BY start_date ASC LIMIT 1;
+            
+            -- Determine payment start term based on application timing and payment
+            IF v_transaction_id IS NOT NULL AND v_current_term_id IS NOT NULL THEN
+                -- Check if application was during the current term period
+                IF EXISTS(
+                    SELECT 1 FROM tbl_academic_term 
+                    WHERE term_id = v_current_term_id 
+                    AND DATE(v_application_date) BETWEEN start_date AND end_date
+                ) THEN
+                    -- User applied during current term and paid, start payments from next term
+                    SET v_payment_start_term_id = v_next_term_id;
+                ELSE
+                    -- User applied before current term, start from current term
+                    SET v_payment_start_term_id = v_current_term_id;
+                END IF;
+            ELSE
+                -- No payment or no current term, start from current term
+                SET v_payment_start_term_id = v_current_term_id;
+            END IF;
+        ELSE
+            -- Not a Per Term organization, no payment start term needed
+            SET v_payment_start_term_id = NULL;
+        END IF;
+        
+        -- Reactivate existing archived member with payment start term
         UPDATE tbl_organization_members 
         SET 
             status = 'Active',
             joined_at = NOW(),
-            org_version_id = v_org_version_id
+            org_version_id = v_org_version_id,
+            payment_start_term_id = v_payment_start_term_id
         WHERE member_id = v_new_member_id;
         
+        -- AUTO-PAYMENT: If user is exempted from current term (joined during active term with payment),
+        -- automatically create a "Paid" payment record for current term
+        IF v_payment_start_term_id = v_next_term_id AND v_current_term_id IS NOT NULL AND v_transaction_id IS NOT NULL THEN
+            -- Check if payment record doesn't already exist
+            IF NOT EXISTS(
+                SELECT 1 FROM tbl_term_payments 
+                WHERE user_id = v_user_id 
+                AND organization_id = v_organization_id
+                AND term_id = v_current_term_id
+            ) THEN
+                -- Create auto-paid record for current term
+                INSERT INTO tbl_term_payments (
+                    user_id,
+                    organization_id,
+                    organization_version_id,
+                    term_id,
+                    transaction_id,
+                    payment_status,
+                    verified_by,
+                    verified_at,
+                    notes,
+                    created_at,
+                    updated_at
+                ) VALUES (
+                    v_user_id,
+                    v_organization_id,
+                    v_org_version_id,
+                    v_current_term_id,      -- Current term (user is exempted)
+                    v_transaction_id,       -- Use membership application payment
+                    'Paid',                 -- Auto-paid status
+                    v_reviewer_user_id,     -- Verified by approver
+                    NOW(),                  -- Verified now
+                    'Auto-paid: Application fee covers current term membership',
+                    NOW(),
+                    NOW()
+                );
+            END IF;
+        END IF;
+        
     ELSE
-        -- Create new organization member
+        -- Calculate payment start term for new members (Per Term organizations only)
+        IF v_membership_fee_type = 'Per Term' THEN
+            -- Get current active term
+            SELECT term_id INTO v_current_term_id 
+            FROM tbl_academic_term 
+            WHERE is_active = 1 LIMIT 1;
+            
+            -- Get next term after current term
+            SELECT term_id INTO v_next_term_id
+            FROM tbl_academic_term 
+            WHERE start_date > (
+                SELECT end_date FROM tbl_academic_term WHERE term_id = v_current_term_id
+            )
+            ORDER BY start_date ASC LIMIT 1;
+            
+            -- Determine payment start term based on application timing and payment
+            -- If user applied during current term AND paid application fee, start from NEXT term
+            -- If user paid application fee and current term is active, they should be exempt from current term
+            IF v_transaction_id IS NOT NULL AND v_current_term_id IS NOT NULL THEN
+                -- Check if application was during the current term period
+                IF EXISTS(
+                    SELECT 1 FROM tbl_academic_term 
+                    WHERE term_id = v_current_term_id 
+                    AND DATE(v_application_date) BETWEEN start_date AND end_date
+                ) THEN
+                    -- User applied during current term and paid, start payments from next term
+                    SET v_payment_start_term_id = v_next_term_id;
+                ELSE
+                    -- User applied before current term or no current term, start from current term
+                    SET v_payment_start_term_id = v_current_term_id;
+                END IF;
+            ELSE
+                -- No payment or no current term, start from current term
+                SET v_payment_start_term_id = v_current_term_id;
+            END IF;
+        ELSE
+            -- Not a Per Term organization, no payment start term needed
+            SET v_payment_start_term_id = NULL;
+        END IF;
+        
+        -- Create new organization member with payment start term
         INSERT INTO tbl_organization_members (
             user_id, 
             organization_id, 
@@ -18582,7 +18725,8 @@ BEGIN
             org_version_id,
             member_type,
             status,
-            joined_at
+            joined_at,
+            payment_start_term_id
         ) VALUES (
             v_user_id, 
             v_organization_id, 
@@ -18590,18 +18734,58 @@ BEGIN
             v_org_version_id,
             'Member',
             'Active',
-            NOW()
+            NOW(),
+            v_payment_start_term_id
         );
         
         -- Get the newly created member ID
         SET v_new_member_id = LAST_INSERT_ID();
+        
+        -- AUTO-PAYMENT: If user is exempted from current term (joined during active term with payment),
+        -- automatically create a "Paid" payment record for current term
+        IF v_payment_start_term_id = v_next_term_id AND v_current_term_id IS NOT NULL AND v_transaction_id IS NOT NULL THEN
+            -- Check if payment record doesn't already exist
+            IF NOT EXISTS(
+                SELECT 1 FROM tbl_term_payments 
+                WHERE user_id = v_user_id 
+                AND organization_id = v_organization_id
+                AND term_id = v_current_term_id
+            ) THEN
+                -- Create auto-paid record for current term
+                INSERT INTO tbl_term_payments (
+                    user_id,
+                    organization_id,
+                    organization_version_id,
+                    term_id,
+                    transaction_id,
+                    payment_status,
+                    verified_by,
+                    verified_at,
+                    notes,
+                    created_at,
+                    updated_at
+                ) VALUES (
+                    v_user_id,
+                    v_organization_id,
+                    v_org_version_id,
+                    v_current_term_id,      -- Current term (user is exempted)
+                    v_transaction_id,       -- Use membership application payment
+                    'Paid',                 -- Auto-paid status
+                    v_reviewer_user_id,     -- Verified by approver
+                    NOW(),                  -- Verified now
+                    'Auto-paid: Application fee covers current term membership',
+                    NOW(),
+                    NOW()
+                );
+            END IF;
+        END IF;
     END IF;
     
     COMMIT;
     
     -- Return approved application details
     SELECT
-        ma.application_id as id,
+        ma.application_id,
         ma.organization_id,
         ma.cycle_number,
         ma.user_id,
@@ -18814,7 +18998,7 @@ BEGIN
     
     -- Return rejected application details
     SELECT
-        ma.application_id as id,
+        ma.application_id,
         ma.organization_id,
         ma.cycle_number,
         ma.user_id,

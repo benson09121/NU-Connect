@@ -1,1 +1,5 @@
 !default.conf
+
+# Ensure .auth folder is included in Docker build (for pre-configured authentication)
+!node-app/.auth
+!node-app/.auth/*
