@@ -6,7 +6,7 @@ const MobileTermPaymentModel = require('../models/termPaymentModel');
 const userModel = require('../models/userModel');
 const fs = require('fs');
 const path = require('path');
-const { publishToChannel } = require('../../web/controllers/sseController');
+const { publishToChannel, publishOrgHub } = require('../../web/controllers/sseController');
 
 class MobileTermPaymentController {
     // ==================
@@ -338,19 +338,25 @@ class MobileTermPaymentController {
             
             // REAL-TIME: Publish term payment creation immediately
             try {
-                publishToChannel(`term_payments_${organizationId}`, {
-                    type: 'new_term_payment',
-                    payment_id: paymentResult.payment_id,
-                    transaction_id: paymentResult.transaction_id,
-                    organization_id: organizationId,
-                    user_id: userId,
-                    user_name: `${user.first_name} ${user.last_name}`,
-                    amount: paymentResult.amount,
-                    payment_method: paymentResult.payment_method,
-                    term_name: paymentResult.term_name,
-                    timestamp: new Date().toISOString()
+                publishOrgHub({
+                    orgId: organizationId,
+                    orgVersionId: organizationVersionId,
+                    entity: 'organization_termPayments',
+                    operation: 'CREATE',
+                    data: {
+                        type: 'new_term_payment',
+                        payment_id: paymentResult.payment_id,
+                        transaction_id: paymentResult.transaction_id,
+                        organization_id: organizationId,
+                        user_id: userId,
+                        user_name: `${user.first_name} ${user.last_name}`,
+                        amount: paymentResult.amount,
+                        payment_method: paymentResult.payment_method,
+                        term_name: paymentResult.term_name,
+                        timestamp: new Date().toISOString()
+                    }
                 });
-                console.log(`🟢 REAL-TIME: Published term payment creation to SSE: term_payments_${organizationId}`);
+                console.log(`� [MOBILE] 📡 Term Payment Published to hub - 1 item`);
             } catch (sseError) {
                 console.error('🔴 Failed to publish term payment SSE:', sseError);
             }
@@ -363,8 +369,14 @@ class MobileTermPaymentController {
                     ORDER BY created_at DESC
                 `, [organizationId, organizationVersionId]);
                 
-                publishToChannel(`term_payment_submissions_${organizationId}`, termPaymentsList);
-                console.log(`🟢 REAL-TIME: Published updated term payments list to SSE: term_payment_submissions_${organizationId}`);
+                publishOrgHub({
+                    orgId: organizationId,
+                    orgVersionId: organizationVersionId,
+                    entity: 'organization_termPayments',
+                    operation: 'UPDATE',
+                    data: termPaymentsList
+                });
+                console.log(`� [MOBILE] 📡 Term Payments List Published to hub - ${termPaymentsList.length} items`);
                 
             } catch (sseError) {
                 console.error('🔴 Failed to publish term payments list SSE:', sseError);
