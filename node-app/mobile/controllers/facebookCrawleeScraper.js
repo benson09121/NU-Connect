@@ -66,27 +66,41 @@ class FacebookCrawleeScraper {
     // Load Facebook authentication from secure storage
     async loadAuthentication() {
         try {
-            // Check for cookies file
+            // Check for cookies file (primary requirement)
             const cookiesExist = await fs.access(FB_COOKIES_FILE).then(() => true).catch(() => false);
-            const sessionExist = await fs.access(FB_SESSION_FILE).then(() => true).catch(() => false);
-
-            if (cookiesExist && sessionExist) {
+            
+            if (cookiesExist) {
                 const cookiesData = await fs.readFile(FB_COOKIES_FILE, 'utf-8');
-                const sessionData = await fs.readFile(FB_SESSION_FILE, 'utf-8');
-
                 this.cookies = JSON.parse(cookiesData);
-                this.sessionData = JSON.parse(sessionData);
-                this.authenticated = true;
 
+                // Try to load session file (optional, for metadata)
+                const sessionExist = await fs.access(FB_SESSION_FILE).then(() => true).catch(() => false);
+                if (sessionExist) {
+                    const sessionData = await fs.readFile(FB_SESSION_FILE, 'utf-8');
+                    this.sessionData = JSON.parse(sessionData);
+                } else {
+                    // Create default session data if file doesn't exist
+                    this.sessionData = {
+                        userId: 'auto-detected',
+                        name: 'Facebook User',
+                        authenticatedAt: new Date().toISOString()
+                    };
+                    console.log('ℹ️  Session file not found, using default session data');
+                }
+
+                this.authenticated = true;
                 console.log('✅ Facebook authentication loaded successfully');
-                console.log(`👤 Logged in as: ${this.sessionData.name || 'Unknown'}`);
+                console.log(`👤 Logged in as: ${this.sessionData.name || 'Facebook User'}`);
+                console.log(`🍪 Cookies loaded: ${this.cookies.length} cookies found`);
             } else {
                 console.log('ℹ️  No Facebook authentication found');
-                console.log('📖 To enable authenticated scraping, run: npm run setup-facebook-auth');
+                console.log('📖 To enable authenticated scraping, add facebook-cookies.json to .auth folder');
+                console.log('💡 You can export cookies using Cookie-Editor browser extension');
                 this.authenticated = false;
             }
         } catch (error) {
             console.error('❌ Failed to load authentication:', error.message);
+            console.error('   Make sure facebook-cookies.json is valid JSON format');
             this.authenticated = false;
         }
     }

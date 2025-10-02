@@ -4332,7 +4332,7 @@ BEGIN
     DECLARE CONTINUE HANDLER FOR NOT FOUND SET v_done = TRUE;
 
     -- Get period, application type, and organization category FIRST
-    SELECT a.period_id, a.application_t ype, a.subm itted_org_name, 
+    SELECT a.period_id, a.application_type, a.submitted_org_name, 
            COALESCE(ov.category, 'Co-Curricular Organization') as category
     INTO v_period_id, v_application_type, v_submitted_org_name, v_org_category
     FROM tbl_application a
