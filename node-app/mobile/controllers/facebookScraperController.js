@@ -1,6 +1,8 @@
 const puppeteer = require('puppeteer');
 const cron = require('node-cron');
 const crypto = require('crypto');
+const fs = require('fs').promises;
+const path = require('path');
 // Use existing Redis client from config
 const { redisClient } = require('../../config/redis');
 
@@ -10,11 +12,20 @@ const DEFAULT_PAGE = {
     url: 'https://www.facebook.com/nudasma.CompSoc',
     name: 'NUDASMA CompSoc',
     fallback_urls: [
+        'https://www.facebook.com/nudasmacompsoc',
         'https://facebook.com/nudasma.CompSoc',
-        'https://m.facebook.com/nudasma.CompSoc',
-        'https://www.facebook.com/nudasmacompsoc'
+        'https://www.facebook.com/profile.php?id=113338964475892'
     ]
 };
+
+// Facebook authentication storage path
+const AUTH_DIR = path.join(__dirname, '../../.auth');
+const FB_COOKIES_FILE = path.join(AUTH_DIR, 'facebook-cookies.json');
+const FB_SESSION_FILE = path.join(AUTH_DIR, 'facebook-session.json');
+
+// Tuning knobs for resource utilization
+const MAX_PUPPETEER_CONCURRENCY = parseInt(process.env.FB_PUPPETEER_MAX_CONCURRENCY || '2', 10);
+const MAX_SCRAPE_POSTS = parseInt(process.env.FB_PUPPETEER_MAX_POSTS || '100', 10);
 
 class FacebookScraper {
     constructor() {
@@ -23,19 +34,28 @@ class FacebookScraper {
         this.scraperQueue = new Map();
         this.lastScrapeTimes = new Map();
         this.initialized = false;
+        this.sessionData = null;
+        this.authenticated = false;
+        this.cookies = null;
     }
 
     async init() {
         if (this.initialized) return;
 
         try {
+            // Ensure auth directory exists
+            await fs.mkdir(AUTH_DIR, { recursive: true });
+
             // Use the existing Redis client from config
             this.redisClient = redisClient;
             
             // Test Redis connection
             await this.redisClient.ping();
-            console.log('✅ Facebook Scraper connected to Redis');
+            console.log('✅ Facebook Scraper (Puppeteer) connected to Redis');
             
+            // Load authentication
+            await this.loadAuthentication();
+
             this.initialized = true;
 
             // Automatically add default page to tracking
@@ -51,6 +71,86 @@ class FacebookScraper {
             console.error('❌ Facebook Scraper Redis connection failed:', error.message);
             console.log('📝 Scraper will work without caching until Redis is available');
         }
+    }
+
+    // Load Facebook authentication from secure storage
+    async loadAuthentication() {
+        try {
+            // Check for cookies file (primary requirement)
+            const cookiesExist = await fs.access(FB_COOKIES_FILE).then(() => true).catch(() => false);
+            
+            if (cookiesExist) {
+                const cookiesData = await fs.readFile(FB_COOKIES_FILE, 'utf-8');
+                const rawCookies = JSON.parse(cookiesData);
+                
+                // Normalize cookies for Puppeteer compatibility
+                this.cookies = this.normalizeCookiesForPuppeteer(rawCookies);
+
+                // Try to load session file (optional, for metadata)
+                const sessionExist = await fs.access(FB_SESSION_FILE).then(() => true).catch(() => false);
+                if (sessionExist) {
+                    const sessionData = await fs.readFile(FB_SESSION_FILE, 'utf-8');
+                    this.sessionData = JSON.parse(sessionData);
+                } else {
+                    // Create default session data if file doesn't exist
+                    this.sessionData = {
+                        userId: 'auto-detected',
+                        name: 'Facebook User',
+                        authenticatedAt: new Date().toISOString()
+                    };
+                    console.log('ℹ️  Session file not found, using default session data');
+                }
+
+                this.authenticated = true;
+                console.log('✅ Facebook authentication loaded successfully (Puppeteer)');
+                console.log(`👤 Logged in as: ${this.sessionData.name || 'Facebook User'}`);
+                console.log(`🍪 Cookies loaded: ${this.cookies.length} cookies normalized for Puppeteer`);
+            } else {
+                console.log('ℹ️  No Facebook authentication found');
+                console.log('📖 To enable authenticated scraping, add facebook-cookies.json to .auth folder');
+                console.log('💡 You can export cookies using Cookie-Editor browser extension');
+                this.authenticated = false;
+            }
+        } catch (error) {
+            console.error('❌ Failed to load authentication:', error.message);
+            console.error('   Make sure facebook-cookies.json is valid JSON format');
+            this.authenticated = false;
+        }
+    }
+
+    // Normalize cookies from browser export format to Puppeteer format
+    normalizeCookiesForPuppeteer(cookies) {
+        return cookies.map(cookie => {
+            // Map sameSite values to Puppeteer's expected format
+            let sameSite = 'Lax'; // Default
+            
+            if (cookie.sameSite) {
+                const sameSiteValue = cookie.sameSite.toLowerCase();
+                if (sameSiteValue === 'strict') {
+                    sameSite = 'Strict';
+                } else if (sameSiteValue === 'lax') {
+                    sameSite = 'Lax';
+                } else if (sameSiteValue === 'none' || sameSiteValue === 'no_restriction') {
+                    sameSite = 'None';
+                }
+            }
+
+            // Convert expirationDate (unix timestamp) to expires (unix timestamp in seconds)
+            const expires = cookie.expirationDate 
+                ? Math.floor(cookie.expirationDate) 
+                : undefined;
+
+            return {
+                name: cookie.name,
+                value: cookie.value,
+                domain: cookie.domain,
+                path: cookie.path || '/',
+                expires: expires,
+                httpOnly: cookie.httpOnly || false,
+                secure: cookie.secure || false,
+                sameSite: sameSite
+            };
+        });
     }
 
     // Setup scheduled scraping to check for new posts
@@ -96,6 +196,9 @@ class FacebookScraper {
                 const browser = await this.createBrowser();
                 const page = await browser.newPage();
                 await this.setupPageSecurity(page);
+                
+                // Load authentication cookies if available
+                await this.loadFacebookCookies(page);
                 
                 await page.goto(url, { 
                     waitUntil: 'domcontentloaded',
@@ -240,6 +343,9 @@ class FacebookScraper {
             browser = await this.createBrowser();
             const page = await browser.newPage();
             await this.setupPageSecurity(page);
+            
+            // Load authentication cookies if available
+            await this.loadFacebookCookies(page);
             
             // Set a more aggressive timeout and user agent for problematic networks
             await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
@@ -399,11 +505,12 @@ class FacebookScraper {
             'Upgrade-Insecure-Requests': '1'
         });
 
-        // Block unnecessary resources to speed up
+        // Block unnecessary resources to speed up (but allow images!)
         await page.setRequestInterception(true);
         page.on('request', (request) => {
             const resourceType = request.resourceType();
-            if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
+            // Allow images so we can extract them, but block other heavy resources
+            if (['stylesheet', 'font', 'media'].includes(resourceType)) {
                 request.abort();
             } else {
                 request.continue();
@@ -411,24 +518,22 @@ class FacebookScraper {
         });
     }
 
-    // OPTIONAL: Load Facebook cookies for authenticated scraping
+    // Load Facebook cookies for authenticated scraping
     // This allows access to more content and reduces rate limiting
     async loadFacebookCookies(page) {
-        // Check if FB_COOKIES environment variable exists
-        const cookiesJson = process.env.FB_COOKIES;
-        
-        if (!cookiesJson) {
-            console.log('ℹ️  No Facebook cookies found - scraping as guest');
+        // Use loaded cookies from authentication
+        if (!this.authenticated || !this.cookies) {
+            console.log('ℹ️  No Facebook cookies loaded - scraping as guest');
             return false;
         }
 
         try {
-            const cookies = JSON.parse(cookiesJson);
-            await page.setCookie(...cookies);
+            await page.setCookie(...this.cookies);
             console.log('✅ Loaded Facebook authentication cookies');
+            console.log(`🔐 Using authenticated session for: ${this.sessionData?.name || 'Facebook User'}`);
             return true;
         } catch (error) {
-            console.error('❌ Failed to load Facebook cookies:', error.message);
+            console.error('❌ Failed to set Facebook cookies:', error.message);
             return false;
         }
     }
@@ -698,10 +803,21 @@ class FacebookScraper {
                 throw new Error(`Failed to navigate to ${pageUrl} after ${maxRetries} attempts due to network issues`);
             }
 
-            // Wait for posts to load
-            await page.waitForSelector('[role="article"], [data-pagelet="FeedUnit"], div[data-testid="story-root"]', { 
-                timeout: 20000 
-            });
+            // Wait for posts to load - Desktop Facebook
+            console.log('⏳ Waiting for Facebook feed to load...');
+            try {
+                await page.waitForSelector('[role="article"], [role="main"], [data-pagelet="FeedUnit"]', { 
+                    timeout: 25000 
+                });
+                console.log('✅ Feed elements detected on page');
+                
+                // Additional wait for posts to fully render
+                await this.randomDelay(2000, 3000);
+            } catch (waitError) {
+                console.warn('⚠️  Standard selectors not found, page may not have loaded correctly');
+                console.warn('Error:', waitError.message);
+                // Continue anyway to try extraction
+            }
 
             // Close any popups/modals before scrolling
             console.log('🚫 Checking for and closing popups/modals...');
@@ -710,7 +826,37 @@ class FacebookScraper {
             // Debug mode - show what elements are on the page
             if (debug) {
                 console.log('🐛 Debug mode enabled - analyzing page elements...');
-                await this.debugPageElements(page);
+                const debugInfo = await this.debugPageElements(page);
+                
+                // Also capture page HTML for analysis
+                const bodyHTML = await page.evaluate(() => {
+                    // Get a sample of the page structure
+                    const body = document.body;
+                    const allArticles = document.querySelectorAll('[role="article"]');
+                    const feedUnits = document.querySelectorAll('[data-pagelet="FeedUnit"]');
+                    
+                    return {
+                        bodyClasses: body.className,
+                        articleCount: allArticles.length,
+                        feedUnitCount: feedUnits.length,
+                        pageTitle: document.title,
+                        pageURL: window.location.href,
+                        mainContent: document.querySelector('[role="main"]') ? 'Found main container' : 'No main container',
+                        firstArticleHTML: allArticles.length > 0 ? allArticles[0].outerHTML.substring(0, 1000) : 'No articles found'
+                    };
+                });
+                
+                console.log('📄 Page Structure:', JSON.stringify(bodyHTML, null, 2));
+                
+                // Take screenshot for debugging
+                try {
+                    const screenshotPath = path.join(__dirname, '../../logs', `debug-${scrapeId}.png`);
+                    await fs.mkdir(path.dirname(screenshotPath), { recursive: true });
+                    await page.screenshot({ path: screenshotPath, fullPage: false });
+                    console.log(`📸 Screenshot saved to: ${screenshotPath}`);
+                } catch (screenshotError) {
+                    console.error('Failed to save screenshot:', screenshotError.message);
+                }
             }
 
             // Scroll to load more posts (improved timing)
@@ -766,43 +912,68 @@ class FacebookScraper {
             const posts = await page.evaluate((maxPosts) => {
                 const extractedPosts = [];
                 
-                // Try different selectors for posts (comprehensive list)
+                // Desktop Facebook selectors (PRIORITIZED)
                 const postSelectors = [
-                    '[role="article"]',
-                    '[data-pagelet="FeedUnit"]',
-                    'div[data-testid="story-root"]',
-                    '.userContentWrapper',
-                    'div[data-ft]',
-                    'div[class*="story"]'
+                    '[role="article"]',                    // Primary desktop selector
+                    'div[data-pagelet="FeedUnit"]',        // Desktop feed units
+                    'div.x1yztbdb',                         // New Facebook layout
+                    'div[class*="userContentWrapper"]',   // Classic layout
                 ];
 
                 let postElements = [];
                 let usedSelector = '';
                 
-                // Use the selector that finds the most elements
+                console.log('🔍 Searching for posts with desktop Facebook selectors...');
+                
+                // Try each selector and use the first one that finds posts
                 for (const selector of postSelectors) {
-                    const elements = document.querySelectorAll(selector);
-                    if (elements.length > postElements.length) {
-                        postElements = Array.from(elements);
-                        usedSelector = selector;
+                    try {
+                        const elements = document.querySelectorAll(selector);
+                        console.log(`  Selector "${selector}" found ${elements.length} elements`);
+                        if (elements.length > 0) {
+                            postElements = Array.from(elements);
+                            usedSelector = selector;
+                            console.log(`✅ Using selector "${usedSelector}" - found ${postElements.length} posts`);
+                            break; // Use first working selector
+                        }
+                    } catch (selectorError) {
+                        console.log(`  Selector "${selector}" failed:`, selectorError);
                     }
                 }
                 
-                console.log(`Using selector "${usedSelector}" - found ${postElements.length} potential posts`);
+                // If no posts found, log page structure for debugging
+                if (postElements.length === 0) {
+                    console.error('❌ No posts found with any selector!');
+                    console.log('📄 Page structure debug:');
+                    console.log('  - Articles:', document.querySelectorAll('article').length);
+                    console.log('  - [role="article"]:', document.querySelectorAll('[role="article"]').length);
+                    console.log('  - Feed units:', document.querySelectorAll('[data-pagelet="FeedUnit"]').length);
+                    console.log('  - Page title:', document.title);
+                    console.log('  - Page URL:', window.location.href);
+                    
+                    // Try to find the main feed container
+                    const mainFeed = document.querySelector('div[role="main"], div[role="feed"], #content_container');
+                    if (mainFeed) {
+                        console.log('  - Found main feed container');
+                        const feedChildren = mainFeed.querySelectorAll(':scope > div');
+                        console.log('  - Feed children:', feedChildren.length);
+                    }
+                    
+                    return []; // Return empty array if no posts found
+                }
 
                 for (let index = 0; index < Math.min(postElements.length, maxPosts); index++) {
                     const post = postElements[index];
                     
                     try {
-                        // Extract post content with multiple selectors
+                        // Extract post content - Desktop Facebook selectors
                         const contentSelectors = [
                             '[data-testid="post_message"]',
+                            'div[data-ad-preview="message"]',
                             '.userContent',
-                            '[data-ad-preview="message"]',
-                            '[data-testid="story-subtitle"] ~ div',
-                            'div[data-testid="post_message"] span',
-                            'div[dir="auto"]',
-                            'span[lang]'
+                            'div[dir="auto"][style*="text-align"]',
+                            'div[data-ad-comet-preview="message"]',
+                            'span[dir="auto"]'
                         ];
                         
                         let content = '';
@@ -829,14 +1000,15 @@ class FacebookScraper {
                             }
                         }
 
-                        // Extract timestamp with improved selectors
+                        // Extract timestamp - Desktop Facebook selectors
                         const timeSelectors = [
-                            'time[datetime]',
-                            'abbr[data-utime]',
+                            'span[id*="jsc"] a[href*="/posts/"]',
+                            'a[href*="/posts/"] abbr',
+                            'a.x1i10hfl[role="link"] span',
                             '[data-testid="story-subtitle"] a',
-                            'span[data-testid="story-subtitle"] time',
-                            'a[href*="/posts/"]',
-                            'span[title]'
+                            'span > a[href*="?story_fbid"]',
+                            'abbr[data-utime]',
+                            'time[datetime]'
                         ];
                         
                         let timestamp = null;
@@ -901,6 +1073,198 @@ class FacebookScraper {
                             }
                         }
 
+                        // Extract reactions (likes, loves, etc.)
+                        let reactions = {
+                            total: 0,
+                            likes: 0,
+                            loves: 0,
+                            breakdown: []
+                        };
+                        
+                        try {
+                            // Look for reaction count elements
+                            const reactionSelectors = [
+                                '[aria-label*="reaction"]',
+                                '[data-testid="like_count"]',
+                                'span[aria-label*="Like"]',
+                                'div[role="button"][aria-label*="Like"]',
+                                'a[aria-label*="reaction"]',
+                                'span:has(img[alt*="Like"])',
+                                'span:has(img[alt*="Love"])'
+                            ];
+                            
+                            for (const selector of reactionSelectors) {
+                                const reactionElement = post.querySelector(selector);
+                                if (reactionElement) {
+                                    const ariaLabel = reactionElement.getAttribute('aria-label') || '';
+                                    const text = reactionElement.textContent || '';
+                                    
+                                    // Try to extract numbers from aria-label or text
+                                    const matches = (ariaLabel + ' ' + text).match(/(\d+[\d,\.]*[kKmM]?)/g);
+                                    if (matches && matches.length > 0) {
+                                        // Parse numbers like "1.2K" or "1,234"
+                                        const parseCount = (str) => {
+                                            str = str.replace(/,/g, '');
+                                            if (str.toLowerCase().includes('k')) {
+                                                return Math.round(parseFloat(str) * 1000);
+                                            } else if (str.toLowerCase().includes('m')) {
+                                                return Math.round(parseFloat(str) * 1000000);
+                                            }
+                                            return parseInt(str) || 0;
+                                        };
+                                        
+                                        reactions.total = parseCount(matches[0]);
+                                        break;
+                                    }
+                                }
+                            }
+                            
+                            // Fallback: look for any text that looks like reaction counts
+                            if (reactions.total === 0) {
+                                const allText = post.textContent || '';
+                                const likeMatch = allText.match(/(\d+[\d,\.]*[kKmM]?)\s*(Like|Reaction)/i);
+                                if (likeMatch) {
+                                    const parseCount = (str) => {
+                                        str = str.replace(/,/g, '');
+                                        if (str.toLowerCase().includes('k')) {
+                                            return Math.round(parseFloat(str) * 1000);
+                                        } else if (str.toLowerCase().includes('m')) {
+                                            return Math.round(parseFloat(str) * 1000000);
+                                        }
+                                        return parseInt(str) || 0;
+                                    };
+                                    reactions.total = parseCount(likeMatch[1]);
+                                }
+                            }
+                        } catch (reactionError) {
+                            console.log('Error extracting reactions:', reactionError);
+                        }
+
+                        // Extract share count
+                        let shareCount = 0;
+                        try {
+                            const shareSelectors = [
+                                '[aria-label*="share"]',
+                                'span:contains("Share")',
+                                'div[role="button"]:contains("Share")',
+                                'a[aria-label*="Share"]'
+                            ];
+                            
+                            // Can't use :contains in querySelector, so search through text
+                            const allLinks = post.querySelectorAll('a, span, div[role="button"]');
+                            for (const element of allLinks) {
+                                const text = element.textContent || '';
+                                const ariaLabel = element.getAttribute('aria-label') || '';
+                                
+                                // Look for patterns like "25 shares" or "Share 25"
+                                const shareMatch = (text + ' ' + ariaLabel).match(/(\d+[\d,\.]*[kKmM]?)\s*[Ss]hare/);
+                                if (shareMatch) {
+                                    const parseCount = (str) => {
+                                        str = str.replace(/,/g, '');
+                                        if (str.toLowerCase().includes('k')) {
+                                            return Math.round(parseFloat(str) * 1000);
+                                        } else if (str.toLowerCase().includes('m')) {
+                                            return Math.round(parseFloat(str) * 1000000);
+                                        }
+                                        return parseInt(str) || 0;
+                                    };
+                                    shareCount = parseCount(shareMatch[1]);
+                                    break;
+                                }
+                            }
+                        } catch (shareError) {
+                            console.log('Error extracting share count:', shareError);
+                        }
+
+                        // Extract comments
+                        let comments = [];
+                        let commentCount = 0;
+                        
+                        try {
+                            // First, try to find comment count
+                            const commentCountSelectors = [
+                                '[aria-label*="comment"]',
+                                'span:contains("Comment")',
+                                'div[role="button"]:contains("Comment")'
+                            ];
+                            
+                            const allElements = post.querySelectorAll('a, span, div[role="button"]');
+                            for (const element of allElements) {
+                                const text = element.textContent || '';
+                                const ariaLabel = element.getAttribute('aria-label') || '';
+                                
+                                // Look for patterns like "25 comments" or "Comment (25)"
+                                const commentMatch = (text + ' ' + ariaLabel).match(/(\d+[\d,\.]*[kKmM]?)\s*[Cc]omment/);
+                                if (commentMatch) {
+                                    const parseCount = (str) => {
+                                        str = str.replace(/,/g, '');
+                                        if (str.toLowerCase().includes('k')) {
+                                            return Math.round(parseFloat(str) * 1000);
+                                        } else if (str.toLowerCase().includes('m')) {
+                                            return Math.round(parseFloat(str) * 1000000);
+                                        }
+                                        return parseInt(str) || 0;
+                                    };
+                                    commentCount = parseCount(commentMatch[1]);
+                                    break;
+                                }
+                            }
+                            
+                            // Try to extract actual comment text and authors
+                            // Comments are often in nested article elements or specific comment containers
+                            const commentContainerSelectors = [
+                                'div[data-testid="UFI2CommentsList"]',
+                                'div[role="article"] div[role="article"]', // Nested articles are often comments
+                                'ul[data-testid="UFI2CommentsList"] li',
+                                'div[data-testid="comment-content"]',
+                                'div[class*="comment"]'
+                            ];
+                            
+                            for (const selector of commentContainerSelectors) {
+                                const commentElements = post.querySelectorAll(selector);
+                                if (commentElements.length > 0) {
+                                    // Extract up to 10 top comments
+                                    for (let i = 0; i < Math.min(commentElements.length, 10); i++) {
+                                        const commentEl = commentElements[i];
+                                        
+                                        // Extract commenter name
+                                        const commenterNameEl = commentEl.querySelector('a[role="link"], strong, span[dir="auto"]');
+                                        const commenterName = commenterNameEl ? commenterNameEl.textContent.trim() : 'Unknown User';
+                                        
+                                        // Extract comment text
+                                        const commentTextEl = commentEl.querySelector('div[dir="auto"], span[dir="auto"]');
+                                        const commentText = commentTextEl ? commentTextEl.textContent.trim() : '';
+                                        
+                                        // Extract comment timestamp
+                                        const commentTimeEl = commentEl.querySelector('abbr[data-utime], time');
+                                        const commentTime = commentTimeEl ? 
+                                            (commentTimeEl.getAttribute('data-utime') || 
+                                             commentTimeEl.getAttribute('datetime') || 
+                                             commentTimeEl.textContent) : null;
+                                        
+                                        if (commentText && commentText.length > 0) {
+                                            comments.push({
+                                                author: commenterName,
+                                                text: commentText.substring(0, 500), // Limit length
+                                                timestamp: commentTime
+                                            });
+                                        }
+                                    }
+                                    
+                                    if (comments.length > 0) {
+                                        break; // Found comments, stop trying other selectors
+                                    }
+                                }
+                            }
+                            
+                            // If we found a comment count but no actual comments, set commentCount
+                            if (commentCount === 0 && comments.length > 0) {
+                                commentCount = comments.length;
+                            }
+                        } catch (commentError) {
+                            console.log('Error extracting comments:', commentError);
+                        }
+
                         // Only include posts with meaningful content
                         if (content.length > 10 || images.length > 0) {
                             extractedPosts.push({
@@ -910,11 +1274,15 @@ class FacebookScraper {
                                 timestamp: timestamp,
                                 images: images,
                                 url: postUrl,
+                                reactions: reactions,
+                                shareCount: shareCount,
+                                comments: comments,
+                                commentCount: commentCount,
                                 scraped_at: new Date().toISOString(),
                                 post_index: index
                             });
                             
-                            console.log(`✅ Extracted post ${index + 1}: "${content.substring(0, 60)}..."`);
+                            console.log(`✅ Extracted post ${index + 1}: "${content.substring(0, 60)}..." [${reactions.total} reactions, ${shareCount} shares, ${commentCount} comments]`);
                         } else {
                             console.log(`⚠️  Skipped post ${index + 1}: insufficient content`);
                         }
@@ -926,6 +1294,25 @@ class FacebookScraper {
                 console.log(`📋 Total posts extracted: ${extractedPosts.length} out of ${postElements.length} found`);
                 return extractedPosts;
             }, maxPosts);
+
+            // If no posts found, take screenshot for debugging
+            if (posts.length === 0) {
+                console.error('❌ ZERO POSTS EXTRACTED - Taking debug screenshot...');
+                try {
+                    const screenshotPath = path.join(__dirname, '../../logs', `no-posts-${scrapeId}.png`);
+                    await fs.mkdir(path.dirname(screenshotPath), { recursive: true });
+                    await page.screenshot({ path: screenshotPath, fullPage: true });
+                    console.error(`📸 Debug screenshot saved to: ${screenshotPath}`);
+                    
+                    // Also save page HTML
+                    const htmlPath = path.join(__dirname, '../../logs', `no-posts-${scrapeId}.html`);
+                    const html = await page.content();
+                    await fs.writeFile(htmlPath, html);
+                    console.error(`📄 Page HTML saved to: ${htmlPath}`);
+                } catch (debugError) {
+                    console.error('Failed to save debug files:', debugError.message);
+                }
+            }
 
             await browser.close();
 

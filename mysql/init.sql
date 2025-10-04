@@ -207,8 +207,6 @@ CREATE TABLE tbl_academic_term (
     academic_year VARCHAR(20) NULL, -- e.g., '2024-2025', '2025'
     start_date DATE NOT NULL,
     end_date DATE NOT NULL,
-    is_active BOOLEAN DEFAULT FALSE,
-    status ENUM('Draft', 'Active', 'Completed', 'Archived') DEFAULT 'Draft',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     created_by VARCHAR(200) NOT NULL,
@@ -1412,6 +1410,7 @@ END as is_eligible,
 CASE 
     WHEN c.membership_fee_type = 'Per Term' THEN
         CASE 
+            -- Check if term payment exists for current term (first term matching today's date)
             WHEN EXISTS (
                 SELECT 1 FROM tbl_term_payments tp
                 JOIN tbl_academic_term at ON tp.term_id = at.term_id
@@ -1420,6 +1419,20 @@ CASE
                 AND tp.organization_version_id = rc.org_version_id
                 AND tp.payment_status IN ('Pending', 'Approved')
                 AND DATE(NOW()) BETWEEN at.start_date AND at.end_date
+                ORDER BY at.start_date ASC
+                LIMIT 1
+            ) THEN TRUE
+            -- New member exemption: if user joined during the current term, they already paid membership
+            WHEN EXISTS (
+                SELECT 1 FROM tbl_organization_members om
+                JOIN tbl_academic_term at ON DATE(om.joined_at) BETWEEN at.start_date AND at.end_date
+                WHERE om.user_id = userId
+                AND om.organization_id = a.organization_id
+                AND om.cycle_number = a.cycle_number
+                AND om.status = 'Active'
+                AND DATE(NOW()) BETWEEN at.start_date AND at.end_date
+                ORDER BY at.start_date ASC
+                LIMIT 1
             ) THEN TRUE
             ELSE FALSE
         END
@@ -9606,42 +9619,26 @@ BEGIN
         SET MESSAGE_TEXT = 'Executive member not found in organization';
     END IF;
 
-    -- Check if there's already an executive role with the new title and rank
+    -- Check if there's already an executive role with the same title (excluding current role)
     SELECT executive_role_id INTO v_executive_role_id
     FROM tbl_executive_role
     WHERE organization_id = p_organization_id
       AND cycle_number = v_current_cycle
       AND role_title = p_role_title
-      AND rank_id = v_rank_id
+      AND executive_role_id != v_current_executive_role_id
     LIMIT 1;
 
-    IF v_executive_role_id IS NULL THEN
-        -- No existing role with new title/rank combination, update the current role
-        UPDATE tbl_executive_role
-        SET role_title = p_role_title,
-            rank_id = v_rank_id
-        WHERE executive_role_id = v_current_executive_role_id;
-        
-        SET v_executive_role_id = v_current_executive_role_id;
-    ELSE
-        -- Role with new title/rank already exists, switch to that role
-        -- Update organization member's executive role
-        UPDATE tbl_organization_members
-        SET executive_role_id = v_executive_role_id
-        WHERE organization_id = p_organization_id
-          AND cycle_number = v_current_cycle
-          AND user_id = v_user_id
-          AND member_type = 'Executive';
-          
-        -- Check if the old role has any other members, if not, delete it
-        IF NOT EXISTS (
-            SELECT 1 FROM tbl_organization_members 
-            WHERE executive_role_id = v_current_executive_role_id
-        ) THEN
-            DELETE FROM tbl_executive_role 
-            WHERE executive_role_id = v_current_executive_role_id;
-        END IF;
+    IF v_executive_role_id IS NOT NULL THEN
+        -- Another role with the same title exists, throw error
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'A role with this title already exists in the organization';
     END IF;
+
+    -- Update the current role with new title and rank
+    UPDATE tbl_executive_role
+    SET role_title = p_role_title,
+        rank_id = v_rank_id
+    WHERE executive_role_id = v_current_executive_role_id;
 
     -- Log the action
     CALL LogAction(
@@ -18592,10 +18589,12 @@ BEGIN
         
         -- Calculate payment start term for reactivated members (Per Term organizations only)
         IF v_membership_fee_type = 'Per Term' THEN
-            -- Get current active term
+            -- Get current active term by date range
             SELECT term_id INTO v_current_term_id 
             FROM tbl_academic_term 
-            WHERE is_active = 1 LIMIT 1;
+            WHERE DATE(NOW()) BETWEEN start_date AND end_date
+            ORDER BY start_date ASC
+            LIMIT 1;
             
             -- Get next term after current term
             SELECT term_id INTO v_next_term_id
@@ -18679,10 +18678,12 @@ BEGIN
     ELSE
         -- Calculate payment start term for new members (Per Term organizations only)
         IF v_membership_fee_type = 'Per Term' THEN
-            -- Get current active term
+            -- Get current active term by date range
             SELECT term_id INTO v_current_term_id 
             FROM tbl_academic_term 
-            WHERE is_active = 1 LIMIT 1;
+            WHERE DATE(NOW()) BETWEEN start_date AND end_date
+            ORDER BY start_date ASC
+            LIMIT 1;
             
             -- Get next term after current term
             SELECT term_id INTO v_next_term_id
@@ -19118,8 +19119,8 @@ proc_label: BEGIN
     IF p_term_id IS NULL OR p_term_id = 0 THEN
         SELECT term_id, term_name INTO v_current_term_id, v_term_name
         FROM tbl_academic_term 
-        WHERE is_active = TRUE AND status = 'Active'
-        ORDER BY start_date DESC 
+        WHERE DATE(NOW()) BETWEEN start_date AND end_date
+        ORDER BY start_date ASC
         LIMIT 1;
         
         IF v_current_term_id IS NULL THEN
@@ -19135,7 +19136,8 @@ proc_label: BEGIN
         -- Validate provided term exists and is active
         SELECT term_name INTO v_term_name
         FROM tbl_academic_term 
-        WHERE term_id = p_term_id AND is_active = TRUE AND status = 'Active';
+        WHERE term_id = p_term_id 
+        AND DATE(NOW()) BETWEEN start_date AND end_date;
         
         IF v_term_name IS NULL THEN
             SELECT CONCAT('Term ID ', p_term_id, ' is not found or not active.') as result,
@@ -20140,8 +20142,6 @@ BEGIN
         term_description,
         start_date,
         end_date,
-        is_active,
-        status,
         created_at,
         DATE(NOW()) BETWEEN start_date AND end_date as is_current_term
     FROM tbl_academic_term

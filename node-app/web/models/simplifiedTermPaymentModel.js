@@ -29,10 +29,12 @@ class TermModel {
                     term_id,
                     academic_year,
                     term_name,
+                    term_description,
                     start_date,
                     end_date,
-                    is_active,
-                    created_at
+                    created_at,
+                    updated_at,
+                    created_by
                 FROM tbl_academic_term 
                 ORDER BY start_date DESC
             `);
@@ -49,21 +51,17 @@ class TermModel {
     static async createTerm(termData) {
         const connection = await pool.getConnection();
         try {
-            // First, deactivate all current active terms
-            await connection.query('UPDATE tbl_academic_term SET is_active = FALSE');
-            
             // Create new term
             const [result] = await connection.query(`
                 INSERT INTO tbl_academic_term (
                     academic_year, term_name, start_date, end_date, 
-                    is_active, created_by
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    created_by
+                ) VALUES (?, ?, ?, ?, ?)
             `, [
                 termData.academic_year,
                 termData.term_name,
                 termData.start_date,
                 termData.end_date,
-                termData.is_active || true,
                 termData.created_by
             ]);
             
@@ -80,22 +78,16 @@ class TermModel {
     static async updateTerm(termId, termData) {
         const connection = await pool.getConnection();
         try {
-            if (termData.is_active) {
-                // If setting this term as active, deactivate all others first
-                await connection.query('UPDATE tbl_academic_term SET is_active = FALSE');
-            }
-            
             const [result] = await connection.query(`
                 UPDATE tbl_academic_term 
                 SET academic_year = ?, term_name = ?, start_date = ?, 
-                    end_date = ?, is_active = ?, updated_at = NOW()
+                    end_date = ?, updated_at = NOW()
                 WHERE term_id = ?
             `, [
                 termData.academic_year,
                 termData.term_name,
                 termData.start_date,
                 termData.end_date,
-                termData.is_active,
                 termId
             ]);
             

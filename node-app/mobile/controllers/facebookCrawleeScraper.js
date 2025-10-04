@@ -8,11 +8,11 @@ const { redisClient } = require('../../config/redis');
 // Default page configuration
 const DEFAULT_PAGE = {
     id: '113338964475892',
-    url: 'https://www.facebook.com/nudasma.CompSoc',
+    url: 'https://m.facebook.com/nudasma.CompSoc', // Changed to mobile version - easier to scrape
     name: 'NUDASMA CompSoc',
     fallback_urls: [
-        'https://facebook.com/nudasma.CompSoc',
-        'https://m.facebook.com/nudasma.CompSoc'
+        'https://www.facebook.com/nudasma.CompSoc',
+        'https://facebook.com/nudasma.CompSoc'
     ]
 };
 
@@ -20,6 +20,11 @@ const DEFAULT_PAGE = {
 const AUTH_DIR = path.join(__dirname, '../../.auth');
 const FB_COOKIES_FILE = path.join(AUTH_DIR, 'facebook-cookies.json');
 const FB_SESSION_FILE = path.join(AUTH_DIR, 'facebook-session.json');
+
+// Tuning knobs for resource utilization
+const MAX_CRAWLEE_CONCURRENCY = parseInt(process.env.FB_CRAWLEE_MAX_CONCURRENCY || '2', 10);
+const QUICK_CHECK_CONCURRENCY = parseInt(process.env.FB_CRAWLEE_QUICK_CONCURRENCY || '2', 10);
+const MAX_REQUESTS_PER_CRAWL = parseInt(process.env.FB_CRAWLEE_MAX_REQUESTS || '100', 10);
 
 class FacebookCrawleeScraper {
     constructor() {
@@ -71,7 +76,10 @@ class FacebookCrawleeScraper {
             
             if (cookiesExist) {
                 const cookiesData = await fs.readFile(FB_COOKIES_FILE, 'utf-8');
-                this.cookies = JSON.parse(cookiesData);
+                const rawCookies = JSON.parse(cookiesData);
+                
+                // Normalize cookies for Playwright compatibility
+                this.cookies = this.normalizeCookiesForPlaywright(rawCookies);
 
                 // Try to load session file (optional, for metadata)
                 const sessionExist = await fs.access(FB_SESSION_FILE).then(() => true).catch(() => false);
@@ -91,7 +99,7 @@ class FacebookCrawleeScraper {
                 this.authenticated = true;
                 console.log('✅ Facebook authentication loaded successfully');
                 console.log(`👤 Logged in as: ${this.sessionData.name || 'Facebook User'}`);
-                console.log(`🍪 Cookies loaded: ${this.cookies.length} cookies found`);
+                console.log(`🍪 Cookies loaded: ${this.cookies.length} cookies normalized for Playwright`);
             } else {
                 console.log('ℹ️  No Facebook authentication found');
                 console.log('📖 To enable authenticated scraping, add facebook-cookies.json to .auth folder');
@@ -103,6 +111,41 @@ class FacebookCrawleeScraper {
             console.error('   Make sure facebook-cookies.json is valid JSON format');
             this.authenticated = false;
         }
+    }
+
+    // Normalize cookies from browser export format to Playwright format
+    normalizeCookiesForPlaywright(cookies) {
+        return cookies.map(cookie => {
+            // Map sameSite values to Playwright's expected format
+            let sameSite = 'Lax'; // Default
+            
+            if (cookie.sameSite) {
+                const sameSiteValue = cookie.sameSite.toLowerCase();
+                if (sameSiteValue === 'strict') {
+                    sameSite = 'Strict';
+                } else if (sameSiteValue === 'lax') {
+                    sameSite = 'Lax';
+                } else if (sameSiteValue === 'none' || sameSiteValue === 'no_restriction') {
+                    sameSite = 'None';
+                }
+            }
+
+            // Convert expirationDate (unix timestamp) to expires (unix timestamp in seconds)
+            const expires = cookie.expirationDate 
+                ? Math.floor(cookie.expirationDate) 
+                : undefined;
+
+            return {
+                name: cookie.name,
+                value: cookie.value,
+                domain: cookie.domain,
+                path: cookie.path || '/',
+                expires: expires,
+                httpOnly: cookie.httpOnly || false,
+                secure: cookie.secure || false,
+                sameSite: sameSite
+            };
+        });
     }
 
     // Save Facebook authentication securely
@@ -192,6 +235,7 @@ class FacebookCrawleeScraper {
     // Quick check for latest posts (fast)
     async quickCheckLatestPosts(pageUrl, maxPosts = 3) {
         const posts = [];
+        const self = this; // Store reference for use in requestHandler
 
         try {
             const crawler = new PlaywrightCrawler({
@@ -208,6 +252,7 @@ class FacebookCrawleeScraper {
                 },
                 browserPoolOptions: {
                     useFingerprints: true, // Anti-detection
+                    maxOpenPagesPerBrowser: Math.max(1, Math.min(4, QUICK_CHECK_CONCURRENCY)),
                     fingerprintOptions: {
                         fingerprintGeneratorOptions: {
                             browsers: ['chrome'],
@@ -218,13 +263,15 @@ class FacebookCrawleeScraper {
                 },
                 maxRequestRetries: 2,
                 requestHandlerTimeoutSecs: 30,
+                maxConcurrency: QUICK_CHECK_CONCURRENCY,
+                maxRequestsPerCrawl: Math.min(maxPosts, MAX_REQUESTS_PER_CRAWL),
                 
                 async requestHandler({ page, request, log }) {
                     log.info(`Quick checking ${request.url}`);
 
                     // Load authentication if available
-                    if (this.authenticated && this.cookies) {
-                        await page.context().addCookies(this.cookies);
+                    if (self.authenticated && self.cookies) {
+                        await page.context().addCookies(self.cookies);
                         log.info('🔐 Using authenticated session');
                     }
 
@@ -232,7 +279,7 @@ class FacebookCrawleeScraper {
                     await page.goto(request.url, { waitUntil: 'domcontentloaded', timeout: 20000 });
 
                     // Close popups
-                    await this.closePopupsAndModals(page);
+                    await self.closePopupsAndModals(page);
 
                     // Extract first few posts
                     const extractedPosts = await page.evaluate((max) => {
@@ -265,7 +312,12 @@ class FacebookCrawleeScraper {
                 }
             });
 
-            await crawler.run([pageUrl]);
+            if (!pageUrl) {
+                console.error('❌ Quick check aborted: pageUrl is undefined or empty');
+                return posts;
+            }
+
+            await crawler.run([{ url: pageUrl }]);
             return posts;
 
         } catch (error) {
@@ -303,11 +355,16 @@ class FacebookCrawleeScraper {
         this.isScrapingInProgress = true;
 
         try {
+            if (!pageUrl) {
+                throw new Error('Missing pageUrl for Crawlee scrape');
+            }
+
             console.log(`🚀 Starting Crawlee scrape for page ${pageId} (${scrapeId})`);
             console.log(`🔐 Authentication: ${this.authenticated ? 'Enabled' : 'Disabled'}`);
 
             const posts = [];
             let postCount = 0;
+            const self = this; // Store reference for use in requestHandler
 
             const crawler = new PlaywrightCrawler({
                 launchContext: {
@@ -326,6 +383,7 @@ class FacebookCrawleeScraper {
                 // Crawlee's built-in anti-detection
                 browserPoolOptions: {
                     useFingerprints: true, // Randomize browser fingerprints
+                    maxOpenPagesPerBrowser: Math.max(1, Math.min(4, MAX_CRAWLEE_CONCURRENCY)),
                     fingerprintOptions: {
                         fingerprintGeneratorOptions: {
                             browsers: [
@@ -340,14 +398,16 @@ class FacebookCrawleeScraper {
                 },
                 maxRequestRetries: 3,
                 requestHandlerTimeoutSecs: timeout / 1000,
-                maxConcurrency: 1, // One page at a time for stability
+                maxConcurrency: MAX_CRAWLEE_CONCURRENCY,
+                maxRequestsPerCrawl: Math.min(maxPosts, MAX_REQUESTS_PER_CRAWL),
+                minConcurrency: 1,
                 
                 async requestHandler({ page, request, log }) {
                     log.info(`Scraping ${request.url}`);
 
                     // Load authentication cookies if available
-                    if (this.authenticated && this.cookies) {
-                        await page.context().addCookies(this.cookies);
+                    if (self.authenticated && self.cookies) {
+                        await page.context().addCookies(self.cookies);
                         log.info('🔐 Using authenticated Facebook session');
                     }
 
@@ -357,22 +417,48 @@ class FacebookCrawleeScraper {
                         timeout: 30000 
                     });
 
-                    // Wait for content to load
-                    await page.waitForTimeout(3000);
+                    // Wait for content to load - increased timeout for Facebook
+                    console.log('⏳ Waiting for Facebook to load posts...');
+                    await page.waitForTimeout(5000); // Increased from 3000
+
+                    // Try to wait for posts to appear
+                    try {
+                        await page.waitForSelector('[role="article"], [data-pagelet^="FeedUnit"], [data-testid="story-root"]', { 
+                            timeout: 10000 
+                        });
+                        console.log('✅ Found post elements on page');
+                    } catch (e) {
+                        console.warn('⚠️  No standard post selectors found, will try generic extraction');
+                        
+                        // Take screenshot for debugging
+                        try {
+                            await page.screenshot({ path: '/tmp/facebook-debug.png', fullPage: false });
+                            console.log('📸 Screenshot saved to /tmp/facebook-debug.png');
+                        } catch (screenshotError) {
+                            console.warn('Could not save screenshot');
+                        }
+                        
+                        // Get page HTML for debugging
+                        const htmlSample = await page.evaluate(() => {
+                            return document.body.innerHTML.substring(0, 2000);
+                        });
+                        console.log('🔍 HTML Sample (first 2000 chars):', htmlSample);
+                    }
 
                     // Close popups and modals
-                    await this.closePopupsAndModals(page);
+                    await self.closePopupsAndModals(page);
 
                     // Auto-scroll to load posts
                     log.info(`📜 Scrolling to load ${maxPosts} posts...`);
-                    postCount = await this.autoScrollAndCollectPosts(page, maxPosts, posts);
+                    postCount = await self.autoScrollAndCollectPosts(page, maxPosts, posts);
 
                     log.info(`✅ Collected ${postCount} posts`);
                 }
             });
 
             // Run the crawler
-            await crawler.run([pageUrl]);
+            await crawler.addRequests([{ url: pageUrl }]);
+            await crawler.run();
 
             // Process and cache results
             const scrapedData = {
@@ -409,17 +495,49 @@ class FacebookCrawleeScraper {
         const maxConsecutiveNoNewContent = 5; // More patience
         let previousPostCount = 0;
 
+        // First, debug what selectors are available
+        const debugInfo = await page.evaluate(() => {
+            return {
+                hasRoleArticle: document.querySelectorAll('[role="article"]').length,
+                hasFeedUnit: document.querySelectorAll('[data-pagelet^="FeedUnit"]').length,
+                hasStorybookPost: document.querySelectorAll('[data-testid="story-root"]').length,
+                hasDivRoot: document.querySelectorAll('div[class*="x1yztbdb"]').length,
+                totalDivs: document.querySelectorAll('div').length,
+                pageTitle: document.title,
+                url: window.location.href
+            };
+        });
+        
+        console.log('🔍 Page Debug Info:', JSON.stringify(debugInfo, null, 2));
+
         while (posts.length < maxPosts && scrollAttempts < maxScrollAttempts) {
             scrollAttempts++;
 
-            // Extract posts from current view
+            // Extract posts from current view - try multiple selectors
             const newPosts = await page.evaluate(() => {
-                const postElements = document.querySelectorAll('[role="article"], [data-pagelet^="FeedUnit"]');
+                // Try multiple selectors in priority order
+                let postElements = document.querySelectorAll('[role="article"]');
+                
+                if (postElements.length === 0) {
+                    postElements = document.querySelectorAll('[data-pagelet^="FeedUnit"]');
+                }
+                
+                if (postElements.length === 0) {
+                    postElements = document.querySelectorAll('[data-testid="story-root"]');
+                }
+                
+                if (postElements.length === 0) {
+                    // Fallback: look for common Facebook post structure
+                    postElements = document.querySelectorAll('div[class*="x1yztbdb"]');
+                }
+
+                console.log(`Found ${postElements.length} post elements`);
                 const results = [];
 
                 postElements.forEach((postEl, index) => {
                     // Extract post ID
                     const postId = postEl.getAttribute('data-pagelet') || 
+                                 postEl.getAttribute('data-testid') ||
                                  postEl.querySelector('[data-ft]')?.getAttribute('data-ft') || 
                                  `post_${index}_${Date.now()}`;
 
@@ -430,17 +548,49 @@ class FacebookCrawleeScraper {
                     window.__extractedPostIds = window.__extractedPostIds || new Set();
                     window.__extractedPostIds.add(postId);
 
-                    // Extract post content
-                    const contentEl = postEl.querySelector('[data-ad-comet-preview="message"], [data-ad-preview="message"], div[dir="auto"]');
-                    const content = contentEl?.textContent?.trim() || '';
+                    // Extract post content - try multiple selectors
+                    let content = '';
+                    const contentSelectors = [
+                        '[data-ad-comet-preview="message"]',
+                        '[data-ad-preview="message"]',
+                        'div[dir="auto"]',
+                        '[data-testid="post_message"]',
+                        'div[class*="userContent"]'
+                    ];
+                    
+                    for (const selector of contentSelectors) {
+                        const contentEl = postEl.querySelector(selector);
+                        if (contentEl?.textContent?.trim()) {
+                            content = contentEl.textContent.trim();
+                            break;
+                        }
+                    }
 
                     // Extract images
-                    const images = Array.from(postEl.querySelectorAll('img[src*="scontent"]')).map(img => img.src);
+                    const images = Array.from(postEl.querySelectorAll('img[src*="scontent"], img[src*="fbcdn"]'))
+                        .map(img => img.src)
+                        .filter(src => !src.includes('emoji') && !src.includes('static'));
 
-                    // Extract timestamp
-                    const timeEl = postEl.querySelector('a[href*="/posts/"] abbr, span[data-testid="story-subtitle"] a');
-                    const timestamp = timeEl?.textContent?.trim() || null;
-                    const postUrl = timeEl?.closest('a')?.href || null;
+                    // Extract timestamp - try multiple approaches
+                    let timestamp = null;
+                    let postUrl = null;
+                    
+                    const timeLinkSelectors = [
+                        'a[href*="/posts/"]',
+                        'a[href*="/permalink/"]',
+                        'a[aria-label*="ago"]',
+                        'span[data-testid="story-subtitle"] a'
+                    ];
+                    
+                    for (const selector of timeLinkSelectors) {
+                        const timeLink = postEl.querySelector(selector);
+                        if (timeLink) {
+                            timestamp = timeLink.textContent?.trim() || 
+                                       timeLink.querySelector('abbr, span')?.textContent?.trim();
+                            postUrl = timeLink.href;
+                            if (timestamp && postUrl) break;
+                        }
+                    }
 
                     // Extract reactions
                     const reactionsEl = postEl.querySelector('[aria-label*="reaction"], [aria-label*="like"]');
@@ -454,17 +604,20 @@ class FacebookCrawleeScraper {
                     const sharesEl = postEl.querySelector('[aria-label*="share"]');
                     const shares = sharesEl?.textContent?.match(/\d+/)?.[0] || '0';
 
-                    results.push({
-                        id: postId,
-                        content: content.substring(0, 1000), // Limit content length
-                        images: images,
-                        timestamp: timestamp,
-                        postUrl: postUrl,
-                        reactions: reactions,
-                        comments: comments,
-                        shares: shares,
-                        extractedAt: new Date().toISOString()
-                    });
+                    // Only add if we have at least content or image
+                    if (content || images.length > 0) {
+                        results.push({
+                            id: postId,
+                            content: content.substring(0, 1000), // Limit content length
+                            images: images,
+                            timestamp: timestamp,
+                            postUrl: postUrl,
+                            reactions: reactions,
+                            comments: comments,
+                            shares: shares,
+                            extractedAt: new Date().toISOString()
+                        });
+                    }
                 });
 
                 return results;

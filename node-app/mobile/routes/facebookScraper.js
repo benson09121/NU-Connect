@@ -94,6 +94,47 @@ router.get('/status', async (req, res) => {
     }
 });
 
+// GET /api/facebook-scraper/debug - Debug scraping with verbose output
+router.get('/debug', async (req, res) => {
+    try {
+        console.log('\n🔍 ========== DEBUG SCRAPE STARTED ==========');
+        
+        // Force fresh scrape
+        const maxPosts = parseInt(req.query.maxPosts) || 20;
+        req.params.pageId = DEFAULT_PAGE.id;
+        req.query.maxPosts = maxPosts;
+        
+        console.log(`📋 Scraping ${DEFAULT_PAGE.name} with maxPosts=${maxPosts}`);
+        console.log(`🔐 Authentication: ${scraperInstance.authenticated}`);
+        console.log(`🍪 Cookies loaded: ${scraperInstance.cookies?.length || 0}`);
+        
+        // Trigger scrape
+        const result = await new Promise((resolve, reject) => {
+            scrapePage(req, {
+                json: (data) => resolve(data),
+                status: (code) => ({
+                    json: (data) => code >= 400 ? reject(data) : resolve(data)
+                })
+            });
+        });
+        
+        console.log('🔍 ========== DEBUG SCRAPE COMPLETED ==========\n');
+        
+        res.json({
+            success: true,
+            debug: true,
+            result: result,
+            checkLogs: 'Check server logs for detailed extraction info'
+        });
+    } catch (error) {
+        console.error('❌ Debug scrape failed:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message || error.error
+        });
+    }
+});
+
 // GET /api/facebook-scraper/health - Health check
 router.get('/health', (req, res) => {
     res.json({

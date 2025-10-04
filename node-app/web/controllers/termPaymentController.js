@@ -72,7 +72,7 @@ class TermPaymentController {
     // Create new term (Admin only)
     static async createTerm(req, res) {
         try {
-            const { academic_year, term_name, start_date, end_date, is_active } = req.body;
+            const { academic_year, term_name, start_date, end_date } = req.body;
             const created_by = req.user.user_id;
 
             // Validation
@@ -88,7 +88,6 @@ class TermPaymentController {
                 term_name,
                 start_date,
                 end_date,
-                is_active: is_active || false,
                 created_by
             };
 
@@ -114,9 +113,13 @@ class TermPaymentController {
             });
         } catch (error) {
             console.error('Error in createTerm:', error);
-            res.status(500).json({
+            
+            // Send appropriate status code based on error type
+            const statusCode = error.message.includes('already exists') ? 409 : 500;
+            
+            res.status(statusCode).json({
                 success: false,
-                message: 'Failed to create term',
+                message: error.message || 'Failed to create term',
                 error: error.message
             });
         }
