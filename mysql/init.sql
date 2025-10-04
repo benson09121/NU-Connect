@@ -963,6 +963,34 @@ CREATE TABLE tbl_membership_leave_application (
     FOREIGN KEY (reviewed_by) REFERENCES tbl_user(user_id)
 );
 
+CREATE TABLE tbl_term_payments (
+    payment_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id VARCHAR(200) NOT NULL,
+    organization_id INT NOT NULL,
+    organization_version_id INT NOT NULL,
+    term_id INT NOT NULL,
+    transaction_id INT NOT NULL,  -- Required reference to transaction for payment details
+    payment_status ENUM('Pending', 'Paid', 'Rejected', 'Cancelled') DEFAULT 'Pending',
+    verified_by VARCHAR(200) NULL,
+    verified_at TIMESTAMP NULL,
+    notes TEXT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    
+    FOREIGN KEY (user_id) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
+    FOREIGN KEY (organization_id) REFERENCES tbl_organization(organization_id) ON DELETE CASCADE,
+    FOREIGN KEY (organization_version_id) REFERENCES tbl_organization_version(org_version_id) ON DELETE CASCADE,
+    FOREIGN KEY (term_id) REFERENCES tbl_academic_term(term_id) ON DELETE CASCADE,
+    FOREIGN KEY (transaction_id) REFERENCES tbl_transaction(transaction_id) ON DELETE CASCADE,
+    FOREIGN KEY (verified_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
+    
+    UNIQUE KEY unique_member_term_payment (user_id, organization_id, organization_version_id, term_id),
+    INDEX idx_term_payments_user_org (user_id, organization_id, organization_version_id),
+    INDEX idx_term_payments_term (term_id),
+    INDEX idx_term_payments_status (payment_status),
+    INDEX idx_term_payments_transaction (transaction_id)
+);
+
 -- TRIGGERS
 
 
@@ -16273,31 +16301,6 @@ BEGIN
 END $$
 DELIMITER ;
 
-
--- INDEXES
-
--- for reporting and performance
-CREATE INDEX idx_transaction_date ON tbl_transaction(transaction_date);
-CREATE INDEX idx_transaction_status ON tbl_transaction(status);
-CREATE INDEX idx_transaction_user ON tbl_transaction(user_id);
-CREATE INDEX idx_transaction_type ON tbl_transaction(transaction_type_id);
-CREATE INDEX idx_transaction_payment_type ON tbl_transaction(payment_type_id);
-CREATE INDEX idx_transaction_category ON tbl_transaction(category_id);
-CREATE INDEX idx_transaction_archived ON tbl_transaction(archived_at);
-
-CREATE INDEX idx_org_members_user ON tbl_organization_members(user_id);
-CREATE INDEX idx_event_program ON tbl_event_course(program_id);
-
-CREATE INDEX idx_org_members ON tbl_organization_members(organization_id, user_id);
-CREATE INDEX idx_committee_org ON tbl_committee(organization_id);
-CREATE INDEX idx_committee_members_user ON tbl_committee_members(user_id);
-
--- Recommended index for lookups from version -> cycle
-CREATE INDEX idx_rc_org_version ON tbl_renewal_cycle (org_version_id);
-
-CREATE INDEX idx_active_end_datetime 
-ON tbl_application_period(is_active, end_date, end_time);
-
 DELIMITER $$
 CREATE DEFINER=`admin`@`%` PROCEDURE `GetOrganizationFinance`(IN p_organization_id INT)
 BEGIN
@@ -19396,401 +19399,6 @@ BEGIN
 END $$
 
 DELIMITER ;
-
-
-CREATE INDEX idx_conversation_global ON tbl_ai_conversation(owner_id, is_global, updated_at DESC);
-CREATE INDEX idx_message_created ON tbl_ai_message(conversation_id, created_at ASC);
--- EVENTS
-
-DELIMITER $$
-CREATE FUNCTION GetUserOrganizations(user_id VARCHAR(200))
-RETURNS JSON
-READS SQL DATA
-DETERMINISTIC
-BEGIN
-  DECLARE org_list JSON;
-  
-  SELECT JSON_ARRAYAGG(
-    JSON_OBJECT(
-      'organization_id', o.organization_id,
-      'name', o.name,
-      'status', o.status,
-      'category', o.category,
-      'role', CASE 
-        WHEN o.adviser_id = user_id THEN 'Adviser'
-        WHEN om.member_type IS NOT NULL THEN om.member_type
-        ELSE 'Member'
-      END
-    )
-  ) INTO org_list
-  FROM tbl_organization o
-  LEFT JOIN tbl_organization_members om ON o.organization_id = om.organization_id AND om.user_id = user_id
-  WHERE (o.adviser_id = user_id OR om.user_id = user_id)
-    AND o.status = 'Approved';
-  
-  RETURN COALESCE(org_list, JSON_ARRAY());
-END$$
-DELIMITER ;
-
-CREATE VIEW v_multi_org_messages AS
-SELECT 
-  m.message_id,
-  m.conversation_id,
-  m.content,
-  m.message_scope,
-  m.context_organizations,
-  c.owner_id,
-  c.entity_type,
-  c.is_global,
-  m.created_at
-FROM tbl_ai_message m
-JOIN tbl_ai_conversation c ON m.conversation_id = c.conversation_id
-WHERE m.message_scope IN ('multi_org', 'global')
-  AND c.is_archived = 0;
-
--- QR VERIFICATION SYSTEM VIEW
--- Optional: Create a view for easy token status checking
-CREATE VIEW v_transaction_qr_status AS
-SELECT 
-    t.transaction_id,
-    t.receipt_no,
-    t.qr_enabled,
-    t.qr_token,
-    tv.jwt_token_id,
-    tv.expires_at,
-    tv.is_revoked,
-    tv.verification_count,
-    tv.last_verified_at,
-    CASE 
-        WHEN tv.jwt_token_id IS NULL THEN 'No Token'
-        WHEN tv.is_revoked = TRUE THEN 'Revoked'
-        WHEN tv.expires_at < CURRENT_TIMESTAMP THEN 'Expired'
-        ELSE 'Active'
-    END AS token_status
-FROM tbl_transaction t
-LEFT JOIN tbl_transaction_verification tv ON t.transaction_id = tv.transaction_id
-  AND tv.is_revoked = FALSE 
-  AND tv.expires_at = (
-    SELECT MAX(expires_at) 
-    FROM tbl_transaction_verification tv2 
-    WHERE tv2.transaction_id = t.transaction_id 
-    AND tv2.is_revoked = FALSE
-  )
-ORDER BY t.transaction_id DESC;
-
--- SAMPLE DATAS
-INSERT INTO tbl_role(role_name, is_approver, hierarchy_order)
-VALUES("Student",0,null), 
-("Adviser",1,1),
-("Program Chair",1,2),
-("SDAO",1,5),
-("Dean",1,3),
-("Academic Director",1,4);
-
--- Create system user for automated logging
-INSERT INTO tbl_user (user_id, f_name, l_name, email, role_id, status, created_at)
-VALUES (
-    'sys-system',
-    'System',
-    'User',
-    'system@nu-dasma.edu.ph',
-    (SELECT role_id FROM tbl_role WHERE LOWER(role_name) = 'sdao' LIMIT 1),
-    'Active',
-    CURRENT_TIMESTAMP
-);
-
--- Create system user for QR verification operations
-INSERT INTO tbl_user (user_id, f_name, l_name, email, role_id, status, created_at)
-VALUES (
-    'SYSTEM_QR_GENERATOR',
-    'System',
-    'QR Generator',
-    'system-qr@nu-dasma.edu.ph',
-    (SELECT role_id FROM tbl_role WHERE LOWER(role_name) = 'sdao' LIMIT 1),
-    'Active',
-    CURRENT_TIMESTAMP
-);
-
-INSERT INTO tbl_permission(permission_name, scope)
-VALUES("CREATE_EVENT","Organization"),
-("UPDATE_EVENT","Organization"),
-("DELETE_EVENT","Organization"),
-("VIEW_EVENT","Organization"),
-("REGISTER_EVENT","Organization"),
-("APPLY_ORGANIZATION","Organization"),
-("APPROVE_ORGANIZATION","Approver"),
-("ARCHIVE_ORGANIZATION","SDAO"),
-("VIEW_ORGANIZATION","Global"),
-("MANAGE_ACCOUNT","SDAO"),
-("CREATE_COMMITTEE","Organization"),
-("UPDATE_COMMITTEE","Organization"),
-("DELETE_COMMITTEE","Organization"),
-("VIEW_COMMITTEE","Organization"),
-("MANAGE_REQUIREMENTS","SDAO"),
-("VIEW_APPLICATION","Approver"),
-("MANAGE_APPLICATIONS","SDAO"),
-("CREATE_EVALUATION","Organization"), 
-("UPDATE_EVALUATION","Organization"),
-("DELETE_EVALUATION","Organization"),
-("VIEW_EVALUATION","Organization"),
-("VIEW_LOGS","Global"),
-("WEB_ACCESS","Global"),
-("MANAGE_REGISTRATION","SDAO"),
-("SUBMIT_REQUIREMENTS","Global"),
-("MANAGE_PROGRAMS","SDAO"),
-("CREATE_SDAO_EVENT","SDAO"),
-("APPLY_NEW_ORGANIZATION","Global"),
-("APPLY_RENEWAL_ORGANIZATION","Organization"),
-("VIEW_TRANSACTIONS","Global"),
-("MANAGE_TRANSACTIONS","Organization"),
-("MANAGE_SDAO_EVENT","SDAO"),
-("MANAGE_COLLEGES","SDAO"),
-("SCAN_QR", "Organization"),
-("MANAGE_TERM_PAYMENTS", "Organization");
-
-INSERT INTO tbl_role_permission (role_id, permission_id) 
-VALUES
-(4,2),
-(4,3),
-(4,4),
-(4,7),
-(4,8),
-(4,9),
-(4,10),
-(4,11),
-(4,12),
-(4,13),
-(4,14),
-(4,15),
-(4,17),
-(4,19),
-(4,21),
-(4,22),
-(4,23),
-(4,24),
-(4,25),
-(4,26),
-(4,27),
-(4,30),
-(4,32),
-(4,33),
-(2,1),
-(2,6),
-(2,9),
-(2,14),
-(2,16),
-(2,17),
-(2,21),
-(2,22),
-(2,23),
-(2,28),
-(2,30),
-(2,31),
-(3,17),
-(4,17),
-(5,17),
-(6,17),
-(3,23),
-(5,23),
-(6,23),
-(3,9),
-(5,9),
-(6,9),
-(3,16),
-(5,16),
-(6,16),
-(3,4),
-(2,4),
-(5,4),
-(6,4);
-
-INSERT INTO tbl_college (name, abbreviation) VALUES 
-("School of Arts, Sciences, and Education", "SASE"),
-("School of Business, Management, and Accountancy", "SBMA"),
-("School of Engineering, Computing and Architecture", "SECA");
-
-INSERT INTO tbl_program (college_id, name, abbreviation) VALUES 
-(1,"Bachelor of Science in Physical Education", "BPEd"),
-(1,"Bachelor of Arts in Communication", "ABComm"),
-(1,"Bachelor of Science in Psychology", "BSPSY"),
-(2,"Bachelor of Science in Hospitality Management", "BSHM"),
-(2,"Bachelor of Science in Business Administration major in Human Resource Management", "BSBA-HRM"),
-(2,"Master of Management", "MM"),
-(2,"Bachelor of Science in Business Administration major in Financial Managemen", "BSBA-FinMgt"),
-(2,"Bachelor of Science in Business Administration major in Marketing Management", "BSBA-MktgMgt"),
-(2,"Bachelor of Science in Tourism Management", "BSTM"),
-(2,"Bachelor of Science in Accountancy", "BSAccountancy"),
-(2,"Bachelor of Science in Management Accounting", "BSMA"),
-(3,"Bachelor of Science in Computer Engineering", "BSCpE"),
-(3,"Bachelor of Science in Information Technology with a specialization in Mobile and Web Applications", "BSIT-MWA"),
-(3,"Bachelor of Science in Civil Engineering", "BSCE"),
-(3,"Bachelor of Science in Architecture", "BSArch"),
-(3,"Bachelor of Science in Computer Science with specialization in Machine Learning", "BSCS-ML");
-
-INSERT INTO tbl_user (user_id, f_name, l_name, email, program_id, role_id) VALUES
--- ('_ExbgMDtE-90mt0wLlA74VFYH5I1freBLw4NMY9RcBU', ' Geraldine', 'Aris', 'arisgc@students.nu-dasma.edu.ph', 1, 2),
-('6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0', 'Benson', 'Javier', 'javierbb@students.nu-dasma.edu.ph', NULL, 4),
-('cyQuRJT6GaT0Y89NFQua6nMhFJF6E-SAIk_rpryVY1k', ' Carl Roehl', 'Falcon', 'falconcs@students.nu-dasma.edu.ph', NULL, 6),
-('dumalagim@students.nu-dasma.edu.ph', 'Iver', 'Dumalag', 'dumalagim@students.nu-dasma.edu.ph', 1, 1),
-('LBmQ-WzvRhVmb55Ucidrc14aL39ae9Ei-7xfbOrPeEA', ' Samantha Joy', 'Madrunio', 'madruniosm@students.nu-dasma.edu.ph', 13, 2),
-('NqBfAZcMXHZF5g9ztwkQ1ykPgtNmZwYRcIPKKK40ROc', ' Alister Dylan Emmanuel', 'Realo', 'realoam@students.nu-dasma.edu.ph', 13, 1),
-('CyTLmjW4Edhvk2WvWFDNuWLYjW0WJETBPbY2HWk-ZqE', ' Loraine', 'Miraballes', 'miraballesl@students.nu-dasma.edu.ph', NULL, 1),
-('CY4e1GmCXysMRn8VYudhqDy7CDJ8xVidGO1v8RnRj1E', ' Shamiah M', 'Mendoza', 'mendozasm@students.nu-dasma.edu.ph', 13, 3);
-
-
--- INSERT INTO tbl_application_requirement (requirement_name, is_applicable_to, file_path, created_by) VALUES
--- ('Letter of Intent', 'new', 'requirement-1748793177547-Letter-of-Intent.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
--- ('Student Org Application Form', 'new', 'requirement-1748793205361-ACO-SA-F-002Student-Org-Application-Form.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
--- ('By Laws of the Organization', 'new', 'requirement-1748793242309-Constitution-and-ByLaws.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
--- ('List of Officers/Founders', 'new', 'requirement-1748793302932-List-of-Officers-and-Founders.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
--- ('Letter from the College Dean', 'new', 'requirement-1748793328989-Letter-from-the-College-Dean.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
--- ('List of Members', 'new', 'requirement-1748793346203-List-of-Members.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
--- ('Latest Certificate of Grades of Officers', 'new', 'requirement-1748793368006-Latest-Certificate-of-Grades-of-Officers.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
--- ('Biodata/CV of Officers', 'new', 'requirement-1748793390349-CV-of-Officers.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
--- ('List of Proposed Projects with Proposed Budget for the AY', 'new', 'requirement-1748793408714-List-of-Proposed-Project-with-Proposed-Budget.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0');
-
-
-INSERT INTO tbl_executive_rank (rank_level, default_title, description) VALUES
-(1, 'President', 'Highest authority with full permissions'),
-(2, 'Vice President Internal', 'Handles internal organizational matters'),
-(3, 'Vice President External', 'Handles external partnerships and representation'),
-(4, 'Secretary', 'Administrative lead'),
-(5, 'Treasurer', 'Financial manager'),
-(6, 'Auditor', 'Responsible for auditing and financial oversight'),
-(7, 'Public Information Officer', 'Handles publicity and information dissemination'),
-(8, 'Officer', 'General executive member');
-
--- Insert evaluation question groups
-INSERT INTO tbl_evaluation_question_group (group_title, group_description, is_active)
-VALUES 
-('Activity: Meeting/Seminar/Conference/Workshop/Quiz Bee/Competition/Sport fest, etc.', 'Question about activities', TRUE),
-('About the Speaker/Resource person', 'Feedback about event speakers/presenters', TRUE),
-('Meals', 'Feedback about meals', TRUE),
-('Handouts', 'Feedback about handouts', TRUE),
-('Transportation', 'Feedback about transportation', TRUE),
-('Comments and Suggestions', 'Feedback about the whole event', TRUE);
-
--- Insert evaluation questions
-INSERT INTO tbl_evaluation_question (question_text, question_type, group_id, is_required)
-VALUES
-('Is the activity relevant/important to you?', 'likert_4', 1, TRUE),
-('Is the program relevant to the course/you’re in?', 'likert_4', 1, TRUE),
-('Were the objectives clear and communicated before the activity?', 'likert_4', 1, TRUE),
-('Were the objectives met by the activity?', 'likert_4', 1, TRUE),
-('Was the venue proper for this kind of activity?', 'likert_4', 1, TRUE),
-('Did the activity start and end on time?', 'likert_4', 1, TRUE),
-('Did the organizers maintain an orderly environment all throughout the activity?', 'likert_4', 1, TRUE),
-('Was the event/activity well-advertised/properly announce?', 'likert_4', 1, TRUE),
-('Would you recommend this activity to your classmates/friends?', 'likert_4', 1, TRUE),
-('Do you want an activity like this to happen more often?', 'likert_4', 1, TRUE),
-('Overall evaluation', 'likert_4', 1, TRUE),
-('Was the speaker well-prepared and knowledgeable on the topic?', 'likert_4', 2, TRUE),
-('Did the speaker use different and appropriate methods in delivering the topic?', 'likert_4', 2, TRUE),
-('Was the speaker able to connect with the audience and catch their attention?', 'likert_4', 2, TRUE),
-('Were the meals/snacks provided enough to fill you?', 'likert_4', 3, TRUE),
-('Did the meals/snacks have a pleasant taste?', 'likert_4', 3, TRUE),
-('Are the handouts provided useful?', 'likert_4', 4, TRUE),
-('Is the printing of the handouts clear?', 'likert_4', 4, TRUE),
-('Did you feel safe during the travel to the venue?', 'likert_4', 5, TRUE),
-('Did you feel that the transportation provided is in good running condition?', 'likert_4', 5, TRUE),
-('Did you feel safe with the driver’s skills?', 'likert_4', 5, TRUE),
-('What important knowledge or information did you gain from this activity?', 'textbox', 6, TRUE),
-('What did you like most about the activity?', 'textbox', 6, TRUE),
-('What did you like least about the activity?', 'textbox', 6, TRUE),
-('Any other comments/suggestions for further improvement the activity?', 'textbox', 6, TRUE);
-
-
-INSERT INTO tbl_rank_permission(rank_id, permission_id) VALUES
-(1,1),
-(1,9),
-(1,16),
-(1,11),
-(1,12),
-(1,13),
-(1,14),
-(1,23),
-(1,4),
-(1,24),
-(1,25),
-(1,17),
-(1,19),
-(1,20),
-(1,21),
-(1,22),
-(1,29),
-(1,31),
-(1,34),
-(1,35);
-
--- =====================================
--- TERM PAYMENT SYSTEM TABLES
--- =====================================
-
--- Academic Terms Table
--- Individual Member Term Payments (Simplified)
-CREATE TABLE tbl_term_payments (
-    payment_id INT AUTO_INCREMENT PRIMARY KEY,
-    user_id VARCHAR(200) NOT NULL,
-    organization_id INT NOT NULL,
-    organization_version_id INT NOT NULL,
-    term_id INT NOT NULL,
-    transaction_id INT NOT NULL,  -- Required reference to transaction for payment details
-    payment_status ENUM('Pending', 'Paid', 'Rejected', 'Cancelled') DEFAULT 'Pending',
-    verified_by VARCHAR(200) NULL,
-    verified_at TIMESTAMP NULL,
-    notes TEXT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    
-    FOREIGN KEY (user_id) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
-    FOREIGN KEY (organization_id) REFERENCES tbl_organization(organization_id) ON DELETE CASCADE,
-    FOREIGN KEY (organization_version_id) REFERENCES tbl_organization_version(org_version_id) ON DELETE CASCADE,
-    FOREIGN KEY (term_id) REFERENCES tbl_academic_term(term_id) ON DELETE CASCADE,
-    FOREIGN KEY (transaction_id) REFERENCES tbl_transaction(transaction_id) ON DELETE CASCADE,
-    FOREIGN KEY (verified_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
-    
-    UNIQUE KEY unique_member_term_payment (user_id, organization_id, organization_version_id, term_id),
-    INDEX idx_term_payments_user_org (user_id, organization_id, organization_version_id),
-    INDEX idx_term_payments_term (term_id),
-    INDEX idx_term_payments_status (payment_status),
-    INDEX idx_term_payments_transaction (transaction_id)
-);
-
--- Views for better data access
-CREATE VIEW vw_term_payment_overview AS
-SELECT 
-    tp.payment_id,
-    tp.user_id,
-    tp.organization_id,
-    tp.organization_version_id,
-    tp.term_id,
-    CONCAT(u.f_name, ' ', u.l_name) as member_name,
-    u.email as member_email,
-    o.name as organization_name,
-    at.term_name,
-    at.start_date as term_start,
-    at.end_date as term_end,
-    t.amount as payment_amount,
-    tp.payment_status,
-    pt.label as payment_method,
-    t.receipt_no as transaction_reference,
-    tp.transaction_id,
-    t.receipt_no,
-    t.transaction_date,
-    t.proof_image as receipt_filename,
-    CONCAT('/app/organizations/', tp.organization_id, '/', tp.organization_version_id, '/transactions/', t.proof_image) as receipt_url,
-    tp.verified_by,
-    tp.verified_at,
-    tp.notes,
-    tp.created_at,
-    tp.updated_at
-FROM tbl_term_payments tp
-JOIN tbl_user u ON tp.user_id = u.user_id
-JOIN tbl_organization o ON tp.organization_id = o.organization_id
-JOIN tbl_academic_term at ON tp.term_id = at.term_id
-JOIN tbl_transaction t ON tp.transaction_id = t.transaction_id
-JOIN tbl_payment_type pt ON t.payment_type_id = pt.payment_type_id;
-
 -- Stored Procedures for Term Payment Management
 
 DELIMITER $$
@@ -20231,35 +19839,6 @@ BEGIN
 END $$
 DELIMITER ;
 
--- Insert default transaction types
-INSERT INTO tbl_transaction_type (code, label) VALUES
-('INCOME', 'Income'),
-('EXPENSE', 'Expense');
-
--- Insert default payment types
-INSERT INTO tbl_payment_type (code, label, method_group) VALUES
-('CASH', 'Cash', 'physical'),
-('BANK', 'Bank Transfer', 'electronic'),
-('GCASH', 'GCash', 'eWallet');
-
--- Insert default financial categories
-INSERT INTO tbl_financial_category (code, label, kind, active) VALUES
-('MEMBERSHIP', 'Membership Fees', 'INCOME', TRUE),
-('EVENT_FEE', 'Event Fee', 'INCOME', TRUE),
-('DONATION', 'Donation', 'INCOME', TRUE),
-('SPONSORSHIP', 'Sponsorship', 'INCOME', TRUE),
-('OFFICE_SUPPLIES', 'Office Supplies', 'EXPENSE', TRUE),
-('VENUE_RENTAL', 'Venue Rental', 'EXPENSE', TRUE);
-
--- Link categories to transaction types
-INSERT INTO tbl_transaction_type_category (transaction_type_id, category_id)
-SELECT tt.transaction_type_id, fc.category_id
-FROM tbl_transaction_type tt, tbl_financial_category fc
-WHERE (tt.code = 'INCOME' AND fc.kind = 'INCOME')
-   OR (tt.code = 'EXPENSE' AND fc.kind = 'EXPENSE');
-
-
-
 -- =====================================
 -- MOBILE TERM PAYMENT STORED PROCEDURES
 -- =====================================
@@ -20467,6 +20046,418 @@ proc_label: BEGIN
 END$$
 
 DELIMITER ;
+
+-- FUNCTIONS AND VIEWS
+DELIMITER $$
+CREATE FUNCTION GetUserOrganizations(user_id VARCHAR(200))
+RETURNS JSON
+READS SQL DATA
+DETERMINISTIC
+BEGIN
+  DECLARE org_list JSON;
+  
+  SELECT JSON_ARRAYAGG(
+    JSON_OBJECT(
+      'organization_id', o.organization_id,
+      'name', o.name,
+      'status', o.status,
+      'category', o.category,
+      'role', CASE 
+        WHEN o.adviser_id = user_id THEN 'Adviser'
+        WHEN om.member_type IS NOT NULL THEN om.member_type
+        ELSE 'Member'
+      END
+    )
+  ) INTO org_list
+  FROM tbl_organization o
+  LEFT JOIN tbl_organization_members om ON o.organization_id = om.organization_id AND om.user_id = user_id
+  WHERE (o.adviser_id = user_id OR om.user_id = user_id)
+    AND o.status = 'Approved';
+  
+  RETURN COALESCE(org_list, JSON_ARRAY());
+END$$
+DELIMITER ;
+
+CREATE VIEW v_multi_org_messages AS
+SELECT 
+  m.message_id,
+  m.conversation_id,
+  m.content,
+  m.message_scope,
+  m.context_organizations,
+  c.owner_id,
+  c.entity_type,
+  c.is_global,
+  m.created_at
+FROM tbl_ai_message m
+JOIN tbl_ai_conversation c ON m.conversation_id = c.conversation_id
+WHERE m.message_scope IN ('multi_org', 'global')
+  AND c.is_archived = 0;
+
+-- QR VERIFICATION SYSTEM VIEW
+-- Optional: Create a view for easy token status checking
+CREATE VIEW v_transaction_qr_status AS
+SELECT 
+    t.transaction_id,
+    t.receipt_no,
+    t.qr_enabled,
+    t.qr_token,
+    tv.jwt_token_id,
+    tv.expires_at,
+    tv.is_revoked,
+    tv.verification_count,
+    tv.last_verified_at,
+    CASE 
+        WHEN tv.jwt_token_id IS NULL THEN 'No Token'
+        WHEN tv.is_revoked = TRUE THEN 'Revoked'
+        WHEN tv.expires_at < CURRENT_TIMESTAMP THEN 'Expired'
+        ELSE 'Active'
+    END AS token_status
+FROM tbl_transaction t
+LEFT JOIN tbl_transaction_verification tv ON t.transaction_id = tv.transaction_id
+  AND tv.is_revoked = FALSE 
+  AND tv.expires_at = (
+    SELECT MAX(expires_at) 
+    FROM tbl_transaction_verification tv2 
+    WHERE tv2.transaction_id = t.transaction_id 
+    AND tv2.is_revoked = FALSE
+  )
+ORDER BY t.transaction_id DESC;
+
+-- Views for better data access
+CREATE VIEW vw_term_payment_overview AS
+SELECT 
+    tp.payment_id,
+    tp.user_id,
+    tp.organization_id,
+    tp.organization_version_id,
+    tp.term_id,
+    CONCAT(u.f_name, ' ', u.l_name) as member_name,
+    u.email as member_email,
+    o.name as organization_name,
+    at.term_name,
+    at.start_date as term_start,
+    at.end_date as term_end,
+    t.amount as payment_amount,
+    tp.payment_status,
+    pt.label as payment_method,
+    t.receipt_no as transaction_reference,
+    tp.transaction_id,
+    t.receipt_no,
+    t.transaction_date,
+    t.proof_image as receipt_filename,
+    CONCAT('/app/organizations/', tp.organization_id, '/', tp.organization_version_id, '/transactions/', t.proof_image) as receipt_url,
+    tp.verified_by,
+    tp.verified_at,
+    tp.notes,
+    tp.created_at,
+    tp.updated_at
+FROM tbl_term_payments tp
+JOIN tbl_user u ON tp.user_id = u.user_id
+JOIN tbl_organization o ON tp.organization_id = o.organization_id
+JOIN tbl_academic_term at ON tp.term_id = at.term_id
+JOIN tbl_transaction t ON tp.transaction_id = t.transaction_id
+JOIN tbl_payment_type pt ON t.payment_type_id = pt.payment_type_id;
+
+
+-- INDEXES
+
+-- for reporting and performance
+CREATE INDEX idx_transaction_date ON tbl_transaction(transaction_date);
+CREATE INDEX idx_transaction_status ON tbl_transaction(status);
+CREATE INDEX idx_transaction_user ON tbl_transaction(user_id);
+CREATE INDEX idx_transaction_type ON tbl_transaction(transaction_type_id);
+CREATE INDEX idx_transaction_payment_type ON tbl_transaction(payment_type_id);
+CREATE INDEX idx_transaction_category ON tbl_transaction(category_id);
+CREATE INDEX idx_transaction_archived ON tbl_transaction(archived_at);
+
+CREATE INDEX idx_org_members_user ON tbl_organization_members(user_id);
+CREATE INDEX idx_event_program ON tbl_event_course(program_id);
+
+CREATE INDEX idx_org_members ON tbl_organization_members(organization_id, user_id);
+CREATE INDEX idx_committee_org ON tbl_committee(organization_id);
+CREATE INDEX idx_committee_members_user ON tbl_committee_members(user_id);
+
+-- Recommended index for lookups from version -> cycle
+CREATE INDEX idx_rc_org_version ON tbl_renewal_cycle (org_version_id);
+
+CREATE INDEX idx_active_end_datetime 
+ON tbl_application_period(is_active, end_date, end_time);
+CREATE INDEX idx_conversation_global ON tbl_ai_conversation(owner_id, is_global, updated_at DESC);
+CREATE INDEX idx_message_created ON tbl_ai_message(conversation_id, created_at ASC);
+
+-- SAMPLE DATAS
+INSERT INTO tbl_role(role_name, is_approver, hierarchy_order)
+VALUES("Student",0,null), 
+("Adviser",1,1),
+("Program Chair",1,2),
+("SDAO",1,5),
+("Dean",1,3),
+("Academic Director",1,4);
+
+-- Create system user for automated logging
+INSERT INTO tbl_user (user_id, f_name, l_name, email, role_id, status, created_at)
+VALUES (
+    'sys-system',
+    'System',
+    'User',
+    'system@nu-dasma.edu.ph',
+    (SELECT role_id FROM tbl_role WHERE LOWER(role_name) = 'sdao' LIMIT 1),
+    'Active',
+    CURRENT_TIMESTAMP
+);
+
+-- Create system user for QR verification operations
+INSERT INTO tbl_user (user_id, f_name, l_name, email, role_id, status, created_at)
+VALUES (
+    'SYSTEM_QR_GENERATOR',
+    'System',
+    'QR Generator',
+    'system-qr@nu-dasma.edu.ph',
+    (SELECT role_id FROM tbl_role WHERE LOWER(role_name) = 'sdao' LIMIT 1),
+    'Active',
+    CURRENT_TIMESTAMP
+);
+
+INSERT INTO tbl_permission(permission_name, scope)
+VALUES("CREATE_EVENT","Organization"),
+("UPDATE_EVENT","Organization"),
+("DELETE_EVENT","Organization"),
+("VIEW_EVENT","Organization"),
+("REGISTER_EVENT","Organization"),
+("APPLY_ORGANIZATION","Organization"),
+("APPROVE_ORGANIZATION","Approver"),
+("ARCHIVE_ORGANIZATION","SDAO"),
+("VIEW_ORGANIZATION","Global"),
+("MANAGE_ACCOUNT","SDAO"),
+("CREATE_COMMITTEE","Organization"),
+("UPDATE_COMMITTEE","Organization"),
+("DELETE_COMMITTEE","Organization"),
+("VIEW_COMMITTEE","Organization"),
+("MANAGE_REQUIREMENTS","SDAO"),
+("VIEW_APPLICATION","Approver"),
+("MANAGE_APPLICATIONS","SDAO"),
+("CREATE_EVALUATION","Organization"), 
+("UPDATE_EVALUATION","Organization"),
+("DELETE_EVALUATION","Organization"),
+("VIEW_EVALUATION","Organization"),
+("VIEW_LOGS","Global"),
+("WEB_ACCESS","Global"),
+("MANAGE_REGISTRATION","SDAO"),
+("SUBMIT_REQUIREMENTS","Global"),
+("MANAGE_PROGRAMS","SDAO"),
+("CREATE_SDAO_EVENT","SDAO"),
+("APPLY_NEW_ORGANIZATION","Global"),
+("APPLY_RENEWAL_ORGANIZATION","Organization"),
+("VIEW_TRANSACTIONS","Global"),
+("MANAGE_TRANSACTIONS","Organization"),
+("MANAGE_SDAO_EVENT","SDAO"),
+("MANAGE_COLLEGES","SDAO"),
+("SCAN_QR", "Organization"),
+("MANAGE_TERM_PAYMENTS", "Organization");
+
+INSERT INTO tbl_role_permission (role_id, permission_id) 
+VALUES
+(4,2),
+(4,3),
+(4,4),
+(4,7),
+(4,8),
+(4,9),
+(4,10),
+(4,11),
+(4,12),
+(4,13),
+(4,14),
+(4,15),
+(4,17),
+(4,19),
+(4,21),
+(4,22),
+(4,23),
+(4,24),
+(4,25),
+(4,26),
+(4,27),
+(4,30),
+(4,32),
+(4,33),
+(2,1),
+(2,6),
+(2,9),
+(2,14),
+(2,16),
+(2,17),
+(2,21),
+(2,22),
+(2,23),
+(2,28),
+(2,30),
+(2,31),
+(3,17),
+(4,17),
+(5,17),
+(6,17),
+(3,23),
+(5,23),
+(6,23),
+(3,9),
+(5,9),
+(6,9),
+(3,16),
+(5,16),
+(6,16),
+(3,4),
+(2,4),
+(5,4),
+(6,4);
+
+INSERT INTO tbl_college (name, abbreviation) VALUES 
+("School of Arts, Sciences, and Education", "SASE"),
+("School of Business, Management, and Accountancy", "SBMA"),
+("School of Engineering, Computing and Architecture", "SECA");
+
+INSERT INTO tbl_program (college_id, name, abbreviation) VALUES 
+(1,"Bachelor of Science in Physical Education", "BPEd"),
+(1,"Bachelor of Arts in Communication", "ABComm"),
+(1,"Bachelor of Science in Psychology", "BSPSY"),
+(2,"Bachelor of Science in Hospitality Management", "BSHM"),
+(2,"Bachelor of Science in Business Administration major in Human Resource Management", "BSBA-HRM"),
+(2,"Master of Management", "MM"),
+(2,"Bachelor of Science in Business Administration major in Financial Managemen", "BSBA-FinMgt"),
+(2,"Bachelor of Science in Business Administration major in Marketing Management", "BSBA-MktgMgt"),
+(2,"Bachelor of Science in Tourism Management", "BSTM"),
+(2,"Bachelor of Science in Accountancy", "BSAccountancy"),
+(2,"Bachelor of Science in Management Accounting", "BSMA"),
+(3,"Bachelor of Science in Computer Engineering", "BSCpE"),
+(3,"Bachelor of Science in Information Technology with a specialization in Mobile and Web Applications", "BSIT-MWA"),
+(3,"Bachelor of Science in Civil Engineering", "BSCE"),
+(3,"Bachelor of Science in Architecture", "BSArch"),
+(3,"Bachelor of Science in Computer Science with specialization in Machine Learning", "BSCS-ML");
+
+INSERT INTO tbl_user (user_id, f_name, l_name, email, program_id, role_id) VALUES
+-- ('_ExbgMDtE-90mt0wLlA74VFYH5I1freBLw4NMY9RcBU', ' Geraldine', 'Aris', 'arisgc@students.nu-dasma.edu.ph', 1, 2),
+('6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0', 'Benson', 'Javier', 'javierbb@students.nu-dasma.edu.ph', NULL, 4),
+('cyQuRJT6GaT0Y89NFQua6nMhFJF6E-SAIk_rpryVY1k', ' Carl Roehl', 'Falcon', 'falconcs@students.nu-dasma.edu.ph', NULL, 6),
+('dumalagim@students.nu-dasma.edu.ph', 'Iver', 'Dumalag', 'dumalagim@students.nu-dasma.edu.ph', 1, 1),
+('LBmQ-WzvRhVmb55Ucidrc14aL39ae9Ei-7xfbOrPeEA', ' Samantha Joy', 'Madrunio', 'madruniosm@students.nu-dasma.edu.ph', 13, 2),
+('NqBfAZcMXHZF5g9ztwkQ1ykPgtNmZwYRcIPKKK40ROc', ' Alister Dylan Emmanuel', 'Realo', 'realoam@students.nu-dasma.edu.ph', 13, 1),
+('CyTLmjW4Edhvk2WvWFDNuWLYjW0WJETBPbY2HWk-ZqE', ' Loraine', 'Miraballes', 'miraballesl@students.nu-dasma.edu.ph', NULL, 1),
+('CY4e1GmCXysMRn8VYudhqDy7CDJ8xVidGO1v8RnRj1E', ' Shamiah M', 'Mendoza', 'mendozasm@students.nu-dasma.edu.ph', 13, 3);
+
+
+-- INSERT INTO tbl_application_requirement (requirement_name, is_applicable_to, file_path, created_by) VALUES
+-- ('Letter of Intent', 'new', 'requirement-1748793177547-Letter-of-Intent.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
+-- ('Student Org Application Form', 'new', 'requirement-1748793205361-ACO-SA-F-002Student-Org-Application-Form.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
+-- ('By Laws of the Organization', 'new', 'requirement-1748793242309-Constitution-and-ByLaws.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
+-- ('List of Officers/Founders', 'new', 'requirement-1748793302932-List-of-Officers-and-Founders.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
+-- ('Letter from the College Dean', 'new', 'requirement-1748793328989-Letter-from-the-College-Dean.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
+-- ('List of Members', 'new', 'requirement-1748793346203-List-of-Members.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
+-- ('Latest Certificate of Grades of Officers', 'new', 'requirement-1748793368006-Latest-Certificate-of-Grades-of-Officers.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
+-- ('Biodata/CV of Officers', 'new', 'requirement-1748793390349-CV-of-Officers.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
+-- ('List of Proposed Projects with Proposed Budget for the AY', 'new', 'requirement-1748793408714-List-of-Proposed-Project-with-Proposed-Budget.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0');
+
+
+INSERT INTO tbl_executive_rank (rank_level, default_title, description) VALUES
+(1, 'President', 'Highest authority with full permissions'),
+(2, 'Vice President Internal', 'Handles internal organizational matters'),
+(3, 'Vice President External', 'Handles external partnerships and representation'),
+(4, 'Secretary', 'Administrative lead'),
+(5, 'Treasurer', 'Financial manager'),
+(6, 'Auditor', 'Responsible for auditing and financial oversight'),
+(7, 'Public Information Officer', 'Handles publicity and information dissemination'),
+(8, 'Officer', 'General executive member');
+
+-- Insert evaluation question groups
+INSERT INTO tbl_evaluation_question_group (group_title, group_description, is_active)
+VALUES 
+('Activity: Meeting/Seminar/Conference/Workshop/Quiz Bee/Competition/Sport fest, etc.', 'Question about activities', TRUE),
+('About the Speaker/Resource person', 'Feedback about event speakers/presenters', TRUE),
+('Meals', 'Feedback about meals', TRUE),
+('Handouts', 'Feedback about handouts', TRUE),
+('Transportation', 'Feedback about transportation', TRUE),
+('Comments and Suggestions', 'Feedback about the whole event', TRUE);
+
+-- Insert evaluation questions
+INSERT INTO tbl_evaluation_question (question_text, question_type, group_id, is_required)
+VALUES
+('Is the activity relevant/important to you?', 'likert_4', 1, TRUE),
+('Is the program relevant to the course/you’re in?', 'likert_4', 1, TRUE),
+('Were the objectives clear and communicated before the activity?', 'likert_4', 1, TRUE),
+('Were the objectives met by the activity?', 'likert_4', 1, TRUE),
+('Was the venue proper for this kind of activity?', 'likert_4', 1, TRUE),
+('Did the activity start and end on time?', 'likert_4', 1, TRUE),
+('Did the organizers maintain an orderly environment all throughout the activity?', 'likert_4', 1, TRUE),
+('Was the event/activity well-advertised/properly announce?', 'likert_4', 1, TRUE),
+('Would you recommend this activity to your classmates/friends?', 'likert_4', 1, TRUE),
+('Do you want an activity like this to happen more often?', 'likert_4', 1, TRUE),
+('Overall evaluation', 'likert_4', 1, TRUE),
+('Was the speaker well-prepared and knowledgeable on the topic?', 'likert_4', 2, TRUE),
+('Did the speaker use different and appropriate methods in delivering the topic?', 'likert_4', 2, TRUE),
+('Was the speaker able to connect with the audience and catch their attention?', 'likert_4', 2, TRUE),
+('Were the meals/snacks provided enough to fill you?', 'likert_4', 3, TRUE),
+('Did the meals/snacks have a pleasant taste?', 'likert_4', 3, TRUE),
+('Are the handouts provided useful?', 'likert_4', 4, TRUE),
+('Is the printing of the handouts clear?', 'likert_4', 4, TRUE),
+('Did you feel safe during the travel to the venue?', 'likert_4', 5, TRUE),
+('Did you feel that the transportation provided is in good running condition?', 'likert_4', 5, TRUE),
+('Did you feel safe with the driver’s skills?', 'likert_4', 5, TRUE),
+('What important knowledge or information did you gain from this activity?', 'textbox', 6, TRUE),
+('What did you like most about the activity?', 'textbox', 6, TRUE),
+('What did you like least about the activity?', 'textbox', 6, TRUE),
+('Any other comments/suggestions for further improvement the activity?', 'textbox', 6, TRUE);
+
+
+INSERT INTO tbl_rank_permission(rank_id, permission_id) VALUES
+(1,1),
+(1,9),
+(1,16),
+(1,11),
+(1,12),
+(1,13),
+(1,14),
+(1,23),
+(1,4),
+(1,24),
+(1,25),
+(1,17),
+(1,19),
+(1,20),
+(1,21),
+(1,22),
+(1,29),
+(1,31),
+(1,34),
+(1,35);
+
+-- Insert default transaction types
+INSERT INTO tbl_transaction_type (code, label) VALUES
+('INCOME', 'Income'),
+('EXPENSE', 'Expense');
+
+-- Insert default payment types
+INSERT INTO tbl_payment_type (code, label, method_group) VALUES
+('CASH', 'Cash', 'physical'),
+('BANK', 'Bank Transfer', 'electronic'),
+('GCASH', 'GCash', 'eWallet');
+
+-- Insert default financial categories
+INSERT INTO tbl_financial_category (code, label, kind, active) VALUES
+('MEMBERSHIP', 'Membership Fees', 'INCOME', TRUE),
+('EVENT_FEE', 'Event Fee', 'INCOME', TRUE),
+('DONATION', 'Donation', 'INCOME', TRUE),
+('SPONSORSHIP', 'Sponsorship', 'INCOME', TRUE),
+('OFFICE_SUPPLIES', 'Office Supplies', 'EXPENSE', TRUE),
+('VENUE_RENTAL', 'Venue Rental', 'EXPENSE', TRUE);
+
+-- Link categories to transaction types
+INSERT INTO tbl_transaction_type_category (transaction_type_id, category_id)
+SELECT tt.transaction_type_id, fc.category_id
+FROM tbl_transaction_type tt, tbl_financial_category fc
+WHERE (tt.code = 'INCOME' AND fc.kind = 'INCOME')
+   OR (tt.code = 'EXPENSE' AND fc.kind = 'EXPENSE');
+
+   
 
 DELIMITER $$
 DROP PROCEDURE IF EXISTS populate_all_demo $$
