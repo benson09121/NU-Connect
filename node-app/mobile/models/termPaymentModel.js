@@ -36,10 +36,12 @@ class MobileTermPaymentModel {
                     term_id,
                     academic_year,
                     term_name,
+                    term_description,
                     start_date,
                     end_date,
-                    is_active,
                     created_at,
+                    updated_at,
+                    created_by,
                     DATE(?) BETWEEN start_date AND end_date as is_current_term
                 FROM tbl_academic_term 
                 WHERE DATE(?) BETWEEN start_date AND end_date
@@ -65,10 +67,12 @@ class MobileTermPaymentModel {
                     term_id,
                     academic_year,
                     term_name,
+                    term_description,
                     start_date,
                     end_date,
-                    is_active,
-                    created_at
+                    created_at,
+                    updated_at,
+                    created_by
                 FROM tbl_academic_term 
                 ORDER BY start_date DESC
             `);
@@ -247,9 +251,10 @@ class MobileTermPaymentModel {
                     term_id,
                     academic_year,
                     term_name,
+                    term_description,
                     start_date,
                     end_date,
-                    is_active,
+                    created_at,
                     DATE(?) BETWEEN start_date AND end_date as is_current_term
                 FROM tbl_academic_term 
                 ORDER BY start_date DESC
@@ -274,9 +279,9 @@ class MobileTermPaymentModel {
             console.log('✅ Current term found:', {
                 term_id: currentTerm.term_id,
                 term_name: currentTerm.term_name,
+                academic_year: currentTerm.academic_year,
                 start_date: currentTerm.start_date,
-                end_date: currentTerm.end_date,
-                is_active: currentTerm.is_active
+                end_date: currentTerm.end_date
             });
 
             // Step 4: Apply enhanced exclusion logic with payment verification
@@ -658,7 +663,7 @@ class MobileTermPaymentModel {
                     at.term_name,
                     at.start_date,
                     at.end_date,
-                    at.is_active,
+                    at.status,
                     DATE(?) BETWEEN at.start_date AND at.end_date as is_current_term,
                     CASE WHEN at.term_id IS NOT NULL THEN 1 ELSE 0 END as term_exists,
                     
@@ -707,7 +712,7 @@ class MobileTermPaymentModel {
                 AND o.organization_id = ?
                 AND o.status = 'Approved'
                 AND (? IS NULL OR ov.org_version_id IS NULL OR ov.org_version_id = ?)
-                ORDER BY at.start_date DESC
+                ORDER BY at.start_date ASC
                 LIMIT 1
             `, [currentDate, currentDate, organizationVersionId, userId, currentDate, organizationId, organizationVersionId, organizationVersionId]);
 
@@ -722,11 +727,11 @@ class MobileTermPaymentModel {
                         term_name,
                         start_date,
                         end_date,
-                        is_active,
+                        status,
                         DATE(?) as check_date,
                         DATE(?) BETWEEN start_date AND end_date as is_current_term
                     FROM tbl_academic_term 
-                    ORDER BY start_date DESC
+                    ORDER BY start_date ASC
                 `, [currentDate, currentDate]);
 
                 console.log('DEBUG MODEL: No current term found, all available terms:', allTerms);
@@ -1339,9 +1344,9 @@ class MobileTermPaymentModel {
             if (!queryTermId) {
                 const [termResult] = await connection.query(`
                     SELECT term_id FROM tbl_academic_term 
-                    WHERE is_active = 1 AND status = 'active'
+                    WHERE status = 'Active'
                     AND DATE(NOW()) BETWEEN start_date AND end_date
-                    ORDER BY start_date DESC LIMIT 1
+                    ORDER BY start_date ASC LIMIT 1
                 `);
                 if (termResult.length === 0) {
                     return { canRetry: false, reason: 'No active term found' };

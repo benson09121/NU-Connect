@@ -30,12 +30,14 @@ class TermPaymentModel {
             const [rows] = await connection.query(`
                 SELECT 
                     term_id,
-                    YEAR(start_date) as academic_year,
+                    academic_year,
                     term_name,
+                    term_description,
                     start_date,
                     end_date,
-                    is_active,
-                    created_at
+                    created_at,
+                    updated_at,
+                    created_by
                 FROM tbl_academic_term 
                 ORDER BY start_date DESC
             `);
@@ -52,23 +54,35 @@ class TermPaymentModel {
     static async createTerm(termData) {
         const connection = await pool.getConnection();
         try {
-            const { academic_year, term_name, start_date, end_date, created_by } = termData;
+            const { academic_year, term_name, term_description, start_date, end_date, created_by } = termData;
             
-            // Deactivate other terms if this is being set as active
-            if (termData.is_active) {
-                await connection.query('UPDATE tbl_academic_term SET is_active = FALSE');
-            }
+            // Make term_name unique by combining with academic year
+            const uniqueTermName = `${term_name} (${academic_year})`;
             
             const [result] = await connection.query(`
                 INSERT INTO tbl_academic_term (
-                    academic_year, term_name, start_date, end_date, 
-                    is_active, created_by
+                    term_name, term_description, academic_year, 
+                    start_date, end_date, created_by
                 ) VALUES (?, ?, ?, ?, ?, ?)
-            `, [academic_year, term_name, start_date, end_date, termData.is_active || false, created_by]);
+            `, [uniqueTermName, term_description || null, academic_year, start_date, end_date, created_by]);
             
-            return { term_id: result.insertId, ...termData };
+            return { 
+                term_id: result.insertId, 
+                term_name: uniqueTermName,
+                term_description: term_description || null,
+                academic_year,
+                start_date,
+                end_date,
+                created_by
+            };
         } catch (error) {
             console.error('Error creating term:', error);
+            
+            // Check for duplicate entry error
+            if (error.code === 'ER_DUP_ENTRY') {
+                throw new Error(`A term with the name "${term_name}" already exists for academic year ${academic_year}. Please use a different term name or academic year.`);
+            }
+            
             throw error;
         } finally {
             connection.release();
@@ -79,29 +93,34 @@ class TermPaymentModel {
     static async updateTerm(termId, termData) {
         const connection = await pool.getConnection();
         try {
-            // If setting as active, deactivate others first
-            if (termData.is_active) {
-                await connection.query('UPDATE tbl_academic_term SET is_active = FALSE');
-            }
-            
             const [result] = await connection.query(`
                 UPDATE tbl_academic_term 
                 SET academic_year = ?, term_name = ?, start_date = ?, 
-                    end_date = ?, is_active = ?
+                    end_date = ?
                 WHERE term_id = ?
             `, [
                 termData.academic_year,
                 termData.term_name,
                 termData.start_date,
                 termData.end_date,
-                termData.is_active || false,
                 termId
             ]);
             
             if (result.affectedRows > 0) {
                 // Return the updated term data
                 const [updatedTerm] = await connection.query(`
-                    SELECT * FROM tbl_academic_term WHERE term_id = ?
+                    SELECT 
+                        term_id,
+                        term_name,
+                        term_description,
+                        academic_year,
+                        start_date,
+                        end_date,
+                        created_at,
+                        updated_at,
+                        created_by
+                    FROM tbl_academic_term 
+                    WHERE term_id = ?
                 `, [termId]);
                 
                 return updatedTerm[0];
@@ -147,7 +166,18 @@ class TermPaymentModel {
         const connection = await pool.getConnection();
         try {
             const [rows] = await connection.query(`
-                SELECT * FROM tbl_academic_term WHERE term_id = ?
+                SELECT 
+                    term_id,
+                    term_name,
+                    term_description,
+                    academic_year,
+                    start_date,
+                    end_date,
+                    created_at,
+                    updated_at,
+                    created_by
+                FROM tbl_academic_term 
+                WHERE term_id = ?
             `, [termId]);
             
             return rows[0] || null;
@@ -478,12 +508,13 @@ class TermPaymentModel {
     static async getPaymentsByUserAndOrganization(userId, organizationId) {
         const connection = await pool.getConnection();
         try {
-            // Step 1: Check if there's an active term
+            // Step 1: Check if there's an active term by date range
             const [activeTermRows] = await connection.query(`
                 SELECT term_id, term_name, start_date, end_date
                 FROM tbl_academic_term 
-                WHERE is_active = TRUE AND status = 'Active'
-                ORDER BY start_date DESC 
+                WHERE DATE(NOW()) BETWEEN start_date AND end_date
+                AND status = 'Active'
+                ORDER BY start_date ASC 
                 LIMIT 1
             `);
             

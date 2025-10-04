@@ -227,20 +227,64 @@ async function submitOrganizationApplication(req, res) {
 
 async function leaveOrganization(req, res) {
     try {
-        
         const user = await userModel.getUser(req.user.email);
-        const { organization_id, organization_version_id, leave_reason } = req.query;
-        const result = await organizationModel.leaveOrganization(organization_id, organization_version_id, user.user_id, leave_reason);
+        
+        // 🔧 FIX: Accept data from request body instead of query params
+        const { organization_id, organization_version_id, leave_reason } = req.body;
+        
+        // Validate required fields
+        if (!organization_id || !organization_version_id) {
+            return res.status(400).json({ 
+                message: 'organization_id and organization_version_id are required' 
+            });
+        }
+        
+        const result = await organizationModel.leaveOrganization(
+            organization_id, 
+            organization_version_id, 
+            user.user_id, 
+            leave_reason || null
+        );
+        
+        // 🔧 FIX: Handle duplicate application response
+        if (result && result.length > 0 && result[0].operation_status === 'DUPLICATE') {
+            return res.status(409).json({ 
+                message: result[0].message || 'You already have a pending leave application',
+                existingApplication: result[0]
+            });
+        }
+        
+        // Publish to SSE channel
         publishToChannel(`organization_leaveApplications_${organization_id}_${organization_version_id}`, {
             operation: 'CREATE',
             data: Array.isArray(result) ? result : [result],
             timestamp: new Date()
         });
+        
         console.log(`📱 [MOBILE] 📡 Leave Application Published to channel - 1 item`);
-        res.status(200).json({ message: "Leave application submitted successfully"});
+        res.status(200).json({ 
+            message: "Leave application submitted successfully",
+            application: result
+        });
     } catch (error) {
         console.error('Error leaving organization:', error);
-        res.status(500).json({ message: error.message });
+        
+        // 🔧 FIX: Better error messages
+        if (error.message && error.message.includes('not an active member')) {
+            return res.status(403).json({ 
+                message: 'You are not an active member of this organization' 
+            });
+        }
+        
+        if (error.message && error.message.includes('renewal cycle')) {
+            return res.status(500).json({ 
+                message: 'Organization configuration error. Please contact support.' 
+            });
+        }
+        
+        res.status(500).json({ 
+            message: error.message || 'Failed to submit leave application' 
+        });
     }
 }
 
