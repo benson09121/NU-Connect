@@ -227,20 +227,51 @@ async function submitOrganizationApplication(req, res) {
 
 async function leaveOrganization(req, res) {
     try {
+        console.log('📱 [MOBILE] Leave organization request received');
+        console.log('Request body:', req.body);
         
         const user = await userModel.getUser(req.user.email);
-        const { organization_id, organization_version_id, leave_reason } = req.query;
+        const { organization_id, organization_version_id, leave_reason } = req.body;
+        
+        // Validate required fields
+        if (!organization_id || !organization_version_id || !leave_reason) {
+            console.log('❌ Missing required fields');
+            return res.status(400).json({ 
+                success: false,
+                message: 'Missing required fields: organization_id, organization_version_id, and leave_reason are required' 
+            });
+        }
+        
+        // Validate leave_reason length
+        if (leave_reason.trim().length < 10) {
+            console.log('❌ Leave reason too short');
+            return res.status(400).json({ 
+                success: false,
+                message: 'Leave reason must be at least 10 characters long' 
+            });
+        }
+        
+        console.log(`Processing leave request for user ${user.user_id} from org ${organization_id}`);
         const result = await organizationModel.leaveOrganization(organization_id, organization_version_id, user.user_id, leave_reason);
+        
+        console.log('Leave application created:', result);
         publishToChannel(`organization_leaveApplications_${organization_id}_${organization_version_id}`, {
             operation: 'CREATE',
             data: Array.isArray(result) ? result : [result],
             timestamp: new Date()
         });
         console.log(`📱 [MOBILE] 📡 Leave Application Published to channel - 1 item`);
-        res.status(200).json({ message: "Leave application submitted successfully"});
+        
+        res.status(200).json({ 
+            success: true,
+            message: "Leave application submitted successfully"
+        });
     } catch (error) {
-        console.error('Error leaving organization:', error);
-        res.status(500).json({ message: error.message });
+        console.error('❌ Error leaving organization:', error);
+        res.status(500).json({ 
+            success: false,
+            message: error.message 
+        });
     }
 }
 

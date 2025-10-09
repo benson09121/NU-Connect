@@ -34,7 +34,7 @@ class TermPaymentModel {
                     term_name,
                     start_date,
                     end_date,
-                    is_active,
+                    CURDATE() BETWEEN start_date AND end_date AS is_current_term,
                     created_at
                 FROM tbl_academic_term 
                 ORDER BY start_date DESC
@@ -54,17 +54,11 @@ class TermPaymentModel {
         try {
             const { academic_year, term_name, start_date, end_date, created_by } = termData;
             
-            // Deactivate other terms if this is being set as active
-            if (termData.is_active) {
-                await connection.query('UPDATE tbl_academic_term SET is_active = FALSE');
-            }
-            
             const [result] = await connection.query(`
                 INSERT INTO tbl_academic_term (
-                    academic_year, term_name, start_date, end_date, 
-                    is_active, created_by
-                ) VALUES (?, ?, ?, ?, ?, ?)
-            `, [academic_year, term_name, start_date, end_date, termData.is_active || false, created_by]);
+                    academic_year, term_name, start_date, end_date, created_by
+                ) VALUES (?, ?, ?, ?, ?)
+            `, [academic_year, term_name, start_date, end_date, created_by]);
             
             return { term_id: result.insertId, ...termData };
         } catch (error) {
@@ -79,22 +73,15 @@ class TermPaymentModel {
     static async updateTerm(termId, termData) {
         const connection = await pool.getConnection();
         try {
-            // If setting as active, deactivate others first
-            if (termData.is_active) {
-                await connection.query('UPDATE tbl_academic_term SET is_active = FALSE');
-            }
-            
             const [result] = await connection.query(`
                 UPDATE tbl_academic_term 
-                SET academic_year = ?, term_name = ?, start_date = ?, 
-                    end_date = ?, is_active = ?
+                SET academic_year = ?, term_name = ?, start_date = ?, end_date = ?
                 WHERE term_id = ?
             `, [
                 termData.academic_year,
                 termData.term_name,
                 termData.start_date,
                 termData.end_date,
-                termData.is_active || false,
                 termId
             ]);
             
@@ -478,11 +465,11 @@ class TermPaymentModel {
     static async getPaymentsByUserAndOrganization(userId, organizationId) {
         const connection = await pool.getConnection();
         try {
-            // Step 1: Check if there's an active term
+            // Step 1: Check if there's an active term (current date within term dates)
             const [activeTermRows] = await connection.query(`
                 SELECT term_id, term_name, start_date, end_date
                 FROM tbl_academic_term 
-                WHERE is_active = TRUE AND status = 'Active'
+                WHERE CURDATE() BETWEEN start_date AND end_date
                 ORDER BY start_date DESC 
                 LIMIT 1
             `);

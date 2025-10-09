@@ -207,8 +207,6 @@ CREATE TABLE tbl_academic_term (
     academic_year VARCHAR(20) NULL, -- e.g., '2024-2025', '2025'
     start_date DATE NOT NULL,
     end_date DATE NOT NULL,
-    is_active BOOLEAN DEFAULT FALSE,
-    status ENUM('Draft', 'Active', 'Completed', 'Archived') DEFAULT 'Draft',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     created_by VARCHAR(200) NOT NULL,
@@ -964,6 +962,8 @@ CREATE TABLE tbl_membership_leave_application (
     FOREIGN KEY (user_id) REFERENCES tbl_user(user_id),
     FOREIGN KEY (reviewed_by) REFERENCES tbl_user(user_id)
 );
+
+
 
 -- TRIGGERS
 
@@ -3032,7 +3032,7 @@ BEGIN
     -- Get category ID for Membership Fees - first try to find the existing category
     SELECT category_id INTO v_category_id 
     FROM tbl_financial_category 
-    WHERE code = 'MEMBERSHIP_FEES' 
+    WHERE code = 'MEMBERSHIP' 
       AND active = TRUE 
     LIMIT 1;
     
@@ -3048,7 +3048,7 @@ BEGIN
     -- If still no category found, create the membership fees category
     IF v_category_id IS NULL THEN
         INSERT INTO tbl_financial_category (code, label, kind, active) 
-        VALUES ('MEMBERSHIP_FEES', 'Membership Fees', 'INCOME', TRUE);
+        VALUES ('MEMBERSHIP', 'Membership Fees', 'INCOME', TRUE);
         
         SET v_category_id = LAST_INSERT_ID();
         
@@ -16276,31 +16276,6 @@ BEGIN
 END $$
 DELIMITER ;
 
-
--- INDEXES
-
--- for reporting and performance
-CREATE INDEX idx_transaction_date ON tbl_transaction(transaction_date);
-CREATE INDEX idx_transaction_status ON tbl_transaction(status);
-CREATE INDEX idx_transaction_user ON tbl_transaction(user_id);
-CREATE INDEX idx_transaction_type ON tbl_transaction(transaction_type_id);
-CREATE INDEX idx_transaction_payment_type ON tbl_transaction(payment_type_id);
-CREATE INDEX idx_transaction_category ON tbl_transaction(category_id);
-CREATE INDEX idx_transaction_archived ON tbl_transaction(archived_at);
-
-CREATE INDEX idx_org_members_user ON tbl_organization_members(user_id);
-CREATE INDEX idx_event_program ON tbl_event_course(program_id);
-
-CREATE INDEX idx_org_members ON tbl_organization_members(organization_id, user_id);
-CREATE INDEX idx_committee_org ON tbl_committee(organization_id);
-CREATE INDEX idx_committee_members_user ON tbl_committee_members(user_id);
-
--- Recommended index for lookups from version -> cycle
-CREATE INDEX idx_rc_org_version ON tbl_renewal_cycle (org_version_id);
-
-CREATE INDEX idx_active_end_datetime 
-ON tbl_application_period(is_active, end_date, end_time);
-
 DELIMITER $$
 CREATE DEFINER=`admin`@`%` PROCEDURE `GetOrganizationFinance`(IN p_organization_id INT)
 BEGIN
@@ -18595,7 +18570,8 @@ BEGIN
             -- Get current active term
             SELECT term_id INTO v_current_term_id 
             FROM tbl_academic_term 
-            WHERE is_active = 1 LIMIT 1;
+            WHERE CURDATE() BETWEEN start_date AND end_date
+            LIMIT 1;
             
             -- Get next term after current term
             SELECT term_id INTO v_next_term_id
@@ -18682,7 +18658,8 @@ BEGIN
             -- Get current active term
             SELECT term_id INTO v_current_term_id 
             FROM tbl_academic_term 
-            WHERE is_active = 1 LIMIT 1;
+            WHERE CURDATE() BETWEEN start_date AND end_date
+            LIMIT 1;
             
             -- Get next term after current term
             SELECT term_id INTO v_next_term_id
@@ -19118,7 +19095,7 @@ proc_label: BEGIN
     IF p_term_id IS NULL OR p_term_id = 0 THEN
         SELECT term_id, term_name INTO v_current_term_id, v_term_name
         FROM tbl_academic_term 
-        WHERE is_active = TRUE AND status = 'Active'
+        WHERE CURDATE() BETWEEN start_date AND end_date
         ORDER BY start_date DESC 
         LIMIT 1;
         
@@ -19135,7 +19112,7 @@ proc_label: BEGIN
         -- Validate provided term exists and is active
         SELECT term_name INTO v_term_name
         FROM tbl_academic_term 
-        WHERE term_id = p_term_id AND is_active = TRUE AND status = 'Active';
+        WHERE term_id = p_term_id AND CURDATE() BETWEEN start_date AND end_date;
         
         IF v_term_name IS NULL THEN
             SELECT CONCAT('Term ID ', p_term_id, ' is not found or not active.') as result,
@@ -19239,7 +19216,7 @@ BEGIN
     
     SELECT category_id INTO v_category_id 
     FROM tbl_financial_category 
-    WHERE code = 'MEMBERSHIP_FEES' AND active = TRUE;
+    WHERE code = 'MEMBERSHIP' AND active = TRUE;
     
     -- Generate receipt number
     SET v_type_char = 'I'; -- Income
@@ -19344,7 +19321,7 @@ BEGIN
     
     SELECT category_id INTO v_category_id 
     FROM tbl_financial_category 
-    WHERE code = 'MEMBERSHIP_FEES' AND active = TRUE;
+    WHERE code = 'MEMBERSHIP' AND active = TRUE;
     
     -- Generate receipt number
     SET v_type_char = 'I'; -- Income
@@ -19395,9 +19372,6 @@ END $$
 
 DELIMITER ;
 
-
-CREATE INDEX idx_conversation_global ON tbl_ai_conversation(owner_id, is_global, updated_at DESC);
-CREATE INDEX idx_message_created ON tbl_ai_message(conversation_id, created_at ASC);
 -- EVENTS
 
 DELIMITER $$
@@ -19475,6 +19449,36 @@ LEFT JOIN tbl_transaction_verification tv ON t.transaction_id = tv.transaction_i
     AND tv2.is_revoked = FALSE
   )
 ORDER BY t.transaction_id DESC;
+
+
+
+-- INDEXES
+
+-- for reporting and performance
+CREATE INDEX idx_transaction_date ON tbl_transaction(transaction_date);
+CREATE INDEX idx_transaction_status ON tbl_transaction(status);
+CREATE INDEX idx_transaction_user ON tbl_transaction(user_id);
+CREATE INDEX idx_transaction_type ON tbl_transaction(transaction_type_id);
+CREATE INDEX idx_transaction_payment_type ON tbl_transaction(payment_type_id);
+CREATE INDEX idx_transaction_category ON tbl_transaction(category_id);
+CREATE INDEX idx_transaction_archived ON tbl_transaction(archived_at);
+
+CREATE INDEX idx_org_members_user ON tbl_organization_members(user_id);
+CREATE INDEX idx_event_program ON tbl_event_course(program_id);
+
+CREATE INDEX idx_org_members ON tbl_organization_members(organization_id, user_id);
+CREATE INDEX idx_committee_org ON tbl_committee(organization_id);
+CREATE INDEX idx_committee_members_user ON tbl_committee_members(user_id);
+
+-- Recommended index for lookups from version -> cycle
+CREATE INDEX idx_rc_org_version ON tbl_renewal_cycle (org_version_id);
+
+CREATE INDEX idx_active_end_datetime 
+ON tbl_application_period(is_active, end_date, end_time);
+
+CREATE INDEX idx_conversation_global ON tbl_ai_conversation(owner_id, is_global, updated_at DESC);
+CREATE INDEX idx_message_created ON tbl_ai_message(conversation_id, created_at ASC);
+
 
 -- SAMPLE DATAS
 INSERT INTO tbl_role(role_name, is_approver, hierarchy_order)
@@ -19862,7 +19866,7 @@ BEGIN
     -- Get category ID for Membership Fees
     SELECT category_id INTO v_category_id 
     FROM tbl_financial_category 
-    WHERE code = 'MEMBERSHIP_FEES' 
+    WHERE code = 'MEMBERSHIP' 
       AND active = TRUE 
     LIMIT 1;
     
@@ -20140,8 +20144,6 @@ BEGIN
         term_description,
         start_date,
         end_date,
-        is_active,
-        status,
         created_at,
         DATE(NOW()) BETWEEN start_date AND end_date as is_current_term
     FROM tbl_academic_term

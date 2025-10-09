@@ -8,13 +8,15 @@ const {
     getCachedData,
     setupAuthentication,
     getAuthStatus,
+    clearCache,
     scraperInstance
 } = require('../controllers/facebookCrawleeScraper');
 
 // Default page constant for backwards compatibility
 const DEFAULT_PAGE = {
-    id: '113338964475892',
-    name: 'NUDASMA CompSoc'
+    id: '104908055228742',
+    name: 'SDAONUDasma',
+    url: 'https://www.facebook.com/SDAONUDasma'
 };
 
 // Initialize scraper on module load
@@ -114,5 +116,17 @@ router.get('/health', (req, res) => {
         }
     });
 });
+
+// DELETE /api/facebook-scraper/cache - Clear all cache
+router.delete('/cache', clearCache);
+
+// DELETE /api/facebook-scraper/cache/:pageId - Clear specific page cache
+router.delete('/cache/:pageId', clearCache);
+
+// POST /api/facebook-scraper/clear-cache - Clear all cache (alternative method)
+router.post('/clear-cache', clearCache);
+
+// POST /api/facebook-scraper/clear-cache/:pageId - Clear specific page cache (alternative)
+router.post('/clear-cache/:pageId', clearCache);
 
 module.exports = router;

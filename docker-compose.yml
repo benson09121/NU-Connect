@@ -21,11 +21,8 @@ services:
   node-app:
     container_name: node-app
     build: ./node-app
-    shm_size: '2gb'
     environment:
       TZ: Asia/Manila
-      OPENROUTER_API_KEY: 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
-      NODE_ENV: "production"
     volumes:
       - /opt/certificates/templates:/app/certificates/templates
       - /opt/certificates/generated:/app/certificates/generated
@@ -33,10 +30,6 @@ services:
       - /opt/organizations:/app/organizations
       - /opt/applications:/app/applications
       - /opt/events:/app/events
-      # Facebook Scraper persistent storage
-      - facebook_auth:/app/.auth
-      - crawlee_storage:/app/storage
-      - playwright_cache:/root/.cache/ms-playwright
     networks:
       - my-network
     ports:
@@ -102,8 +95,4 @@ networks:
 volumes:
   mysql_volume:
   redis_volume:
-  # Facebook Scraper volumes
-  facebook_auth:
-  crawlee_storage:
-  playwright_cache:
   # clamav_data:

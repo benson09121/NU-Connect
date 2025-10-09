@@ -38,7 +38,6 @@ class MobileTermPaymentModel {
                     term_name,
                     start_date,
                     end_date,
-                    is_active,
                     created_at,
                     DATE(?) BETWEEN start_date AND end_date as is_current_term
                 FROM tbl_academic_term 
@@ -67,7 +66,7 @@ class MobileTermPaymentModel {
                     term_name,
                     start_date,
                     end_date,
-                    is_active,
+                    CURDATE() BETWEEN start_date AND end_date AS is_current_term,
                     created_at
                 FROM tbl_academic_term 
                 ORDER BY start_date DESC
@@ -249,7 +248,6 @@ class MobileTermPaymentModel {
                     term_name,
                     start_date,
                     end_date,
-                    is_active,
                     DATE(?) BETWEEN start_date AND end_date as is_current_term
                 FROM tbl_academic_term 
                 ORDER BY start_date DESC
@@ -275,8 +273,7 @@ class MobileTermPaymentModel {
                 term_id: currentTerm.term_id,
                 term_name: currentTerm.term_name,
                 start_date: currentTerm.start_date,
-                end_date: currentTerm.end_date,
-                is_active: currentTerm.is_active
+                end_date: currentTerm.end_date
             });
 
             // Step 4: Apply enhanced exclusion logic with payment verification
