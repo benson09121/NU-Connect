@@ -30,14 +30,12 @@ class TermPaymentModel {
             const [rows] = await connection.query(`
                 SELECT 
                     term_id,
-                    academic_year,
+                    YEAR(start_date) as academic_year,
                     term_name,
-                    term_description,
                     start_date,
                     end_date,
-                    created_at,
-                    updated_at,
-                    created_by
+                    CURDATE() BETWEEN start_date AND end_date AS is_current_term,
+                    created_at
                 FROM tbl_academic_term 
                 ORDER BY start_date DESC
             `);
@@ -54,35 +52,17 @@ class TermPaymentModel {
     static async createTerm(termData) {
         const connection = await pool.getConnection();
         try {
-            const { academic_year, term_name, term_description, start_date, end_date, created_by } = termData;
-            
-            // Make term_name unique by combining with academic year
-            const uniqueTermName = `${term_name} (${academic_year})`;
+            const { academic_year, term_name, start_date, end_date, created_by } = termData;
             
             const [result] = await connection.query(`
                 INSERT INTO tbl_academic_term (
-                    term_name, term_description, academic_year, 
-                    start_date, end_date, created_by
-                ) VALUES (?, ?, ?, ?, ?, ?)
-            `, [uniqueTermName, term_description || null, academic_year, start_date, end_date, created_by]);
+                    academic_year, term_name, start_date, end_date, created_by
+                ) VALUES (?, ?, ?, ?, ?)
+            `, [academic_year, term_name, start_date, end_date, created_by]);
             
-            return { 
-                term_id: result.insertId, 
-                term_name: uniqueTermName,
-                term_description: term_description || null,
-                academic_year,
-                start_date,
-                end_date,
-                created_by
-            };
+            return { term_id: result.insertId, ...termData };
         } catch (error) {
             console.error('Error creating term:', error);
-            
-            // Check for duplicate entry error
-            if (error.code === 'ER_DUP_ENTRY') {
-                throw new Error(`A term with the name "${term_name}" already exists for academic year ${academic_year}. Please use a different term name or academic year.`);
-            }
-            
             throw error;
         } finally {
             connection.release();
@@ -95,8 +75,7 @@ class TermPaymentModel {
         try {
             const [result] = await connection.query(`
                 UPDATE tbl_academic_term 
-                SET academic_year = ?, term_name = ?, start_date = ?, 
-                    end_date = ?
+                SET academic_year = ?, term_name = ?, start_date = ?, end_date = ?
                 WHERE term_id = ?
             `, [
                 termData.academic_year,
@@ -109,18 +88,7 @@ class TermPaymentModel {
             if (result.affectedRows > 0) {
                 // Return the updated term data
                 const [updatedTerm] = await connection.query(`
-                    SELECT 
-                        term_id,
-                        term_name,
-                        term_description,
-                        academic_year,
-                        start_date,
-                        end_date,
-                        created_at,
-                        updated_at,
-                        created_by
-                    FROM tbl_academic_term 
-                    WHERE term_id = ?
+                    SELECT * FROM tbl_academic_term WHERE term_id = ?
                 `, [termId]);
                 
                 return updatedTerm[0];
@@ -166,18 +134,7 @@ class TermPaymentModel {
         const connection = await pool.getConnection();
         try {
             const [rows] = await connection.query(`
-                SELECT 
-                    term_id,
-                    term_name,
-                    term_description,
-                    academic_year,
-                    start_date,
-                    end_date,
-                    created_at,
-                    updated_at,
-                    created_by
-                FROM tbl_academic_term 
-                WHERE term_id = ?
+                SELECT * FROM tbl_academic_term WHERE term_id = ?
             `, [termId]);
             
             return rows[0] || null;
@@ -508,13 +465,12 @@ class TermPaymentModel {
     static async getPaymentsByUserAndOrganization(userId, organizationId) {
         const connection = await pool.getConnection();
         try {
-            // Step 1: Check if there's an active term by date range
+            // Step 1: Check if there's an active term (current date within term dates)
             const [activeTermRows] = await connection.query(`
                 SELECT term_id, term_name, start_date, end_date
                 FROM tbl_academic_term 
-                WHERE DATE(NOW()) BETWEEN start_date AND end_date
-                AND status = 'Active'
-                ORDER BY start_date ASC 
+                WHERE CURDATE() BETWEEN start_date AND end_date
+                ORDER BY start_date DESC 
                 LIMIT 1
             `);
             

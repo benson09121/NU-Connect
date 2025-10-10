@@ -1,7 +1,7 @@
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
-const { subscribeToChannel, publishToChannel, publishOrgHub, getOrgHubChannel } = require('./sseController');
+const { subscribeToChannel, publishToChannel, publishOrgHub } = require('./sseController');
 const organizationsModel = require('../models/organizationsModel');
 const userCacheModel = require('../models/userCacheModel');
 const { TermPaymentModel } = require('../models/simplifiedTermPaymentModel');

@@ -47,12 +47,36 @@ CREATE TABLE tbl_program(
         FOREIGN KEY (college_id) REFERENCES tbl_college(college_id) ON DELETE CASCADE
 );
 
+-- Section Management System
+-- Sections organize students by program and year level
+CREATE TABLE tbl_section (
+    section_id INT PRIMARY KEY AUTO_INCREMENT,
+    section_name VARCHAR(100) NOT NULL,
+    program_id INT NOT NULL,
+    year_level INT NULL,  -- Made nullable, year level no longer required
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    
+    CONSTRAINT fk_section_program 
+        FOREIGN KEY (program_id) REFERENCES tbl_program(program_id) 
+        ON DELETE RESTRICT ON UPDATE CASCADE,
+    
+    CONSTRAINT uk_section_program_name 
+        UNIQUE (program_id, section_name)
+);
+
+CREATE INDEX idx_section_program ON tbl_section(program_id);
+CREATE INDEX idx_section_active ON tbl_section(is_active);
+CREATE INDEX idx_section_year ON tbl_section(year_level);
+
 CREATE TABLE tbl_user(
     user_id VARCHAR(200) UNIQUE NOT NULL PRIMARY KEY,
     f_name VARCHAR(50) NULL,
     l_name VARCHAR(50) NULL,
     email VARCHAR(100) UNIQUE NOT NULL,
     program_id INT NULL,
+    section_id INT NULL,
     role_id INT NOT NULL,
     profile_picture VARCHAR(255),
     status ENUM('Active', 'Pending', 'Archive') DEFAULT 'Active',
@@ -63,8 +87,11 @@ CREATE TABLE tbl_user(
     archived_reason VARCHAR(255),
     FOREIGN KEY (role_id) REFERENCES tbl_role(role_id),
     FOREIGN KEY (program_id) REFERENCES tbl_program(program_id),
+    FOREIGN KEY (section_id) REFERENCES tbl_section(section_id) ON DELETE SET NULL ON UPDATE CASCADE,
     FOREIGN KEY (archived_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE
 );
+
+CREATE INDEX idx_user_section ON tbl_user(section_id);
 
 ALTER TABLE tbl_college
   ADD CONSTRAINT fk_college_archived_by
@@ -107,6 +134,19 @@ CREATE TABLE tbl_role_permission(
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (role_id) REFERENCES tbl_role(role_id) ON DELETE CASCADE,
     FOREIGN KEY (permission_id) REFERENCES tbl_permission(permission_id) ON DELETE CASCADE
+);
+
+-- SDAO hierarchical ranking system (Ranks 1-3)
+-- Rank 1: Final approver (highest authority)
+-- Rank 2/3: First-level approvers
+-- Each rank can only be assigned to ONE user
+CREATE TABLE tbl_sdao_approver(
+    user_id VARCHAR(200) PRIMARY KEY,
+    sdao_rank INT NOT NULL UNIQUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES tbl_user(user_id) ON DELETE CASCADE,
+    CHECK (sdao_rank BETWEEN 1 AND 3)
 );
 
 CREATE TABLE tbl_organization (
@@ -963,33 +1003,7 @@ CREATE TABLE tbl_membership_leave_application (
     FOREIGN KEY (reviewed_by) REFERENCES tbl_user(user_id)
 );
 
-CREATE TABLE tbl_term_payments (
-    payment_id INT AUTO_INCREMENT PRIMARY KEY,
-    user_id VARCHAR(200) NOT NULL,
-    organization_id INT NOT NULL,
-    organization_version_id INT NOT NULL,
-    term_id INT NOT NULL,
-    transaction_id INT NOT NULL,  -- Required reference to transaction for payment details
-    payment_status ENUM('Pending', 'Paid', 'Rejected', 'Cancelled') DEFAULT 'Pending',
-    verified_by VARCHAR(200) NULL,
-    verified_at TIMESTAMP NULL,
-    notes TEXT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    
-    FOREIGN KEY (user_id) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
-    FOREIGN KEY (organization_id) REFERENCES tbl_organization(organization_id) ON DELETE CASCADE,
-    FOREIGN KEY (organization_version_id) REFERENCES tbl_organization_version(org_version_id) ON DELETE CASCADE,
-    FOREIGN KEY (term_id) REFERENCES tbl_academic_term(term_id) ON DELETE CASCADE,
-    FOREIGN KEY (transaction_id) REFERENCES tbl_transaction(transaction_id) ON DELETE CASCADE,
-    FOREIGN KEY (verified_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
-    
-    UNIQUE KEY unique_member_term_payment (user_id, organization_id, organization_version_id, term_id),
-    INDEX idx_term_payments_user_org (user_id, organization_id, organization_version_id),
-    INDEX idx_term_payments_term (term_id),
-    INDEX idx_term_payments_status (payment_status),
-    INDEX idx_term_payments_transaction (transaction_id)
-);
+
 
 -- TRIGGERS
 
@@ -1438,7 +1452,6 @@ END as is_eligible,
 CASE 
     WHEN c.membership_fee_type = 'Per Term' THEN
         CASE 
-            -- Check if term payment exists for current term (first term matching today's date)
             WHEN EXISTS (
                 SELECT 1 FROM tbl_term_payments tp
                 JOIN tbl_academic_term at ON tp.term_id = at.term_id
@@ -1447,20 +1460,6 @@ CASE
                 AND tp.organization_version_id = rc.org_version_id
                 AND tp.payment_status IN ('Pending', 'Approved')
                 AND DATE(NOW()) BETWEEN at.start_date AND at.end_date
-                ORDER BY at.start_date ASC
-                LIMIT 1
-            ) THEN TRUE
-            -- New member exemption: if user joined during the current term, they already paid membership
-            WHEN EXISTS (
-                SELECT 1 FROM tbl_organization_members om
-                JOIN tbl_academic_term at ON DATE(om.joined_at) BETWEEN at.start_date AND at.end_date
-                WHERE om.user_id = userId
-                AND om.organization_id = a.organization_id
-                AND om.cycle_number = a.cycle_number
-                AND om.status = 'Active'
-                AND DATE(NOW()) BETWEEN at.start_date AND at.end_date
-                ORDER BY at.start_date ASC
-                LIMIT 1
             ) THEN TRUE
             ELSE FALSE
         END
@@ -3073,7 +3072,7 @@ BEGIN
     -- Get category ID for Membership Fees - first try to find the existing category
     SELECT category_id INTO v_category_id 
     FROM tbl_financial_category 
-    WHERE code = 'MEMBERSHIP_FEES' 
+    WHERE code = 'MEMBERSHIP' 
       AND active = TRUE 
     LIMIT 1;
     
@@ -3089,7 +3088,7 @@ BEGIN
     -- If still no category found, create the membership fees category
     IF v_category_id IS NULL THEN
         INSERT INTO tbl_financial_category (code, label, kind, active) 
-        VALUES ('MEMBERSHIP_FEES', 'Membership Fees', 'INCOME', TRUE);
+        VALUES ('MEMBERSHIP', 'Membership Fees', 'INCOME', TRUE);
         
         SET v_category_id = LAST_INSERT_ID();
         
@@ -3304,6 +3303,8 @@ BEGIN
         'email', u.email,
         'program_id', p.program_id,
         'program_name', p.name,
+        'section_id', s.section_id,
+        'section_name', s.section_name,
         'permissions', COALESCE(
             (
                 SELECT JSON_ARRAYAGG(
@@ -3552,6 +3553,7 @@ BEGIN
     FROM tbl_user u
     JOIN tbl_role r ON u.role_id = r.role_id
     LEFT JOIN tbl_program p ON u.program_id = p.program_id
+    LEFT JOIN tbl_section s ON u.section_id = s.section_id
     WHERE u.email = p_user_email;
 END $$
 DELIMITER ;
@@ -3644,6 +3646,7 @@ BEGIN
            u.email,
            p.name as program,
            r.role_name as role,
+           sa.sdao_rank,
            u.status,
            u.created_at,
            u.updated_at,
@@ -3651,6 +3654,7 @@ BEGIN
     FROM tbl_user u
     JOIN tbl_role r ON u.role_id = r.role_id
     LEFT JOIN tbl_program p ON u.program_id = p.program_id
+    LEFT JOIN tbl_sdao_approver sa ON u.user_id = sa.user_id
     WHERE u.role_id != student_role_id;
 
 END $$
@@ -3661,13 +3665,17 @@ CREATE DEFINER='admin'@'%' PROCEDURE AddManagedAccount(
     IN p_email VARCHAR(100),
     IN p_role_name VARCHAR(100),
     IN p_program_id INT,
-    IN p_created_by_email VARCHAR(100)
+    IN p_created_by_email VARCHAR(100),
+    IN p_sdao_rank INT,  -- NULL for non-SDAO roles, 1-3 for SDAO
+    IN p_section_id INT  -- NULL for non-Student roles, required for Student
 )
 BEGIN
     DECLARE v_role_id INT;
     DECLARE v_existing_user INT DEFAULT 0;
     DECLARE student_role_id INT;
     DECLARE v_created_by_id VARCHAR(200);
+    DECLARE v_user_id VARCHAR(200);
+    DECLARE v_section_program_id INT;
 
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
@@ -3696,6 +3704,32 @@ BEGIN
         SIGNAL SQLSTATE '45000' 
         SET MESSAGE_TEXT = 'Invalid role specified';
     END IF;
+    
+    -- Section validation for Students
+    IF p_role_name = 'Student' THEN
+        IF p_section_id IS NULL THEN
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Students must be assigned to a section';
+        END IF;
+        
+        -- Verify section exists and is active
+        SELECT program_id INTO v_section_program_id
+        FROM tbl_section
+        WHERE section_id = p_section_id AND is_active = TRUE;
+        
+        IF v_section_program_id IS NULL THEN
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Section not found or inactive';
+        END IF;
+        
+        -- Verify section belongs to specified program
+        IF p_program_id IS NOT NULL AND v_section_program_id != p_program_id THEN
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Section does not belong to the specified program';
+        END IF;
+    ELSE
+        -- Non-students cannot have sections
+        IF p_section_id IS NOT NULL THEN
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Only students can be assigned to sections';
+        END IF;
+    END IF;
 
     -- Check if user exists
     SELECT COUNT(*) INTO v_existing_user
@@ -3707,19 +3741,34 @@ BEGIN
         UPDATE tbl_user
         SET role_id = v_role_id,
             program_id = p_program_id,
+            section_id = p_section_id,
             status = 'Active',
             archived_at = NULL,
             archived_by = NULL,
             archived_reason = NULL,
             updated_at = CURRENT_TIMESTAMP
         WHERE email = p_email;
+        
+        -- Get user_id for SDAO rank handling
+        SELECT user_id INTO v_user_id FROM tbl_user WHERE email = p_email LIMIT 1;
+        
+        -- Handle SDAO rank assignment
+        IF p_role_name = 'SDAO' AND p_sdao_rank IS NOT NULL THEN
+            -- Insert or update SDAO rank
+            INSERT INTO tbl_sdao_approver (user_id, sdao_rank)
+            VALUES (v_user_id, p_sdao_rank)
+            ON DUPLICATE KEY UPDATE sdao_rank = p_sdao_rank;
+        ELSE
+            -- Remove from sdao_approver if changing from SDAO to another role
+            DELETE FROM tbl_sdao_approver WHERE user_id = v_user_id;
+        END IF;
 
         -- Log the update using LogAction
         CALL LogAction(
             p_created_by_email,
             'Updated managed account access',
             'account',
-            JSON_OBJECT('role_name', p_role_name, 'program_id', p_program_id, 'target_email', p_email),
+            JSON_OBJECT('role_name', p_role_name, 'program_id', p_program_id, 'target_email', p_email, 'sdao_rank', p_sdao_rank),
             NULL,
             NULL
         );
@@ -3730,21 +3779,32 @@ BEGIN
             email,
             role_id,
             program_id,
+            section_id,
             status
         ) VALUES (
             UUID(),
             p_email,
             v_role_id,
             p_program_id,
+            p_section_id,
             'Pending'
         );
+        
+        -- Get the newly created user_id
+        SELECT user_id INTO v_user_id FROM tbl_user WHERE email = p_email LIMIT 1;
+        
+        -- Handle SDAO rank for new accounts
+        IF p_role_name = 'SDAO' AND p_sdao_rank IS NOT NULL THEN
+            INSERT INTO tbl_sdao_approver (user_id, sdao_rank)
+            VALUES (v_user_id, p_sdao_rank);
+        END IF;
 
         -- Log the creation using LogAction
         CALL LogAction(
             p_created_by_email,
             'Created new managed account',
             'account',
-            JSON_OBJECT('role_name', p_role_name, 'program_id', p_program_id, 'target_email', p_email),
+            JSON_OBJECT('role_name', p_role_name, 'program_id', p_program_id, 'section_id', p_section_id, 'target_email', p_email, 'sdao_rank', p_sdao_rank),
             NULL,
             NULL
         );
@@ -3757,6 +3817,9 @@ BEGIN
            u.email,
            p.name as program,
            r.role_name as role,
+           s.section_name,
+           s.section_id,
+           sa.sdao_rank,
            u.status,
            u.created_at,
            u.updated_at,
@@ -3766,6 +3829,8 @@ BEGIN
     FROM tbl_user u
     JOIN tbl_role r ON u.role_id = r.role_id
     LEFT JOIN tbl_program p ON u.program_id = p.program_id
+    LEFT JOIN tbl_section s ON u.section_id = s.section_id
+    LEFT JOIN tbl_sdao_approver sa ON u.user_id = sa.user_id
     WHERE u.role_id != student_role_id AND u.email = p_email;
 END $$
 DELIMITER ;
@@ -3776,7 +3841,8 @@ CREATE DEFINER='admin'@'%' PROCEDURE UpdateManagedAccount(
     IN p_role_name VARCHAR(100),
     IN p_program_name VARCHAR(100), -- Can now be NULL
     IN p_status ENUM('Active', 'Pending', 'Archive'),
-    IN p_updated_by_email VARCHAR(100)
+    IN p_updated_by_email VARCHAR(100),
+    IN p_sdao_rank INT  -- NULL for non-SDAO roles, 1-3 for SDAO
 )
 BEGIN
     DECLARE v_role_id INT;
@@ -3784,6 +3850,7 @@ BEGIN
     DECLARE v_email VARCHAR(100);
     DECLARE v_updated_by_id VARCHAR(200);
     DECLARE v_current_status ENUM('Active', 'Pending', 'Archive');
+    DECLARE v_previous_role VARCHAR(100);
 
     -- Get updater user_id for logging
     SELECT user_id INTO v_updated_by_id FROM tbl_user WHERE email = p_updated_by_email LIMIT 1;
@@ -3791,8 +3858,12 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Updater user not found';
     END IF;
 
-    -- Get current email and status for logging
-    SELECT email, status INTO v_email, v_current_status FROM tbl_user WHERE user_id = p_user_id;
+    -- Get current email, status, and role for logging
+    SELECT u.email, u.status, r.role_name 
+    INTO v_email, v_current_status, v_previous_role 
+    FROM tbl_user u 
+    JOIN tbl_role r ON u.role_id = r.role_id 
+    WHERE u.user_id = p_user_id;
 
     IF v_email IS NULL THEN
         SIGNAL SQLSTATE '45000' 
@@ -3834,6 +3905,17 @@ BEGIN
         archived_reason = CASE WHEN p_status = 'Archive' AND v_current_status != 'Archive' THEN 'Status updated to Archive' ELSE archived_reason END,
         updated_at = CURRENT_TIMESTAMP
     WHERE user_id = p_user_id;
+    
+    -- Handle SDAO rank changes
+    IF p_role_name = 'SDAO' AND p_sdao_rank IS NOT NULL THEN
+        -- Assign or update SDAO rank
+        INSERT INTO tbl_sdao_approver (user_id, sdao_rank)
+        VALUES (p_user_id, p_sdao_rank)
+        ON DUPLICATE KEY UPDATE sdao_rank = p_sdao_rank;
+    ELSEIF v_previous_role = 'SDAO' AND p_role_name != 'SDAO' THEN
+        -- Remove from sdao_approver if changing from SDAO to another role
+        DELETE FROM tbl_sdao_approver WHERE user_id = p_user_id;
+    END IF;
 
     -- Log the update using LogAction
     CALL LogAction(
@@ -3845,7 +3927,9 @@ BEGIN
             'program_name', COALESCE(p_program_name, 'No Program'), 
             'status', p_status,
             'target_email', v_email,
-            'previous_status', v_current_status
+            'previous_status', v_current_status,
+            'previous_role', v_previous_role,
+            'sdao_rank', p_sdao_rank
         ),
         NULL,
         NULL
@@ -3856,6 +3940,7 @@ BEGIN
            u.email,
            COALESCE(p.name, 'No Program') as program,
            r.role_name as role,
+           sa.sdao_rank,
            u.status,
            u.created_at,
            u.updated_at,
@@ -3865,6 +3950,7 @@ BEGIN
     FROM tbl_user u
     JOIN tbl_role r ON u.role_id = r.role_id
     LEFT JOIN tbl_program p ON u.program_id = p.program_id
+    LEFT JOIN tbl_sdao_approver sa ON u.user_id = sa.user_id
     WHERE u.user_id = p_user_id;
 END $$
 DELIMITER ;
@@ -4004,6 +4090,262 @@ BEGIN
     JOIN tbl_role r ON u.role_id = r.role_id
     LEFT JOIN tbl_program p ON u.program_id = p.program_id
     WHERE u.user_id = p_user_id;
+END $$
+DELIMITER ;
+
+-- =====================================================
+-- SECTION MANAGEMENT STORED PROCEDURES
+-- =====================================================
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE AddSection(
+    IN p_section_name VARCHAR(100),
+    IN p_program_id INT
+)
+BEGIN
+    DECLARE v_program_exists INT;
+    
+    -- Validate section name
+    IF p_section_name IS NULL OR TRIM(p_section_name) = '' THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Section name cannot be empty';
+    END IF;
+    
+    IF LENGTH(TRIM(p_section_name)) < 2 OR LENGTH(TRIM(p_section_name)) > 100 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Section name must be 2-100 characters';
+    END IF;
+    
+    -- Validate no spaces or special characters (only letters, numbers, hyphens, underscores)
+    IF p_section_name REGEXP '[^a-zA-Z0-9_-]' THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Section name can only contain letters, numbers, hyphens, and underscores';
+    END IF;
+    
+    -- Check if program exists and is active
+    SELECT COUNT(*) INTO v_program_exists 
+    FROM tbl_program 
+    WHERE program_id = p_program_id AND status = 'Active';
+    
+    IF v_program_exists = 0 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Program does not exist or is inactive';
+    END IF;
+    
+    -- Check for duplicate section name in same program
+    IF EXISTS (
+        SELECT 1 FROM tbl_section 
+        WHERE program_id = p_program_id 
+        AND section_name = TRIM(p_section_name)
+    ) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Section name already exists in this program';
+    END IF;
+    
+    -- Insert section (year_level removed)
+    INSERT INTO tbl_section (section_name, program_id)
+    VALUES (TRIM(p_section_name), p_program_id);
+    
+    -- Return the new section
+    SELECT 
+        section_id,
+        section_name,
+        program_id,
+        is_active,
+        created_at
+    FROM tbl_section
+    WHERE section_id = LAST_INSERT_ID();
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE UpdateSection(
+    IN p_section_id INT,
+    IN p_section_name VARCHAR(100),
+    IN p_program_id INT
+)
+BEGIN
+    -- Validate section ID
+    IF NOT EXISTS (SELECT 1 FROM tbl_section WHERE section_id = p_section_id) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Section not found';
+    END IF;
+    
+    -- Validate section name
+    IF p_section_name IS NULL OR TRIM(p_section_name) = '' THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Section name cannot be empty';
+    END IF;
+    
+    IF LENGTH(TRIM(p_section_name)) < 2 OR LENGTH(TRIM(p_section_name)) > 100 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Section name must be 2-100 characters';
+    END IF;
+    
+    -- Validate no spaces or special characters (only letters, numbers, hyphens, underscores)
+    IF p_section_name REGEXP '[^a-zA-Z0-9_-]' THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Section name can only contain letters, numbers, hyphens, and underscores';
+    END IF;
+    
+    -- Validate program exists
+    IF NOT EXISTS (SELECT 1 FROM tbl_program WHERE program_id = p_program_id) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Program not found';
+    END IF;
+    
+    -- Check for duplicate name in the new program (excluding current section)
+    IF EXISTS (
+        SELECT 1 FROM tbl_section 
+        WHERE program_id = p_program_id 
+        AND section_name = TRIM(p_section_name)
+        AND section_id != p_section_id
+    ) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Section name already exists in this program';
+    END IF;
+    
+    -- Update section (both name and program can be changed)
+    UPDATE tbl_section
+    SET section_name = TRIM(p_section_name),
+        program_id = p_program_id,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE section_id = p_section_id;
+    
+    -- Return updated section
+    SELECT 
+        section_id,
+        section_name,
+        program_id,
+        is_active,
+        created_at,
+        updated_at
+    FROM tbl_section
+    WHERE section_id = p_section_id;
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetAllSections(
+    IN p_program_id INT,
+    IN p_is_active BOOLEAN
+)
+BEGIN
+    SELECT 
+        s.section_id,
+        s.section_name,
+        s.program_id,
+        s.is_active,
+        s.created_at,
+        s.updated_at,
+        p.name AS program_name,
+        p.abbreviation AS program_abbreviation,
+        c.name AS college_name,
+        COUNT(u.user_id) AS student_count
+    FROM tbl_section s
+    INNER JOIN tbl_program p ON s.program_id = p.program_id
+    INNER JOIN tbl_college c ON p.college_id = c.college_id
+    LEFT JOIN tbl_user u ON s.section_id = u.section_id
+    WHERE (p_program_id IS NULL OR s.program_id = p_program_id)
+      AND (p_is_active IS NULL OR s.is_active = p_is_active)
+    GROUP BY s.section_id, s.section_name, s.program_id, 
+             s.is_active, s.created_at, s.updated_at,
+             p.name, p.abbreviation, c.name
+    ORDER BY c.name, p.abbreviation, s.section_name;
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetSectionById(
+    IN p_section_id INT
+)
+BEGIN
+    -- Section details with program info
+    SELECT 
+        s.section_id,
+        s.section_name,
+        s.program_id,
+        s.is_active,
+        s.created_at,
+        s.updated_at,
+        p.name AS program_name,
+        p.abbreviation AS program_abbreviation,
+        c.college_name,
+        COUNT(u.user_id) AS student_count
+    FROM tbl_section s
+    INNER JOIN tbl_program p ON s.program_id = p.program_id
+    INNER JOIN tbl_college c ON p.college_id = c.college_id
+    LEFT JOIN tbl_user u ON s.section_id = u.section_id
+    WHERE s.section_id = p_section_id
+    GROUP BY s.section_id, s.section_name, s.program_id,
+             s.is_active, s.created_at, s.updated_at,
+             p.name, p.abbreviation, c.college_name;
+    
+    -- Students in this section
+    SELECT 
+        u.user_id,
+        CONCAT(u.f_name, ' ', u.l_name) AS name,
+        u.email
+    FROM tbl_user u
+    WHERE u.section_id = p_section_id
+    ORDER BY u.l_name, u.f_name;
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE ArchiveSection(
+    IN p_section_id INT
+)
+BEGIN
+    DECLARE v_student_count INT;
+    
+    -- Check if section exists
+    IF NOT EXISTS (SELECT 1 FROM tbl_section WHERE section_id = p_section_id) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Section not found';
+    END IF;
+    
+    -- Check if section has students
+    SELECT COUNT(*) INTO v_student_count
+    FROM tbl_user
+    WHERE section_id = p_section_id;
+    
+    IF v_student_count > 0 THEN
+        SIGNAL SQLSTATE '45000' 
+        SET MESSAGE_TEXT = 'Cannot archive section with students. Please reassign students first.';
+    END IF;
+    
+    -- Archive section
+    UPDATE tbl_section
+    SET is_active = FALSE,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE section_id = p_section_id;
+    
+    -- Return updated section
+    SELECT 
+        section_id,
+        section_name,
+        program_id,
+        is_active,
+        updated_at
+    FROM tbl_section
+    WHERE section_id = p_section_id;
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE UnarchiveSection(
+    IN p_section_id INT
+)
+BEGIN
+    -- Check if section exists
+    IF NOT EXISTS (SELECT 1 FROM tbl_section WHERE section_id = p_section_id) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Section not found';
+    END IF;
+    
+    -- Unarchive section
+    UPDATE tbl_section
+    SET is_active = TRUE,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE section_id = p_section_id;
+    
+    -- Return updated section
+    SELECT 
+        section_id,
+        section_name,
+        program_id,
+        is_active,
+        updated_at
+    FROM tbl_section
+    WHERE section_id = p_section_id;
 END $$
 DELIMITER ;
 
@@ -4426,13 +4768,50 @@ BEGIN
             END IF;
         ELSE
             -- For subsequent steps, use the standard role-based selection
-            SET v_approver_id = (
-                SELECT user_id
-                FROM tbl_user
-                WHERE role_id = v_role_id
-                  AND status = 'Active'
-                LIMIT 1
-            );
+            -- Special handling for SDAO: Select by rank (Rank 2/3 first, then Rank 1)
+            IF v_role_id = (SELECT role_id FROM tbl_role WHERE role_name = 'SDAO') THEN
+                -- Check if a Rank 2 or 3 SDAO has already been assigned
+                IF NOT EXISTS (
+                    SELECT 1 FROM tbl_approval_process ap
+                    JOIN tbl_sdao_approver sa ON ap.approver_id = sa.user_id
+                    WHERE ap.application_id = p_application_id
+                      AND ap.period_id = v_period_id
+                      AND ap.approval_role_id = v_role_id
+                      AND sa.sdao_rank IN (2, 3)
+                ) THEN
+                    -- Assign Rank 2 or 3 SDAO (first approval level)
+                    SET v_approver_id = (
+                        SELECT u.user_id
+                        FROM tbl_user u
+                        JOIN tbl_sdao_approver sa ON u.user_id = sa.user_id
+                        WHERE u.role_id = v_role_id
+                          AND u.status = 'Active'
+                          AND sa.sdao_rank IN (2, 3)
+                        ORDER BY sa.sdao_rank ASC  -- Prefer Rank 2 over Rank 3
+                        LIMIT 1
+                    );
+                ELSE
+                    -- Assign Rank 1 SDAO (final approval level)
+                    SET v_approver_id = (
+                        SELECT u.user_id
+                        FROM tbl_user u
+                        JOIN tbl_sdao_approver sa ON u.user_id = sa.user_id
+                        WHERE u.role_id = v_role_id
+                          AND u.status = 'Active'
+                          AND sa.sdao_rank = 1
+                        LIMIT 1
+                    );
+                END IF;
+            ELSE
+                -- Standard role-based selection for non-SDAO roles
+                SET v_approver_id = (
+                    SELECT user_id
+                    FROM tbl_user
+                    WHERE role_id = v_role_id
+                      AND status = 'Active'
+                    LIMIT 1
+                );
+            END IF;
         END IF;
 
         IF v_approver_id IS NOT NULL THEN
@@ -5619,7 +5998,11 @@ BEGIN
             SELECT 
                 ap.approval_id as id,
                 ap.step,
-                r.role_name,
+                CASE 
+                    WHEN r.role_name = 'SDAO' AND sa.sdao_rank IS NOT NULL 
+                    THEN CONCAT('SDAO (Rank ', sa.sdao_rank, ')')
+                    ELSE r.role_name
+                END as role_name,
                 ap.status,
                 u.email,
                 u.f_name,
@@ -5632,6 +6015,8 @@ BEGIN
                 ON ap.approval_role_id = r.role_id
             LEFT JOIN tbl_user u 
                 ON ap.approver_id = u.user_id
+            LEFT JOIN tbl_sdao_approver sa
+                ON u.user_id = sa.user_id
             WHERE ap.application_id = p_application_id
             ORDER BY ap.step;
 END $$
@@ -9647,26 +10032,42 @@ BEGIN
         SET MESSAGE_TEXT = 'Executive member not found in organization';
     END IF;
 
-    -- Check if there's already an executive role with the same title (excluding current role)
+    -- Check if there's already an executive role with the new title and rank
     SELECT executive_role_id INTO v_executive_role_id
     FROM tbl_executive_role
     WHERE organization_id = p_organization_id
       AND cycle_number = v_current_cycle
       AND role_title = p_role_title
-      AND executive_role_id != v_current_executive_role_id
+      AND rank_id = v_rank_id
     LIMIT 1;
 
-    IF v_executive_role_id IS NOT NULL THEN
-        -- Another role with the same title exists, throw error
-        SIGNAL SQLSTATE '45000'
-        SET MESSAGE_TEXT = 'A role with this title already exists in the organization';
+    IF v_executive_role_id IS NULL THEN
+        -- No existing role with new title/rank combination, update the current role
+        UPDATE tbl_executive_role
+        SET role_title = p_role_title,
+            rank_id = v_rank_id
+        WHERE executive_role_id = v_current_executive_role_id;
+        
+        SET v_executive_role_id = v_current_executive_role_id;
+    ELSE
+        -- Role with new title/rank already exists, switch to that role
+        -- Update organization member's executive role
+        UPDATE tbl_organization_members
+        SET executive_role_id = v_executive_role_id
+        WHERE organization_id = p_organization_id
+          AND cycle_number = v_current_cycle
+          AND user_id = v_user_id
+          AND member_type = 'Executive';
+          
+        -- Check if the old role has any other members, if not, delete it
+        IF NOT EXISTS (
+            SELECT 1 FROM tbl_organization_members 
+            WHERE executive_role_id = v_current_executive_role_id
+        ) THEN
+            DELETE FROM tbl_executive_role 
+            WHERE executive_role_id = v_current_executive_role_id;
+        END IF;
     END IF;
-
-    -- Update the current role with new title and rank
-    UPDATE tbl_executive_role
-    SET role_title = p_role_title,
-        rank_id = v_rank_id
-    WHERE executive_role_id = v_current_executive_role_id;
 
     -- Log the action
     CALL LogAction(
@@ -12010,13 +12411,19 @@ DELIMITER ;
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetRoles()
 BEGIN
-    -- Return all roles
+    -- Return all roles (approvers + Faculty for account management)
+    -- Excludes only Student role from dropdown
     SELECT 
         role_id,
         role_name
     FROM tbl_role 
-    WHERE is_approver = 1
-    ORDER BY hierarchy_order;
+    WHERE role_name != 'Student'  -- Exclude Student from role selection
+    ORDER BY 
+        CASE 
+            WHEN hierarchy_order IS NULL THEN 999  -- Non-approver roles (Faculty, SDAO) at end
+            ELSE hierarchy_order 
+        END,
+        role_name;
 END $$
 DELIMITER ;
 
@@ -18592,11 +18999,10 @@ BEGIN
         
         -- Calculate payment start term for reactivated members (Per Term organizations only)
         IF v_membership_fee_type = 'Per Term' THEN
-            -- Get current active term by date range
+            -- Get current active term
             SELECT term_id INTO v_current_term_id 
             FROM tbl_academic_term 
-            WHERE DATE(NOW()) BETWEEN start_date AND end_date
-            ORDER BY start_date ASC
+            WHERE CURDATE() BETWEEN start_date AND end_date
             LIMIT 1;
             
             -- Get next term after current term
@@ -18681,11 +19087,10 @@ BEGIN
     ELSE
         -- Calculate payment start term for new members (Per Term organizations only)
         IF v_membership_fee_type = 'Per Term' THEN
-            -- Get current active term by date range
+            -- Get current active term
             SELECT term_id INTO v_current_term_id 
             FROM tbl_academic_term 
-            WHERE DATE(NOW()) BETWEEN start_date AND end_date
-            ORDER BY start_date ASC
+            WHERE CURDATE() BETWEEN start_date AND end_date
             LIMIT 1;
             
             -- Get next term after current term
@@ -19122,8 +19527,8 @@ proc_label: BEGIN
     IF p_term_id IS NULL OR p_term_id = 0 THEN
         SELECT term_id, term_name INTO v_current_term_id, v_term_name
         FROM tbl_academic_term 
-        WHERE DATE(NOW()) BETWEEN start_date AND end_date
-        ORDER BY start_date ASC
+        WHERE CURDATE() BETWEEN start_date AND end_date
+        ORDER BY start_date DESC 
         LIMIT 1;
         
         IF v_current_term_id IS NULL THEN
@@ -19139,8 +19544,7 @@ proc_label: BEGIN
         -- Validate provided term exists and is active
         SELECT term_name INTO v_term_name
         FROM tbl_academic_term 
-        WHERE term_id = p_term_id 
-        AND DATE(NOW()) BETWEEN start_date AND end_date;
+        WHERE term_id = p_term_id AND CURDATE() BETWEEN start_date AND end_date;
         
         IF v_term_name IS NULL THEN
             SELECT CONCAT('Term ID ', p_term_id, ' is not found or not active.') as result,
@@ -19244,7 +19648,7 @@ BEGIN
     
     SELECT category_id INTO v_category_id 
     FROM tbl_financial_category 
-    WHERE code = 'MEMBERSHIP_FEES' AND active = TRUE;
+    WHERE code = 'MEMBERSHIP' AND active = TRUE;
     
     -- Generate receipt number
     SET v_type_char = 'I'; -- Income
@@ -19349,7 +19753,7 @@ BEGIN
     
     SELECT category_id INTO v_category_id 
     FROM tbl_financial_category 
-    WHERE code = 'MEMBERSHIP_FEES' AND active = TRUE;
+    WHERE code = 'MEMBERSHIP' AND active = TRUE;
     
     -- Generate receipt number
     SET v_type_char = 'I'; -- Income
@@ -19399,6 +19803,486 @@ BEGIN
 END $$
 
 DELIMITER ;
+
+-- EVENTS
+
+DELIMITER $$
+CREATE FUNCTION GetUserOrganizations(user_id VARCHAR(200))
+RETURNS JSON
+READS SQL DATA
+DETERMINISTIC
+BEGIN
+  DECLARE org_list JSON;
+  
+  SELECT JSON_ARRAYAGG(
+    JSON_OBJECT(
+      'organization_id', o.organization_id,
+      'name', o.name,
+      'status', o.status,
+      'category', o.category,
+      'role', CASE 
+        WHEN o.adviser_id = user_id THEN 'Adviser'
+        WHEN om.member_type IS NOT NULL THEN om.member_type
+        ELSE 'Member'
+      END
+    )
+  ) INTO org_list
+  FROM tbl_organization o
+  LEFT JOIN tbl_organization_members om ON o.organization_id = om.organization_id AND om.user_id = user_id
+  WHERE (o.adviser_id = user_id OR om.user_id = user_id)
+    AND o.status = 'Approved';
+  
+  RETURN COALESCE(org_list, JSON_ARRAY());
+END$$
+DELIMITER ;
+
+CREATE VIEW v_multi_org_messages AS
+SELECT 
+  m.message_id,
+  m.conversation_id,
+  m.content,
+  m.message_scope,
+  m.context_organizations,
+  c.owner_id,
+  c.entity_type,
+  c.is_global,
+  m.created_at
+FROM tbl_ai_message m
+JOIN tbl_ai_conversation c ON m.conversation_id = c.conversation_id
+WHERE m.message_scope IN ('multi_org', 'global')
+  AND c.is_archived = 0;
+
+-- QR VERIFICATION SYSTEM VIEW
+-- Optional: Create a view for easy token status checking
+CREATE VIEW v_transaction_qr_status AS
+SELECT 
+    t.transaction_id,
+    t.receipt_no,
+    t.qr_enabled,
+    t.qr_token,
+    tv.jwt_token_id,
+    tv.expires_at,
+    tv.is_revoked,
+    tv.verification_count,
+    tv.last_verified_at,
+    CASE 
+        WHEN tv.jwt_token_id IS NULL THEN 'No Token'
+        WHEN tv.is_revoked = TRUE THEN 'Revoked'
+        WHEN tv.expires_at < CURRENT_TIMESTAMP THEN 'Expired'
+        ELSE 'Active'
+    END AS token_status
+FROM tbl_transaction t
+LEFT JOIN tbl_transaction_verification tv ON t.transaction_id = tv.transaction_id
+  AND tv.is_revoked = FALSE 
+  AND tv.expires_at = (
+    SELECT MAX(expires_at) 
+    FROM tbl_transaction_verification tv2 
+    WHERE tv2.transaction_id = t.transaction_id 
+    AND tv2.is_revoked = FALSE
+  )
+ORDER BY t.transaction_id DESC;
+
+
+
+-- INDEXES
+
+-- for reporting and performance
+CREATE INDEX idx_transaction_date ON tbl_transaction(transaction_date);
+CREATE INDEX idx_transaction_status ON tbl_transaction(status);
+CREATE INDEX idx_transaction_user ON tbl_transaction(user_id);
+CREATE INDEX idx_transaction_type ON tbl_transaction(transaction_type_id);
+CREATE INDEX idx_transaction_payment_type ON tbl_transaction(payment_type_id);
+CREATE INDEX idx_transaction_category ON tbl_transaction(category_id);
+CREATE INDEX idx_transaction_archived ON tbl_transaction(archived_at);
+
+CREATE INDEX idx_org_members_user ON tbl_organization_members(user_id);
+CREATE INDEX idx_event_program ON tbl_event_course(program_id);
+
+CREATE INDEX idx_org_members ON tbl_organization_members(organization_id, user_id);
+CREATE INDEX idx_committee_org ON tbl_committee(organization_id);
+CREATE INDEX idx_committee_members_user ON tbl_committee_members(user_id);
+
+-- Recommended index for lookups from version -> cycle
+CREATE INDEX idx_rc_org_version ON tbl_renewal_cycle (org_version_id);
+
+CREATE INDEX idx_active_end_datetime 
+ON tbl_application_period(is_active, end_date, end_time);
+
+CREATE INDEX idx_conversation_global ON tbl_ai_conversation(owner_id, is_global, updated_at DESC);
+CREATE INDEX idx_message_created ON tbl_ai_message(conversation_id, created_at ASC);
+
+
+-- SAMPLE DATAS
+INSERT INTO tbl_role(role_name, is_approver, hierarchy_order)
+VALUES("Student",0,null), 
+("Adviser",1,1),
+("Program Chair",1,2),
+("SDAO",1,5),
+("Dean",1,3),
+("Academic Director",1,4),
+("Faculty",0,null);  -- View-only role for faculty members
+
+-- Create system user for automated logging
+INSERT INTO tbl_user (user_id, f_name, l_name, email, role_id, status, created_at)
+VALUES (
+    'sys-system',
+    'System',
+    'User',
+    'system@nu-dasma.edu.ph',
+    (SELECT role_id FROM tbl_role WHERE LOWER(role_name) = 'sdao' LIMIT 1),
+    'Active',
+    CURRENT_TIMESTAMP
+);
+
+-- Create system user for QR verification operations
+INSERT INTO tbl_user (user_id, f_name, l_name, email, role_id, status, created_at)
+VALUES (
+    'SYSTEM_QR_GENERATOR',
+    'System',
+    'QR Generator',
+    'system-qr@nu-dasma.edu.ph',
+    (SELECT role_id FROM tbl_role WHERE LOWER(role_name) = 'sdao' LIMIT 1),
+    'Active',
+    CURRENT_TIMESTAMP
+);
+
+INSERT INTO tbl_permission(permission_name, scope)
+VALUES("CREATE_EVENT","Organization"),
+("UPDATE_EVENT","Organization"),
+("DELETE_EVENT","Organization"),
+("VIEW_EVENT","Organization"),
+("REGISTER_EVENT","Organization"),
+("APPLY_ORGANIZATION","Organization"),
+("APPROVE_ORGANIZATION","Approver"),
+("ARCHIVE_ORGANIZATION","SDAO"),
+("VIEW_ORGANIZATION","Global"),
+("MANAGE_ACCOUNT","SDAO"),
+("CREATE_COMMITTEE","Organization"),
+("UPDATE_COMMITTEE","Organization"),
+("DELETE_COMMITTEE","Organization"),
+("VIEW_COMMITTEE","Organization"),
+("MANAGE_REQUIREMENTS","SDAO"),
+("VIEW_APPLICATION","Approver"),
+("MANAGE_APPLICATIONS","SDAO"),
+("CREATE_EVALUATION","Organization"), 
+("UPDATE_EVALUATION","Organization"),
+("DELETE_EVALUATION","Organization"),
+("VIEW_EVALUATION","Organization"),
+("VIEW_LOGS","Global"),
+("WEB_ACCESS","Global"),
+("MANAGE_REGISTRATION","SDAO"),
+("SUBMIT_REQUIREMENTS","Global"),
+("MANAGE_PROGRAMS","SDAO"),
+("CREATE_SDAO_EVENT","SDAO"),
+("APPLY_NEW_ORGANIZATION","Global"),
+("APPLY_RENEWAL_ORGANIZATION","Organization"),
+("VIEW_TRANSACTIONS","Global"),
+("MANAGE_TRANSACTIONS","Organization"),
+("MANAGE_SDAO_EVENT","SDAO"),
+("MANAGE_COLLEGES","SDAO"),
+("SCAN_QR", "Organization"),
+("MANAGE_TERM_PAYMENTS", "Organization");
+
+INSERT INTO tbl_role_permission (role_id, permission_id) 
+VALUES
+(4,2),
+(4,3),
+(4,4),
+(4,7),
+(4,8),
+(4,9),
+(4,10),
+(4,11),
+(4,12),
+(4,13),
+(4,14),
+(4,15),
+(4,17),
+(4,19),
+(4,21),
+(4,22),
+(4,23),
+(4,24),
+(4,25),
+(4,26),
+(4,27),
+(4,30),
+(4,32),
+(4,33),
+(2,1),
+(2,6),
+(2,9),
+(2,14),
+(2,16),
+(2,17),
+(2,21),
+(2,22),
+(2,23),
+(2,28),
+(2,30),
+(2,31),
+(3,17),
+(4,17),
+(5,17),
+(6,17),
+(3,23),
+(5,23),
+(6,23),
+(3,9),
+(5,9),
+(6,9),
+(3,16),
+(5,16),
+(6,16),
+(3,4),
+(2,4),
+(5,4),
+(6,4);
+
+-- Faculty permissions (role_id 7): WEB_ACCESS, VIEW_ORGANIZATION, VIEW_EVENT
+INSERT INTO tbl_role_permission (role_id, permission_id)
+VALUES
+(7,23),  -- WEB_ACCESS
+(7,9),   -- VIEW_ORGANIZATION
+(7,4);   -- VIEW_EVENT
+
+INSERT INTO tbl_college (name, abbreviation) VALUES 
+("School of Arts, Sciences, and Education", "SASE"),
+("School of Business, Management, and Accountancy", "SBMA"),
+("School of Engineering, Computing and Architecture", "SECA");
+
+INSERT INTO tbl_program (college_id, name, abbreviation) VALUES 
+(1,"Bachelor of Science in Physical Education", "BPEd"),
+(1,"Bachelor of Arts in Communication", "ABComm"),
+(1,"Bachelor of Science in Psychology", "BSPSY"),
+(2,"Bachelor of Science in Hospitality Management", "BSHM"),
+(2,"Bachelor of Science in Business Administration major in Human Resource Management", "BSBA-HRM"),
+(2,"Master of Management", "MM"),
+(2,"Bachelor of Science in Business Administration major in Financial Managemen", "BSBA-FinMgt"),
+(2,"Bachelor of Science in Business Administration major in Marketing Management", "BSBA-MktgMgt"),
+(2,"Bachelor of Science in Tourism Management", "BSTM"),
+(2,"Bachelor of Science in Accountancy", "BSAccountancy"),
+(2,"Bachelor of Science in Management Accounting", "BSMA"),
+(3,"Bachelor of Science in Computer Engineering", "BSCpE"),
+(3,"Bachelor of Science in Information Technology with a specialization in Mobile and Web Applications", "BSIT-MWA"),
+(3,"Bachelor of Science in Civil Engineering", "BSCE"),
+(3,"Bachelor of Science in Architecture", "BSArch"),
+(3,"Bachelor of Science in Computer Science with specialization in Machine Learning", "BSCS-ML");
+
+-- Insert sections for Computer Science (program_id = 11)
+INSERT INTO tbl_section (section_name, program_id) VALUES
+('COM251', 11),
+('COM252', 11),
+('COM253', 11),
+('COM241', 11),
+('COM242', 11),
+('COM231', 11),
+('COM232', 11),
+('COM221', 11);
+
+-- Insert sections for BSIT (program_id = 13)
+INSERT INTO tbl_section (section_name, program_id) VALUES
+('INF251', 13),
+('INF252', 13),
+('INF253', 13),
+('INF254', 13),
+('INF255', 13),
+('INF241', 13),
+('INF242', 13),
+('INF243', 13),
+('INF244', 13),
+('INF245', 13),
+('INF246', 13),
+('INF231', 13),
+('INF232', 13),
+('INF233', 13),
+('INF234', 13),
+('INF221', 13),
+('INF222', 13),
+('INF223', 13),
+('INF224', 13);
+
+INSERT INTO tbl_user (user_id, f_name, l_name, email, program_id, section_id, role_id) VALUES
+-- SDAO and other roles (no program/section needed)
+('6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0', 'Benson', 'Javier', 'javierbb@students.nu-dasma.edu.ph', NULL, NULL, 4),
+('cyQuRJT6GaT0Y89NFQua6nMhFJF6E-SAIk_rpryVY1k', ' Carl Roehl', 'Falcon', 'falconcs@students.nu-dasma.edu.ph', NULL, NULL, 6),
+-- Advisers for Computer Science (program_id = 11)
+('adviser1@nu-dasma.edu.ph', 'Maria', 'Santos', 'adviser1@nu-dasma.edu.ph', 11, NULL, 2),
+('adviser2@nu-dasma.edu.ph', 'Juan', 'Dela Cruz', 'adviser2@nu-dasma.edu.ph', 11, NULL, 2),
+-- Advisers for BSIT (program_id = 13)
+('CyTLmjW4Edhvk2WvWFDNuWLYjW0WJETBPbY2HWk-ZqE', ' Loraine', 'Miraballes', 'miraballesl@students.nu-dasma.edu.ph', 13, NULL, 2),
+('adviser3@nu-dasma.edu.ph', 'Roberto', 'Garcia', 'adviser3@nu-dasma.edu.ph', 13, NULL, 2),
+-- Students with BSIT program (program_id = 13) and sections
+('dumalagim@students.nu-dasma.edu.ph', 'Iver', 'Dumalag', 'dumalagim@students.nu-dasma.edu.ph', 13, (SELECT section_id FROM tbl_section WHERE section_name = 'INF251' AND program_id = 13), 1),
+('LBmQ-WzvRhVmb55Ucidrc14aL39ae9Ei-7xfbOrPeEA', ' Samantha Joy', 'Madrunio', 'madruniosm@students.nu-dasma.edu.ph', 13, (SELECT section_id FROM tbl_section WHERE section_name = 'INF252' AND program_id = 13), 1),
+('NqBfAZcMXHZF5g9ztwkQ1ykPgtNmZwYRcIPKKK40ROc', ' Alister Dylan Emmanuel', 'Realo', 'realoam@students.nu-dasma.edu.ph', 13, (SELECT section_id FROM tbl_section WHERE section_name = 'INF241' AND program_id = 13), 1),
+-- Students with Computer Science program (program_id = 11) and sections
+('CY4e1GmCXysMRn8VYudhqDy7CDJ8xVidGO1v8RnRj1E', ' Shamiah M', 'Mendoza', 'mendozasm@students.nu-dasma.edu.ph', 11, (SELECT section_id FROM tbl_section WHERE section_name = 'COM251' AND program_id = 11), 1);
+
+-- Migrate existing SDAO users to tbl_sdao_approver with rank 1 (default)
+-- Assigns rank 1 to all users with SDAO role (role_id = 4)
+INSERT INTO tbl_sdao_approver (user_id, sdao_rank)
+SELECT user_id, 1
+FROM tbl_user
+WHERE role_id = (SELECT role_id FROM tbl_role WHERE role_name = 'SDAO')
+  AND user_id != 'sys-system'  -- Exclude system user
+ORDER BY created_at ASC
+LIMIT 1;  -- Only migrate the first SDAO user to rank 1
+
+
+-- INSERT INTO tbl_application_requirement (requirement_name, is_applicable_to, file_path, created_by) VALUES
+-- ('Letter of Intent', 'new', 'requirement-1748793177547-Letter-of-Intent.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
+-- ('Student Org Application Form', 'new', 'requirement-1748793205361-ACO-SA-F-002Student-Org-Application-Form.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
+-- ('By Laws of the Organization', 'new', 'requirement-1748793242309-Constitution-and-ByLaws.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
+-- ('List of Officers/Founders', 'new', 'requirement-1748793302932-List-of-Officers-and-Founders.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
+-- ('Letter from the College Dean', 'new', 'requirement-1748793328989-Letter-from-the-College-Dean.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
+-- ('List of Members', 'new', 'requirement-1748793346203-List-of-Members.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
+-- ('Latest Certificate of Grades of Officers', 'new', 'requirement-1748793368006-Latest-Certificate-of-Grades-of-Officers.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
+-- ('Biodata/CV of Officers', 'new', 'requirement-1748793390349-CV-of-Officers.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
+-- ('List of Proposed Projects with Proposed Budget for the AY', 'new', 'requirement-1748793408714-List-of-Proposed-Project-with-Proposed-Budget.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0');
+
+
+INSERT INTO tbl_executive_rank (rank_level, default_title, description) VALUES
+(1, 'President', 'Highest authority with full permissions'),
+(2, 'Vice President Internal', 'Handles internal organizational matters'),
+(3, 'Vice President External', 'Handles external partnerships and representation'),
+(4, 'Secretary', 'Administrative lead'),
+(5, 'Treasurer', 'Financial manager'),
+(6, 'Auditor', 'Responsible for auditing and financial oversight'),
+(7, 'Public Information Officer', 'Handles publicity and information dissemination'),
+(8, 'Officer', 'General executive member');
+
+-- Insert evaluation question groups
+INSERT INTO tbl_evaluation_question_group (group_title, group_description, is_active)
+VALUES 
+('Activity: Meeting/Seminar/Conference/Workshop/Quiz Bee/Competition/Sport fest, etc.', 'Question about activities', TRUE),
+('About the Speaker/Resource person', 'Feedback about event speakers/presenters', TRUE),
+('Meals', 'Feedback about meals', TRUE),
+('Handouts', 'Feedback about handouts', TRUE),
+('Transportation', 'Feedback about transportation', TRUE),
+('Comments and Suggestions', 'Feedback about the whole event', TRUE);
+
+-- Insert evaluation questions
+INSERT INTO tbl_evaluation_question (question_text, question_type, group_id, is_required)
+VALUES
+('Is the activity relevant/important to you?', 'likert_4', 1, TRUE),
+('Is the program relevant to the course/you’re in?', 'likert_4', 1, TRUE),
+('Were the objectives clear and communicated before the activity?', 'likert_4', 1, TRUE),
+('Were the objectives met by the activity?', 'likert_4', 1, TRUE),
+('Was the venue proper for this kind of activity?', 'likert_4', 1, TRUE),
+('Did the activity start and end on time?', 'likert_4', 1, TRUE),
+('Did the organizers maintain an orderly environment all throughout the activity?', 'likert_4', 1, TRUE),
+('Was the event/activity well-advertised/properly announce?', 'likert_4', 1, TRUE),
+('Would you recommend this activity to your classmates/friends?', 'likert_4', 1, TRUE),
+('Do you want an activity like this to happen more often?', 'likert_4', 1, TRUE),
+('Overall evaluation', 'likert_4', 1, TRUE),
+('Was the speaker well-prepared and knowledgeable on the topic?', 'likert_4', 2, TRUE),
+('Did the speaker use different and appropriate methods in delivering the topic?', 'likert_4', 2, TRUE),
+('Was the speaker able to connect with the audience and catch their attention?', 'likert_4', 2, TRUE),
+('Were the meals/snacks provided enough to fill you?', 'likert_4', 3, TRUE),
+('Did the meals/snacks have a pleasant taste?', 'likert_4', 3, TRUE),
+('Are the handouts provided useful?', 'likert_4', 4, TRUE),
+('Is the printing of the handouts clear?', 'likert_4', 4, TRUE),
+('Did you feel safe during the travel to the venue?', 'likert_4', 5, TRUE),
+('Did you feel that the transportation provided is in good running condition?', 'likert_4', 5, TRUE),
+('Did you feel safe with the driver’s skills?', 'likert_4', 5, TRUE),
+('What important knowledge or information did you gain from this activity?', 'textbox', 6, TRUE),
+('What did you like most about the activity?', 'textbox', 6, TRUE),
+('What did you like least about the activity?', 'textbox', 6, TRUE),
+('Any other comments/suggestions for further improvement the activity?', 'textbox', 6, TRUE);
+
+
+INSERT INTO tbl_rank_permission(rank_id, permission_id) VALUES
+(1,1),
+(1,9),
+(1,16),
+(1,11),
+(1,12),
+(1,13),
+(1,14),
+(1,23),
+(1,4),
+(1,24),
+(1,25),
+(1,17),
+(1,19),
+(1,20),
+(1,21),
+(1,22),
+(1,29),
+(1,31),
+(1,34),
+(1,35);
+
+-- =====================================
+-- TERM PAYMENT SYSTEM TABLES
+-- =====================================
+
+-- Academic Terms Table
+-- Individual Member Term Payments (Simplified)
+CREATE TABLE tbl_term_payments (
+    payment_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id VARCHAR(200) NOT NULL,
+    organization_id INT NOT NULL,
+    organization_version_id INT NOT NULL,
+    term_id INT NOT NULL,
+    transaction_id INT NOT NULL,  -- Required reference to transaction for payment details
+    payment_status ENUM('Pending', 'Paid', 'Rejected', 'Cancelled') DEFAULT 'Pending',
+    verified_by VARCHAR(200) NULL,
+    verified_at TIMESTAMP NULL,
+    notes TEXT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    
+    FOREIGN KEY (user_id) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
+    FOREIGN KEY (organization_id) REFERENCES tbl_organization(organization_id) ON DELETE CASCADE,
+    FOREIGN KEY (organization_version_id) REFERENCES tbl_organization_version(org_version_id) ON DELETE CASCADE,
+    FOREIGN KEY (term_id) REFERENCES tbl_academic_term(term_id) ON DELETE CASCADE,
+    FOREIGN KEY (transaction_id) REFERENCES tbl_transaction(transaction_id) ON DELETE CASCADE,
+    FOREIGN KEY (verified_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
+    
+    UNIQUE KEY unique_member_term_payment (user_id, organization_id, organization_version_id, term_id),
+    INDEX idx_term_payments_user_org (user_id, organization_id, organization_version_id),
+    INDEX idx_term_payments_term (term_id),
+    INDEX idx_term_payments_status (payment_status),
+    INDEX idx_term_payments_transaction (transaction_id)
+);
+
+-- Views for better data access
+CREATE VIEW vw_term_payment_overview AS
+SELECT 
+    tp.payment_id,
+    tp.user_id,
+    tp.organization_id,
+    tp.organization_version_id,
+    tp.term_id,
+    CONCAT(u.f_name, ' ', u.l_name) as member_name,
+    u.email as member_email,
+    o.name as organization_name,
+    at.term_name,
+    at.start_date as term_start,
+    at.end_date as term_end,
+    t.amount as payment_amount,
+    tp.payment_status,
+    pt.label as payment_method,
+    t.receipt_no as transaction_reference,
+    tp.transaction_id,
+    t.receipt_no,
+    t.transaction_date,
+    t.proof_image as receipt_filename,
+    CONCAT('/app/organizations/', tp.organization_id, '/', tp.organization_version_id, '/transactions/', t.proof_image) as receipt_url,
+    tp.verified_by,
+    tp.verified_at,
+    tp.notes,
+    tp.created_at,
+    tp.updated_at
+FROM tbl_term_payments tp
+JOIN tbl_user u ON tp.user_id = u.user_id
+JOIN tbl_organization o ON tp.organization_id = o.organization_id
+JOIN tbl_academic_term at ON tp.term_id = at.term_id
+JOIN tbl_transaction t ON tp.transaction_id = t.transaction_id
+JOIN tbl_payment_type pt ON t.payment_type_id = pt.payment_type_id;
+
 -- Stored Procedures for Term Payment Management
 
 DELIMITER $$
@@ -19472,7 +20356,7 @@ BEGIN
     -- Get category ID for Membership Fees
     SELECT category_id INTO v_category_id 
     FROM tbl_financial_category 
-    WHERE code = 'MEMBERSHIP_FEES' 
+    WHERE code = 'MEMBERSHIP' 
       AND active = TRUE 
     LIMIT 1;
     
@@ -19839,6 +20723,35 @@ BEGIN
 END $$
 DELIMITER ;
 
+-- Insert default transaction types
+INSERT INTO tbl_transaction_type (code, label) VALUES
+('INCOME', 'Income'),
+('EXPENSE', 'Expense');
+
+-- Insert default payment types
+INSERT INTO tbl_payment_type (code, label, method_group) VALUES
+('CASH', 'Cash', 'physical'),
+('BANK', 'Bank Transfer', 'electronic'),
+('GCASH', 'GCash', 'eWallet');
+
+-- Insert default financial categories
+INSERT INTO tbl_financial_category (code, label, kind, active) VALUES
+('MEMBERSHIP', 'Membership Fees', 'INCOME', TRUE),
+('EVENT_FEE', 'Event Fee', 'INCOME', TRUE),
+('DONATION', 'Donation', 'INCOME', TRUE),
+('SPONSORSHIP', 'Sponsorship', 'INCOME', TRUE),
+('OFFICE_SUPPLIES', 'Office Supplies', 'EXPENSE', TRUE),
+('VENUE_RENTAL', 'Venue Rental', 'EXPENSE', TRUE);
+
+-- Link categories to transaction types
+INSERT INTO tbl_transaction_type_category (transaction_type_id, category_id)
+SELECT tt.transaction_type_id, fc.category_id
+FROM tbl_transaction_type tt, tbl_financial_category fc
+WHERE (tt.code = 'INCOME' AND fc.kind = 'INCOME')
+   OR (tt.code = 'EXPENSE' AND fc.kind = 'EXPENSE');
+
+
+
 -- =====================================
 -- MOBILE TERM PAYMENT STORED PROCEDURES
 -- =====================================
@@ -20047,418 +20960,6 @@ END$$
 
 DELIMITER ;
 
--- FUNCTIONS AND VIEWS
-DELIMITER $$
-CREATE FUNCTION GetUserOrganizations(user_id VARCHAR(200))
-RETURNS JSON
-READS SQL DATA
-DETERMINISTIC
-BEGIN
-  DECLARE org_list JSON;
-  
-  SELECT JSON_ARRAYAGG(
-    JSON_OBJECT(
-      'organization_id', o.organization_id,
-      'name', o.name,
-      'status', o.status,
-      'category', o.category,
-      'role', CASE 
-        WHEN o.adviser_id = user_id THEN 'Adviser'
-        WHEN om.member_type IS NOT NULL THEN om.member_type
-        ELSE 'Member'
-      END
-    )
-  ) INTO org_list
-  FROM tbl_organization o
-  LEFT JOIN tbl_organization_members om ON o.organization_id = om.organization_id AND om.user_id = user_id
-  WHERE (o.adviser_id = user_id OR om.user_id = user_id)
-    AND o.status = 'Approved';
-  
-  RETURN COALESCE(org_list, JSON_ARRAY());
-END$$
-DELIMITER ;
-
-CREATE VIEW v_multi_org_messages AS
-SELECT 
-  m.message_id,
-  m.conversation_id,
-  m.content,
-  m.message_scope,
-  m.context_organizations,
-  c.owner_id,
-  c.entity_type,
-  c.is_global,
-  m.created_at
-FROM tbl_ai_message m
-JOIN tbl_ai_conversation c ON m.conversation_id = c.conversation_id
-WHERE m.message_scope IN ('multi_org', 'global')
-  AND c.is_archived = 0;
-
--- QR VERIFICATION SYSTEM VIEW
--- Optional: Create a view for easy token status checking
-CREATE VIEW v_transaction_qr_status AS
-SELECT 
-    t.transaction_id,
-    t.receipt_no,
-    t.qr_enabled,
-    t.qr_token,
-    tv.jwt_token_id,
-    tv.expires_at,
-    tv.is_revoked,
-    tv.verification_count,
-    tv.last_verified_at,
-    CASE 
-        WHEN tv.jwt_token_id IS NULL THEN 'No Token'
-        WHEN tv.is_revoked = TRUE THEN 'Revoked'
-        WHEN tv.expires_at < CURRENT_TIMESTAMP THEN 'Expired'
-        ELSE 'Active'
-    END AS token_status
-FROM tbl_transaction t
-LEFT JOIN tbl_transaction_verification tv ON t.transaction_id = tv.transaction_id
-  AND tv.is_revoked = FALSE 
-  AND tv.expires_at = (
-    SELECT MAX(expires_at) 
-    FROM tbl_transaction_verification tv2 
-    WHERE tv2.transaction_id = t.transaction_id 
-    AND tv2.is_revoked = FALSE
-  )
-ORDER BY t.transaction_id DESC;
-
--- Views for better data access
-CREATE VIEW vw_term_payment_overview AS
-SELECT 
-    tp.payment_id,
-    tp.user_id,
-    tp.organization_id,
-    tp.organization_version_id,
-    tp.term_id,
-    CONCAT(u.f_name, ' ', u.l_name) as member_name,
-    u.email as member_email,
-    o.name as organization_name,
-    at.term_name,
-    at.start_date as term_start,
-    at.end_date as term_end,
-    t.amount as payment_amount,
-    tp.payment_status,
-    pt.label as payment_method,
-    t.receipt_no as transaction_reference,
-    tp.transaction_id,
-    t.receipt_no,
-    t.transaction_date,
-    t.proof_image as receipt_filename,
-    CONCAT('/app/organizations/', tp.organization_id, '/', tp.organization_version_id, '/transactions/', t.proof_image) as receipt_url,
-    tp.verified_by,
-    tp.verified_at,
-    tp.notes,
-    tp.created_at,
-    tp.updated_at
-FROM tbl_term_payments tp
-JOIN tbl_user u ON tp.user_id = u.user_id
-JOIN tbl_organization o ON tp.organization_id = o.organization_id
-JOIN tbl_academic_term at ON tp.term_id = at.term_id
-JOIN tbl_transaction t ON tp.transaction_id = t.transaction_id
-JOIN tbl_payment_type pt ON t.payment_type_id = pt.payment_type_id;
-
-
--- INDEXES
-
--- for reporting and performance
-CREATE INDEX idx_transaction_date ON tbl_transaction(transaction_date);
-CREATE INDEX idx_transaction_status ON tbl_transaction(status);
-CREATE INDEX idx_transaction_user ON tbl_transaction(user_id);
-CREATE INDEX idx_transaction_type ON tbl_transaction(transaction_type_id);
-CREATE INDEX idx_transaction_payment_type ON tbl_transaction(payment_type_id);
-CREATE INDEX idx_transaction_category ON tbl_transaction(category_id);
-CREATE INDEX idx_transaction_archived ON tbl_transaction(archived_at);
-
-CREATE INDEX idx_org_members_user ON tbl_organization_members(user_id);
-CREATE INDEX idx_event_program ON tbl_event_course(program_id);
-
-CREATE INDEX idx_org_members ON tbl_organization_members(organization_id, user_id);
-CREATE INDEX idx_committee_org ON tbl_committee(organization_id);
-CREATE INDEX idx_committee_members_user ON tbl_committee_members(user_id);
-
--- Recommended index for lookups from version -> cycle
-CREATE INDEX idx_rc_org_version ON tbl_renewal_cycle (org_version_id);
-
-CREATE INDEX idx_active_end_datetime 
-ON tbl_application_period(is_active, end_date, end_time);
-CREATE INDEX idx_conversation_global ON tbl_ai_conversation(owner_id, is_global, updated_at DESC);
-CREATE INDEX idx_message_created ON tbl_ai_message(conversation_id, created_at ASC);
-
--- SAMPLE DATAS
-INSERT INTO tbl_role(role_name, is_approver, hierarchy_order)
-VALUES("Student",0,null), 
-("Adviser",1,1),
-("Program Chair",1,2),
-("SDAO",1,5),
-("Dean",1,3),
-("Academic Director",1,4);
-
--- Create system user for automated logging
-INSERT INTO tbl_user (user_id, f_name, l_name, email, role_id, status, created_at)
-VALUES (
-    'sys-system',
-    'System',
-    'User',
-    'system@nu-dasma.edu.ph',
-    (SELECT role_id FROM tbl_role WHERE LOWER(role_name) = 'sdao' LIMIT 1),
-    'Active',
-    CURRENT_TIMESTAMP
-);
-
--- Create system user for QR verification operations
-INSERT INTO tbl_user (user_id, f_name, l_name, email, role_id, status, created_at)
-VALUES (
-    'SYSTEM_QR_GENERATOR',
-    'System',
-    'QR Generator',
-    'system-qr@nu-dasma.edu.ph',
-    (SELECT role_id FROM tbl_role WHERE LOWER(role_name) = 'sdao' LIMIT 1),
-    'Active',
-    CURRENT_TIMESTAMP
-);
-
-INSERT INTO tbl_permission(permission_name, scope)
-VALUES("CREATE_EVENT","Organization"),
-("UPDATE_EVENT","Organization"),
-("DELETE_EVENT","Organization"),
-("VIEW_EVENT","Organization"),
-("REGISTER_EVENT","Organization"),
-("APPLY_ORGANIZATION","Organization"),
-("APPROVE_ORGANIZATION","Approver"),
-("ARCHIVE_ORGANIZATION","SDAO"),
-("VIEW_ORGANIZATION","Global"),
-("MANAGE_ACCOUNT","SDAO"),
-("CREATE_COMMITTEE","Organization"),
-("UPDATE_COMMITTEE","Organization"),
-("DELETE_COMMITTEE","Organization"),
-("VIEW_COMMITTEE","Organization"),
-("MANAGE_REQUIREMENTS","SDAO"),
-("VIEW_APPLICATION","Approver"),
-("MANAGE_APPLICATIONS","SDAO"),
-("CREATE_EVALUATION","Organization"), 
-("UPDATE_EVALUATION","Organization"),
-("DELETE_EVALUATION","Organization"),
-("VIEW_EVALUATION","Organization"),
-("VIEW_LOGS","Global"),
-("WEB_ACCESS","Global"),
-("MANAGE_REGISTRATION","SDAO"),
-("SUBMIT_REQUIREMENTS","Global"),
-("MANAGE_PROGRAMS","SDAO"),
-("CREATE_SDAO_EVENT","SDAO"),
-("APPLY_NEW_ORGANIZATION","Global"),
-("APPLY_RENEWAL_ORGANIZATION","Organization"),
-("VIEW_TRANSACTIONS","Global"),
-("MANAGE_TRANSACTIONS","Organization"),
-("MANAGE_SDAO_EVENT","SDAO"),
-("MANAGE_COLLEGES","SDAO"),
-("SCAN_QR", "Organization"),
-("MANAGE_TERM_PAYMENTS", "Organization");
-
-INSERT INTO tbl_role_permission (role_id, permission_id) 
-VALUES
-(4,2),
-(4,3),
-(4,4),
-(4,7),
-(4,8),
-(4,9),
-(4,10),
-(4,11),
-(4,12),
-(4,13),
-(4,14),
-(4,15),
-(4,17),
-(4,19),
-(4,21),
-(4,22),
-(4,23),
-(4,24),
-(4,25),
-(4,26),
-(4,27),
-(4,30),
-(4,32),
-(4,33),
-(2,1),
-(2,6),
-(2,9),
-(2,14),
-(2,16),
-(2,17),
-(2,21),
-(2,22),
-(2,23),
-(2,28),
-(2,30),
-(2,31),
-(3,17),
-(4,17),
-(5,17),
-(6,17),
-(3,23),
-(5,23),
-(6,23),
-(3,9),
-(5,9),
-(6,9),
-(3,16),
-(5,16),
-(6,16),
-(3,4),
-(2,4),
-(5,4),
-(6,4);
-
-INSERT INTO tbl_college (name, abbreviation) VALUES 
-("School of Arts, Sciences, and Education", "SASE"),
-("School of Business, Management, and Accountancy", "SBMA"),
-("School of Engineering, Computing and Architecture", "SECA");
-
-INSERT INTO tbl_program (college_id, name, abbreviation) VALUES 
-(1,"Bachelor of Science in Physical Education", "BPEd"),
-(1,"Bachelor of Arts in Communication", "ABComm"),
-(1,"Bachelor of Science in Psychology", "BSPSY"),
-(2,"Bachelor of Science in Hospitality Management", "BSHM"),
-(2,"Bachelor of Science in Business Administration major in Human Resource Management", "BSBA-HRM"),
-(2,"Master of Management", "MM"),
-(2,"Bachelor of Science in Business Administration major in Financial Managemen", "BSBA-FinMgt"),
-(2,"Bachelor of Science in Business Administration major in Marketing Management", "BSBA-MktgMgt"),
-(2,"Bachelor of Science in Tourism Management", "BSTM"),
-(2,"Bachelor of Science in Accountancy", "BSAccountancy"),
-(2,"Bachelor of Science in Management Accounting", "BSMA"),
-(3,"Bachelor of Science in Computer Engineering", "BSCpE"),
-(3,"Bachelor of Science in Information Technology with a specialization in Mobile and Web Applications", "BSIT-MWA"),
-(3,"Bachelor of Science in Civil Engineering", "BSCE"),
-(3,"Bachelor of Science in Architecture", "BSArch"),
-(3,"Bachelor of Science in Computer Science with specialization in Machine Learning", "BSCS-ML");
-
-INSERT INTO tbl_user (user_id, f_name, l_name, email, program_id, role_id) VALUES
--- ('_ExbgMDtE-90mt0wLlA74VFYH5I1freBLw4NMY9RcBU', ' Geraldine', 'Aris', 'arisgc@students.nu-dasma.edu.ph', 1, 2),
-('6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0', 'Benson', 'Javier', 'javierbb@students.nu-dasma.edu.ph', NULL, 4),
-('cyQuRJT6GaT0Y89NFQua6nMhFJF6E-SAIk_rpryVY1k', ' Carl Roehl', 'Falcon', 'falconcs@students.nu-dasma.edu.ph', NULL, 6),
-('dumalagim@students.nu-dasma.edu.ph', 'Iver', 'Dumalag', 'dumalagim@students.nu-dasma.edu.ph', 1, 1),
-('LBmQ-WzvRhVmb55Ucidrc14aL39ae9Ei-7xfbOrPeEA', ' Samantha Joy', 'Madrunio', 'madruniosm@students.nu-dasma.edu.ph', 13, 2),
-('NqBfAZcMXHZF5g9ztwkQ1ykPgtNmZwYRcIPKKK40ROc', ' Alister Dylan Emmanuel', 'Realo', 'realoam@students.nu-dasma.edu.ph', 13, 1),
-('CyTLmjW4Edhvk2WvWFDNuWLYjW0WJETBPbY2HWk-ZqE', ' Loraine', 'Miraballes', 'miraballesl@students.nu-dasma.edu.ph', NULL, 1),
-('CY4e1GmCXysMRn8VYudhqDy7CDJ8xVidGO1v8RnRj1E', ' Shamiah M', 'Mendoza', 'mendozasm@students.nu-dasma.edu.ph', 13, 3);
-
-
--- INSERT INTO tbl_application_requirement (requirement_name, is_applicable_to, file_path, created_by) VALUES
--- ('Letter of Intent', 'new', 'requirement-1748793177547-Letter-of-Intent.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
--- ('Student Org Application Form', 'new', 'requirement-1748793205361-ACO-SA-F-002Student-Org-Application-Form.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
--- ('By Laws of the Organization', 'new', 'requirement-1748793242309-Constitution-and-ByLaws.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
--- ('List of Officers/Founders', 'new', 'requirement-1748793302932-List-of-Officers-and-Founders.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
--- ('Letter from the College Dean', 'new', 'requirement-1748793328989-Letter-from-the-College-Dean.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
--- ('List of Members', 'new', 'requirement-1748793346203-List-of-Members.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
--- ('Latest Certificate of Grades of Officers', 'new', 'requirement-1748793368006-Latest-Certificate-of-Grades-of-Officers.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
--- ('Biodata/CV of Officers', 'new', 'requirement-1748793390349-CV-of-Officers.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0'),
--- ('List of Proposed Projects with Proposed Budget for the AY', 'new', 'requirement-1748793408714-List-of-Proposed-Project-with-Proposed-Budget.pdf', '6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0');
-
-
-INSERT INTO tbl_executive_rank (rank_level, default_title, description) VALUES
-(1, 'President', 'Highest authority with full permissions'),
-(2, 'Vice President Internal', 'Handles internal organizational matters'),
-(3, 'Vice President External', 'Handles external partnerships and representation'),
-(4, 'Secretary', 'Administrative lead'),
-(5, 'Treasurer', 'Financial manager'),
-(6, 'Auditor', 'Responsible for auditing and financial oversight'),
-(7, 'Public Information Officer', 'Handles publicity and information dissemination'),
-(8, 'Officer', 'General executive member');
-
--- Insert evaluation question groups
-INSERT INTO tbl_evaluation_question_group (group_title, group_description, is_active)
-VALUES 
-('Activity: Meeting/Seminar/Conference/Workshop/Quiz Bee/Competition/Sport fest, etc.', 'Question about activities', TRUE),
-('About the Speaker/Resource person', 'Feedback about event speakers/presenters', TRUE),
-('Meals', 'Feedback about meals', TRUE),
-('Handouts', 'Feedback about handouts', TRUE),
-('Transportation', 'Feedback about transportation', TRUE),
-('Comments and Suggestions', 'Feedback about the whole event', TRUE);
-
--- Insert evaluation questions
-INSERT INTO tbl_evaluation_question (question_text, question_type, group_id, is_required)
-VALUES
-('Is the activity relevant/important to you?', 'likert_4', 1, TRUE),
-('Is the program relevant to the course/you’re in?', 'likert_4', 1, TRUE),
-('Were the objectives clear and communicated before the activity?', 'likert_4', 1, TRUE),
-('Were the objectives met by the activity?', 'likert_4', 1, TRUE),
-('Was the venue proper for this kind of activity?', 'likert_4', 1, TRUE),
-('Did the activity start and end on time?', 'likert_4', 1, TRUE),
-('Did the organizers maintain an orderly environment all throughout the activity?', 'likert_4', 1, TRUE),
-('Was the event/activity well-advertised/properly announce?', 'likert_4', 1, TRUE),
-('Would you recommend this activity to your classmates/friends?', 'likert_4', 1, TRUE),
-('Do you want an activity like this to happen more often?', 'likert_4', 1, TRUE),
-('Overall evaluation', 'likert_4', 1, TRUE),
-('Was the speaker well-prepared and knowledgeable on the topic?', 'likert_4', 2, TRUE),
-('Did the speaker use different and appropriate methods in delivering the topic?', 'likert_4', 2, TRUE),
-('Was the speaker able to connect with the audience and catch their attention?', 'likert_4', 2, TRUE),
-('Were the meals/snacks provided enough to fill you?', 'likert_4', 3, TRUE),
-('Did the meals/snacks have a pleasant taste?', 'likert_4', 3, TRUE),
-('Are the handouts provided useful?', 'likert_4', 4, TRUE),
-('Is the printing of the handouts clear?', 'likert_4', 4, TRUE),
-('Did you feel safe during the travel to the venue?', 'likert_4', 5, TRUE),
-('Did you feel that the transportation provided is in good running condition?', 'likert_4', 5, TRUE),
-('Did you feel safe with the driver’s skills?', 'likert_4', 5, TRUE),
-('What important knowledge or information did you gain from this activity?', 'textbox', 6, TRUE),
-('What did you like most about the activity?', 'textbox', 6, TRUE),
-('What did you like least about the activity?', 'textbox', 6, TRUE),
-('Any other comments/suggestions for further improvement the activity?', 'textbox', 6, TRUE);
-
-
-INSERT INTO tbl_rank_permission(rank_id, permission_id) VALUES
-(1,1),
-(1,9),
-(1,16),
-(1,11),
-(1,12),
-(1,13),
-(1,14),
-(1,23),
-(1,4),
-(1,24),
-(1,25),
-(1,17),
-(1,19),
-(1,20),
-(1,21),
-(1,22),
-(1,29),
-(1,31),
-(1,34),
-(1,35);
-
--- Insert default transaction types
-INSERT INTO tbl_transaction_type (code, label) VALUES
-('INCOME', 'Income'),
-('EXPENSE', 'Expense');
-
--- Insert default payment types
-INSERT INTO tbl_payment_type (code, label, method_group) VALUES
-('CASH', 'Cash', 'physical'),
-('BANK', 'Bank Transfer', 'electronic'),
-('GCASH', 'GCash', 'eWallet');
-
--- Insert default financial categories
-INSERT INTO tbl_financial_category (code, label, kind, active) VALUES
-('MEMBERSHIP', 'Membership Fees', 'INCOME', TRUE),
-('EVENT_FEE', 'Event Fee', 'INCOME', TRUE),
-('DONATION', 'Donation', 'INCOME', TRUE),
-('SPONSORSHIP', 'Sponsorship', 'INCOME', TRUE),
-('OFFICE_SUPPLIES', 'Office Supplies', 'EXPENSE', TRUE),
-('VENUE_RENTAL', 'Venue Rental', 'EXPENSE', TRUE);
-
--- Link categories to transaction types
-INSERT INTO tbl_transaction_type_category (transaction_type_id, category_id)
-SELECT tt.transaction_type_id, fc.category_id
-FROM tbl_transaction_type tt, tbl_financial_category fc
-WHERE (tt.code = 'INCOME' AND fc.kind = 'INCOME')
-   OR (tt.code = 'EXPENSE' AND fc.kind = 'EXPENSE');
-
-   
-
 DELIMITER $$
 DROP PROCEDURE IF EXISTS populate_all_demo $$
 
@@ -20527,41 +21028,41 @@ ON DUPLICATE KEY UPDATE user_id=user_id;
 
 /* 2) Organization versions */
 INSERT INTO tbl_organization_version (name, status, created_by)
-VALUES ('Tech Innovators Society AY2025', 'Approved', @sdao);
+VALUES ('CS Tech Innovators Society AY2025', 'Approved', @sdao);
 SET ov1 = LAST_INSERT_ID();
 
 INSERT INTO tbl_organization_version (name, status, created_by)
-VALUES ('Business Leaders Guild AY2025', 'Approved', @sdao);
+VALUES ('BSIT Web Development Club AY2025', 'Approved', @sdao);
 SET ov2 = LAST_INSERT_ID();
 
 INSERT INTO tbl_organization_version (name, status, created_by)
-VALUES ('Arts & Culture Circle AY2025', 'Approved', @sdao);
+VALUES ('CS AI & Machine Learning Circle AY2025', 'Approved', @sdao);
 SET ov3 = LAST_INSERT_ID();
 
 INSERT INTO tbl_organization_version (name, status, created_by)
-VALUES ('Green Earth Advocates AY2025', 'Approved', @sdao);
+VALUES ('BSIT Mobile App Developers AY2025', 'Approved', @sdao);
 SET ov4 = LAST_INSERT_ID();
 
 /* 3) Organizations */
 INSERT INTO tbl_organization (adviser_id, current_org_version_id, name, description, base_program_id, logo, status, membership_fee_type, category, membership_fee_amount, is_recruiting, is_open_to_all_courses, archived_at, archived_by, archived_reason)
-VALUES ('ADV001', ov1, 'Tech Innovators Society', 'Organization focused on technology innovation and hackathons', 13, NULL, 'Approved', 'Free', 'Co-Curricular Organization', NULL, TRUE, TRUE, NULL, NULL, NULL);
+VALUES ('adviser1@nu-dasma.edu.ph', ov1, 'CS Tech Innovators Society', 'Computer Science organization focused on technology innovation and hackathons', 11, NULL, 'Approved', 'Free', 'Co-Curricular Organization', NULL, TRUE, FALSE, NULL, NULL, NULL);
 SET org1 = LAST_INSERT_ID();
-UPDATE tbl_organization_version SET organization_id=org1, name='Tech Innovators Society' WHERE org_version_id=ov1;
+UPDATE tbl_organization_version SET organization_id=org1, name='CS Tech Innovators Society', base_program_id=11 WHERE org_version_id=ov1;
 
 INSERT INTO tbl_organization (adviser_id, current_org_version_id, name, description, base_program_id, logo, status, membership_fee_type, category, membership_fee_amount, is_recruiting, is_open_to_all_courses, archived_at, archived_by, archived_reason)
-VALUES ('ADV002', ov2, 'Business Leaders Guild', 'Leadership and business case org', 8, NULL, 'Approved', 'Free', 'Co-Curricular Organization', NULL, TRUE, TRUE, NULL, NULL, NULL);
+VALUES ('CyTLmjW4Edhvk2WvWFDNuWLYjW0WJETBPbY2HWk-ZqE', ov2, 'BSIT Web Development Club', 'BSIT organization for web development and modern web technologies', 13, NULL, 'Approved', 'Free', 'Co-Curricular Organization', NULL, TRUE, FALSE, NULL, NULL, NULL);
 SET org2 = LAST_INSERT_ID();
-UPDATE tbl_organization_version SET organization_id=org2, name='Business Leaders Guild' WHERE org_version_id=ov2;
+UPDATE tbl_organization_version SET organization_id=org2, name='BSIT Web Development Club', base_program_id=13 WHERE org_version_id=ov2;
 
 INSERT INTO tbl_organization (adviser_id, current_org_version_id, name, description, base_program_id, logo, status, membership_fee_type, category, membership_fee_amount, is_recruiting, is_open_to_all_courses, archived_at, archived_by, archived_reason)
-VALUES ('ADV003', ov3, 'Arts & Culture Circle', 'Fosters arts, culture, and performances', 1, NULL, 'Approved', 'Free', 'Co-Curricular Organization', NULL, TRUE, TRUE, NULL, NULL, NULL);
+VALUES ('adviser2@nu-dasma.edu.ph', ov3, 'CS AI & Machine Learning Circle', 'Computer Science organization focused on AI and ML research and projects', 11, NULL, 'Approved', 'Free', 'Co-Curricular Organization', NULL, TRUE, FALSE, NULL, NULL, NULL);
 SET org3 = LAST_INSERT_ID();
-UPDATE tbl_organization_version SET organization_id=org3, name='Arts & Culture Circle' WHERE org_version_id=ov3;
+UPDATE tbl_organization_version SET organization_id=org3, name='CS AI & Machine Learning Circle', base_program_id=11 WHERE org_version_id=ov3;
 
 INSERT INTO tbl_organization (adviser_id, current_org_version_id, name, description, base_program_id, logo, status, membership_fee_type, category, membership_fee_amount, is_recruiting, is_open_to_all_courses, archived_at, archived_by, archived_reason)
-VALUES ('ADV004', ov4, 'Green Earth Advocates', 'Environmental sustainability and green initiatives', 11, NULL, 'Approved', 'Free', 'Co-Curricular Organization', NULL, TRUE, TRUE, NULL, NULL, NULL);
+VALUES ('adviser3@nu-dasma.edu.ph', ov4, 'BSIT Mobile App Developers', 'BSIT organization for mobile application development and innovation', 13, NULL, 'Approved', 'Free', 'Co-Curricular Organization', NULL, TRUE, FALSE, NULL, NULL, NULL);
 SET org4 = LAST_INSERT_ID();
-UPDATE tbl_organization_version SET organization_id=org4, name='Green Earth Advocates' WHERE org_version_id=ov4;
+UPDATE tbl_organization_version SET organization_id=org4, name='BSIT Mobile App Developers', base_program_id=13 WHERE org_version_id=ov4;
 
 /* 4) Renewal cycles */
 INSERT INTO tbl_renewal_cycle (organization_id, cycle_number, start_date, president_id, org_version_id, created_at)

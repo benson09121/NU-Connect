@@ -216,6 +216,5 @@ module.exports = {
     subscribeToChannel,
     unsubscribeFromChannel,
     publishToChannel,
-    publishOrgHub,
-    getOrgHubChannel
+    publishOrgHub
 };
