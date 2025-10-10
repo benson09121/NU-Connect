@@ -28,9 +28,9 @@ async function getAccounts(req, res) {
 }
 
 async function addAccount(req, res) {
-  const { email, role, program, sdaoRank, sectionId } = req.body;
+  const { email, role, program } = req.body;
   try {
-    await accountModel.addAccount(email, role, program, req.user.email, sdaoRank, sectionId);
+    await accountModel.addAccount(email, role, program, req.user.email);
 
     // Broadcast full snapshot after mutation
     const allAccounts = await accountModel.getAccounts();
@@ -83,7 +83,7 @@ async function addAccount(req, res) {
 }
 
 async function updateAccount(req, res) {
-  const { user_id, role, program, status, sdaoRank } = req.body;
+  const { user_id, role, program, status } = req.body;
   try {
     // Normalize program value - treat empty strings as null
     const normalizedProgram =
@@ -94,8 +94,7 @@ async function updateAccount(req, res) {
       role,
       normalizedProgram,
       status,
-      req.user.email,
-      sdaoRank
+      req.user.email
     );
 
     const allAccounts = await accountModel.getAccounts();
@@ -586,19 +585,6 @@ async function manuallyActivateUser(req, res) {
   }
 }
 
-async function getAvailableSdaoRanks(req, res) {
-  const { excludeUserId } = req.query;
-  try {
-    const availableRanks = await accountModel.getAvailableSdaoRanks(excludeUserId);
-    res.json({ availableRanks });
-  } catch (error) {
-    logger.error('Error fetching available SDAO ranks:', error);
-    res.status(500).json({
-      error: error.message || 'Failed to fetch available SDAO ranks',
-    });
-  }
-}
-
 module.exports = {
   getAccounts,
   addAccount,
@@ -607,7 +593,6 @@ module.exports = {
   unarchiveAccount,
   getPrograms,
   getRoles,
-  getAvailableSdaoRanks,
   addUserApplication,
   getAllPendingUsersAndApplications,
   approveUserApplication,

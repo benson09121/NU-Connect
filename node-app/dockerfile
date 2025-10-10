@@ -97,7 +97,7 @@ RUN npx playwright install-deps
 COPY . .
 
 # Ensure Facebook Scraper directories exist and copy auth files if present
-RUN mkdir -p /app/.auth /app/storage/request_queues /app/storage/datasets /app/storage/key_value_stores
+RUN mkdir -p /app/.auth /app/storage
 
 # Set proper permissions for Facebook Scraper directories
 # The .auth folder and its contents should be copied via COPY . . above
@@ -112,11 +112,7 @@ RUN if [ -d /app/.auth ] && [ "$(ls -A /app/.auth)" ]; then \
         chown -R node:node /app/.auth; \
         chmod 700 /app/.auth; \
     fi && \
-    chown -R node:node /app/storage && \
-    chmod -R 755 /app/storage
-
-# Set Crawlee storage environment variable
-ENV CRAWLEE_STORAGE_DIR=/app/storage
+    chown -R node:node /app/storage
 
 EXPOSE 3000
 CMD ["npm", "run", "dev"]

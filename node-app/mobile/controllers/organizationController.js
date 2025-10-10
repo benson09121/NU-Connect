@@ -227,50 +227,63 @@ async function submitOrganizationApplication(req, res) {
 
 async function leaveOrganization(req, res) {
     try {
-        console.log('📱 [MOBILE] Leave organization request received');
-        console.log('Request body:', req.body);
-        
         const user = await userModel.getUser(req.user.email);
+        
+        // 🔧 FIX: Accept data from request body instead of query params
         const { organization_id, organization_version_id, leave_reason } = req.body;
         
         // Validate required fields
-        if (!organization_id || !organization_version_id || !leave_reason) {
-            console.log('❌ Missing required fields');
+        if (!organization_id || !organization_version_id) {
             return res.status(400).json({ 
-                success: false,
-                message: 'Missing required fields: organization_id, organization_version_id, and leave_reason are required' 
+                message: 'organization_id and organization_version_id are required' 
             });
         }
         
-        // Validate leave_reason length
-        if (leave_reason.trim().length < 10) {
-            console.log('❌ Leave reason too short');
-            return res.status(400).json({ 
-                success: false,
-                message: 'Leave reason must be at least 10 characters long' 
+        const result = await organizationModel.leaveOrganization(
+            organization_id, 
+            organization_version_id, 
+            user.user_id, 
+            leave_reason || null
+        );
+        
+        // 🔧 FIX: Handle duplicate application response
+        if (result && result.length > 0 && result[0].operation_status === 'DUPLICATE') {
+            return res.status(409).json({ 
+                message: result[0].message || 'You already have a pending leave application',
+                existingApplication: result[0]
             });
         }
         
-        console.log(`Processing leave request for user ${user.user_id} from org ${organization_id}`);
-        const result = await organizationModel.leaveOrganization(organization_id, organization_version_id, user.user_id, leave_reason);
-        
-        console.log('Leave application created:', result);
+        // Publish to SSE channel
         publishToChannel(`organization_leaveApplications_${organization_id}_${organization_version_id}`, {
             operation: 'CREATE',
             data: Array.isArray(result) ? result : [result],
             timestamp: new Date()
         });
-        console.log(`📱 [MOBILE] 📡 Leave Application Published to channel - 1 item`);
         
+        console.log(`📱 [MOBILE] 📡 Leave Application Published to channel - 1 item`);
         res.status(200).json({ 
-            success: true,
-            message: "Leave application submitted successfully"
+            message: "Leave application submitted successfully",
+            application: result
         });
     } catch (error) {
-        console.error('❌ Error leaving organization:', error);
+        console.error('Error leaving organization:', error);
+        
+        // 🔧 FIX: Better error messages
+        if (error.message && error.message.includes('not an active member')) {
+            return res.status(403).json({ 
+                message: 'You are not an active member of this organization' 
+            });
+        }
+        
+        if (error.message && error.message.includes('renewal cycle')) {
+            return res.status(500).json({ 
+                message: 'Organization configuration error. Please contact support.' 
+            });
+        }
+        
         res.status(500).json({ 
-            success: false,
-            message: error.message 
+            message: error.message || 'Failed to submit leave application' 
         });
     }
 }

@@ -7,47 +7,9 @@ const fileUpload = require('express-fileupload');
 const { redisClient } = require('./config/redis');
 // const { scanner } = require('./config/clamav');
 const cors = require('cors');
-const helmet = require('helmet');
 
 const app = express();
 const server = http.createServer(app);
-
-// ====================================
-// 🔒 SECURITY HEADERS (OWASP Fixes)
-// ====================================
-app.use(helmet({
-    contentSecurityPolicy: {
-        directives: {
-            defaultSrc: ["'self'"],
-            scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
-            styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
-            fontSrc: ["'self'", "https://fonts.gstatic.com"],
-            imgSrc: ["'self'", "data:", "https:", "blob:"],
-            connectSrc: ["'self'", "http://localhost:5173", "http://localhost:3000", "http://localhost:8080", "https://admin.nuconnect.net"],
-            frameSrc: ["'self'"],
-            objectSrc: ["'none'"],
-            upgradeInsecureRequests: process.env.NODE_ENV === 'production' ? [] : null
-        }
-    },
-    strictTransportSecurity: {
-        maxAge: 31536000,
-        includeSubDomains: true,
-        preload: true
-    },
-    frameguard: {
-        action: 'sameorigin'
-    },
-    noSniff: true,
-    xssFilter: true,
-    referrerPolicy: {
-        policy: 'strict-origin-when-cross-origin'
-    }
-}));
-
-// ====================================
-// 🛡️ RATE LIMITING - DISABLED FOR DEVELOPMENT
-// ====================================
-// Rate limiting removed to allow unlimited requests during development
 
 // Middleware
 app.use(express.json());
@@ -92,38 +54,20 @@ app.use((req, res, next) => {
     next();
 });
 
-// ====================================
-// 🔒 CORS Configuration (Secure)
-// ====================================
+// Temporarily allow ALL headers for debugging - proper way
 app.use(cors({
-    origin: function (origin, callback) {
-        if (!origin) return callback(null, true);
-        
-        const allowedOrigins = process.env.NODE_ENV === 'production' 
-            ? [
-                'https://admin.nuconnect.net',
-                'http://localhost:8080'  // nginx inside Docker
-              ]
-            : [
-                'http://localhost:5173',
-                'http://localhost:3000',
-                'http://localhost:8080'
-              ];
-        
-        if (allowedOrigins.indexOf(origin) !== -1) {
-            callback(null, true);
-        } else {
-            console.warn(`🚫 [CORS] Blocked origin: ${origin}`);
-            callback(new Error('Not allowed by CORS'));
-        }
-    },
+    origin: "http://localhost:5173", 
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
+    allowedHeaders: function (req, callback) {
+        // Allow any headers that are requested
+        const requestedHeaders = req.headers['access-control-request-headers'];
+        console.log('� [CORS] Dynamically allowing headers:', requestedHeaders);
+        callback(null, requestedHeaders ? requestedHeaders.split(',').map(h => h.trim()) : []);
+    },
     credentials: true,
     optionsSuccessStatus: 200,
     preflightContinue: false,
-    maxAge: 86400,
-    
+    maxAge: 86400
 }));
 
 
@@ -147,7 +91,6 @@ const eventsRouter = require('./web/routes/events');
 const logsRouter = require('./web/routes/logs');
 const programsRoutesWeb = require('./web/routes/programs');
 const collegesRoutesWeb = require('./web/routes/colleges');
-const sectionsRoutesWeb = require('./web/routes/sections');
 const sse = require('./web/routes/sse');
 const emailSuggestionsRoutes = require('./web/routes/emailSuggestions');
 const notificationsRoutes = require('./web/routes/notifications');
@@ -162,10 +105,9 @@ const filesRoutes = require('./web/routes/files');
 
 // Routes on Mobile
 app.use('/', indexRoutes);
-app.use('/api/mobile', authRoutes); // Rate limiter removed
+app.use('/api/mobile', authRoutes);
 app.use('/api/mobile', facebookRoutes);
 app.use('/api/facebook-scraper', facebookScraperRoutes);
-app.use('/api/mobile/facebook-scraper', facebookScraperRoutes); // Add mobile-specific route
 app.use('/api/mobile', eventRoutes);
 app.use('/api/mobile', organizationRoutes);
 app.use('/api/mobile', notification);
@@ -174,7 +116,7 @@ app.use('/api/mobile', termPaymentsMobile);
 // PUBLIC ROUTES MUST BE FIRST to avoid middleware conflicts
 app.use('/api/web/public', publicRoutes);
 
-app.use('/api/web', authRoutesWeb); // Rate limiter removed
+app.use('/api/web', authRoutesWeb);
 app.use('/api/web', permissionRoutesWeb);
 app.use('/api/web', manageAccountsRoutesWeb);
 app.use('/api/web', RequirementsRoutesWeb);
@@ -183,7 +125,6 @@ app.use('/api/web', eventsRouter);
 app.use('/api/web', logsRouter);
 app.use('/api/web', programsRoutesWeb);
 app.use('/api/web', collegesRoutesWeb);
-app.use('/api/web', sectionsRoutesWeb);
 app.use('/api/web', sse);
 app.use('/api/web', emailSuggestionsRoutes);
 app.use('/api/web', notificationsRoutes);

@@ -109,13 +109,17 @@ class TermPaymentController {
             res.status(201).json({
                 success: true,
                 message: 'Term created successfully',
-                data: newTerm 
+                data: newTerm
             });
         } catch (error) {
             console.error('Error in createTerm:', error);
-            res.status(500).json({
+            
+            // Send appropriate status code based on error type
+            const statusCode = error.message.includes('already exists') ? 409 : 500;
+            
+            res.status(statusCode).json({
                 success: false,
-                message: 'Failed to create term',
+                message: error.message || 'Failed to create term',
                 error: error.message
             });
         }

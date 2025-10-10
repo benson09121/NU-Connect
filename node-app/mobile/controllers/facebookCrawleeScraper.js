@@ -7,12 +7,12 @@ const { redisClient } = require('../../config/redis');
 
 // Default page configuration
 const DEFAULT_PAGE = {
-    id: '104908055228742',
-    url: 'https://www.facebook.com/SDAONUDasma',
-    name: 'SDAO NU Dasma',
+    id: '113338964475892',
+    url: 'https://m.facebook.com/nudasma.CompSoc', // Changed to mobile version - easier to scrape
+    name: 'NUDASMA CompSoc',
     fallback_urls: [
-        'https://facebook.com/SDAONUDasma',
-        'https://www.facebook.com/SDAONUDasma'  // Use web version only
+        'https://www.facebook.com/nudasma.CompSoc',
+        'https://facebook.com/nudasma.CompSoc'
     ]
 };
 
@@ -20,6 +20,11 @@ const DEFAULT_PAGE = {
 const AUTH_DIR = path.join(__dirname, '../../.auth');
 const FB_COOKIES_FILE = path.join(AUTH_DIR, 'facebook-cookies.json');
 const FB_SESSION_FILE = path.join(AUTH_DIR, 'facebook-session.json');
+
+// Tuning knobs for resource utilization
+const MAX_CRAWLEE_CONCURRENCY = parseInt(process.env.FB_CRAWLEE_MAX_CONCURRENCY || '2', 10);
+const QUICK_CHECK_CONCURRENCY = parseInt(process.env.FB_CRAWLEE_QUICK_CONCURRENCY || '2', 10);
+const MAX_REQUESTS_PER_CRAWL = parseInt(process.env.FB_CRAWLEE_MAX_REQUESTS || '100', 10);
 
 class FacebookCrawleeScraper {
     constructor() {
@@ -70,44 +75,11 @@ class FacebookCrawleeScraper {
             const cookiesExist = await fs.access(FB_COOKIES_FILE).then(() => true).catch(() => false);
             
             if (cookiesExist) {
-                console.log(`📂 Loading cookies from ${FB_COOKIES_FILE}...`);
                 const cookiesData = await fs.readFile(FB_COOKIES_FILE, 'utf-8');
+                const rawCookies = JSON.parse(cookiesData);
                 
-                let rawCookies;
-                try {
-                    rawCookies = JSON.parse(cookiesData);
-                } catch (parseError) {
-                    console.error(`❌ Failed to parse cookies JSON: ${parseError.message}`);
-                    console.log('ℹ️  Scraper will work without authentication');
-                    this.authenticated = false;
-                    return;
-                }
-
-                if (!Array.isArray(rawCookies)) {
-                    console.error('❌ Cookies file must contain an array of cookies');
-                    console.log('ℹ️  Scraper will work without authentication');
-                    this.authenticated = false;
-                    return;
-                }
-
-                if (rawCookies.length === 0) {
-                    console.warn('⚠️  Cookies file is empty');
-                    console.log('ℹ️  Scraper will work without authentication');
-                    this.authenticated = false;
-                    return;
-                }
-
-                // Sanitize cookies to ensure Playwright compatibility
-                this.cookies = this.sanitizeCookies(rawCookies);
-                
-                if (this.cookies.length === 0) {
-                    console.warn('⚠️  All cookies were filtered out during sanitization');
-                    console.log('ℹ️  Scraper will work without authentication');
-                    this.authenticated = false;
-                    return;
-                }
-
-                console.log(`✅ Loaded and sanitized ${this.cookies.length} cookies`);
+                // Normalize cookies for Playwright compatibility
+                this.cookies = this.normalizeCookiesForPlaywright(rawCookies);
 
                 // Try to load session file (optional, for metadata)
                 const sessionExist = await fs.access(FB_SESSION_FILE).then(() => true).catch(() => false);
@@ -127,7 +99,7 @@ class FacebookCrawleeScraper {
                 this.authenticated = true;
                 console.log('✅ Facebook authentication loaded successfully');
                 console.log(`👤 Logged in as: ${this.sessionData.name || 'Facebook User'}`);
-                console.log(`🍪 Cookies loaded: ${this.cookies.length} cookies found`);
+                console.log(`🍪 Cookies loaded: ${this.cookies.length} cookies normalized for Playwright`);
             } else {
                 console.log('ℹ️  No Facebook authentication found');
                 console.log('📖 To enable authenticated scraping, add facebook-cookies.json to .auth folder');
@@ -141,68 +113,38 @@ class FacebookCrawleeScraper {
         }
     }
 
-    // Sanitize cookies for Playwright compatibility
-    sanitizeCookies(cookies) {
-        console.log(`🔍 Sanitizing ${cookies.length} cookies...`);
-        
-        return cookies.map((cookie, index) => {
-            const sanitized = { ...cookie };
-
-            // Log original cookie sameSite value  
-            const originalSameSite = cookie.sameSite || '(missing)';
-            console.log(`  Cookie ${index + 1}: "${cookie.name}" - Original sameSite: "${originalSameSite}"`);
-
-            // Fix sameSite attribute (must be "Strict", "Lax", or "None")
-            if (sanitized.sameSite) {
-                const sameSiteLower = sanitized.sameSite.toLowerCase();
-                if (sameSiteLower === 'strict') {
-                    sanitized.sameSite = 'Strict';
-                } else if (sameSiteLower === 'lax') {
-                    sanitized.sameSite = 'Lax';
-                } else if (sameSiteLower === 'none') {
-                    sanitized.sameSite = 'None';
-                } else if (sameSiteLower === 'no_restriction') {
-                    sanitized.sameSite = 'None'; // Chrome exports "no_restriction"
-                } else {
-                    console.warn(`  ⚠️  Invalid sameSite "${originalSameSite}" for "${cookie.name}", defaulting to Lax`);
-                    sanitized.sameSite = 'Lax'; // Default fallback
+    // Normalize cookies from browser export format to Playwright format
+    normalizeCookiesForPlaywright(cookies) {
+        return cookies.map(cookie => {
+            // Map sameSite values to Playwright's expected format
+            let sameSite = 'Lax'; // Default
+            
+            if (cookie.sameSite) {
+                const sameSiteValue = cookie.sameSite.toLowerCase();
+                if (sameSiteValue === 'strict') {
+                    sameSite = 'Strict';
+                } else if (sameSiteValue === 'lax') {
+                    sameSite = 'Lax';
+                } else if (sameSiteValue === 'none' || sameSiteValue === 'no_restriction') {
+                    sameSite = 'None';
                 }
-            } else {
-                console.warn(`  ⚠️  Missing sameSite for "${cookie.name}", defaulting to Lax`);
-                sanitized.sameSite = 'Lax'; // Default if missing
             }
 
-            console.log(`  Cookie ${index + 1}: "${cookie.name}" - Sanitized sameSite: "${sanitized.sameSite}"`);
+            // Convert expirationDate (unix timestamp) to expires (unix timestamp in seconds)
+            const expires = cookie.expirationDate 
+                ? Math.floor(cookie.expirationDate) 
+                : undefined;
 
-            // Ensure domain is properly formatted
-            if (sanitized.domain && !sanitized.domain.startsWith('.') && sanitized.domain.includes('.')) {
-                // Add leading dot for subdomain cookies
-                sanitized.domain = '.' + sanitized.domain;
-            }
-
-            // Ensure path exists
-            if (!sanitized.path) {
-                sanitized.path = '/';
-            }
-
-            // Ensure expires is a number (Unix timestamp)
-            if (sanitized.expires && typeof sanitized.expires === 'string') {
-                sanitized.expires = parseInt(sanitized.expires, 10);
-            }
-
-            // If sameSite is None, secure must be true
-            if (sanitized.sameSite === 'None') {
-                sanitized.secure = true;
-            }
-
-            return sanitized;
-        }).filter(cookie => {
-            // Remove cookies with invalid names or domains
-            if (!cookie.name || !cookie.domain) {
-                console.warn(`⚠️  Skipping invalid cookie: ${JSON.stringify(cookie)}`);
-                return false;
-            }
-            return true;
+            return {
+                name: cookie.name,
+                value: cookie.value,
+                domain: cookie.domain,
+                path: cookie.path || '/',
+                expires: expires,
+                httpOnly: cookie.httpOnly || false,
+                secure: cookie.secure || false,
+                sameSite: sameSite
+            };
         });
     }
 
@@ -293,9 +235,7 @@ class FacebookCrawleeScraper {
     // Quick check for latest posts (fast)
     async quickCheckLatestPosts(pageUrl, maxPosts = 3) {
         const posts = [];
-
-        // CRITICAL FIX: Capture 'this' context before requestHandler
-        const self = this;
+        const self = this; // Store reference for use in requestHandler
 
         try {
             const crawler = new PlaywrightCrawler({
@@ -312,6 +252,7 @@ class FacebookCrawleeScraper {
                 },
                 browserPoolOptions: {
                     useFingerprints: true, // Anti-detection
+                    maxOpenPagesPerBrowser: Math.max(1, Math.min(4, QUICK_CHECK_CONCURRENCY)),
                     fingerprintOptions: {
                         fingerprintGeneratorOptions: {
                             browsers: ['chrome'],
@@ -322,25 +263,22 @@ class FacebookCrawleeScraper {
                 },
                 maxRequestRetries: 2,
                 requestHandlerTimeoutSecs: 30,
+                maxConcurrency: QUICK_CHECK_CONCURRENCY,
+                maxRequestsPerCrawl: Math.min(maxPosts, MAX_REQUESTS_PER_CRAWL),
                 
                 async requestHandler({ page, request, log }) {
                     log.info(`Quick checking ${request.url}`);
 
-                    // Load authentication if available (use 'self' instead of 'this')
+                    // Load authentication if available
                     if (self.authenticated && self.cookies) {
-                        try {
-                            await page.context().addCookies(self.cookies);
-                            log.info('🔐 Using authenticated session');
-                        } catch (cookieError) {
-                            log.warn(`⚠️  Failed to add cookies: ${cookieError.message}`);
-                            log.warn('   Continuing without authentication...');
-                        }
+                        await page.context().addCookies(self.cookies);
+                        log.info('🔐 Using authenticated session');
                     }
 
                     // Navigate to page
                     await page.goto(request.url, { waitUntil: 'domcontentloaded', timeout: 20000 });
 
-                    // Close popups (use 'self' instead of 'this')
+                    // Close popups
                     await self.closePopupsAndModals(page);
 
                     // Extract first few posts
@@ -374,7 +312,12 @@ class FacebookCrawleeScraper {
                 }
             });
 
-            await crawler.run([pageUrl]);
+            if (!pageUrl) {
+                console.error('❌ Quick check aborted: pageUrl is undefined or empty');
+                return posts;
+            }
+
+            await crawler.run([{ url: pageUrl }]);
             return posts;
 
         } catch (error) {
@@ -406,25 +349,22 @@ class FacebookCrawleeScraper {
         // Prevent concurrent scraping
         if (this.isScrapingInProgress) {
             console.log('⚠️  Scraping already in progress, queuing request...');
-            const cached = await this.getCachedData(pageId);
-            console.log(`🔍 DEBUG: Returning cached (concurrent block): ${cached ? cached.totalPosts : 0} posts`);
-            return cached;
+            return await this.getCachedData(pageId);
         }
 
         this.isScrapingInProgress = true;
-        console.log(`🔍 DEBUG: Set isScrapingInProgress = true, maxPosts=${maxPosts}`);
 
         try {
+            if (!pageUrl) {
+                throw new Error('Missing pageUrl for Crawlee scrape');
+            }
+
             console.log(`🚀 Starting Crawlee scrape for page ${pageId} (${scrapeId})`);
-            console.log(`� Page URL: ${pageUrl}`);
-            console.log(`�🔐 Authentication: ${this.authenticated ? 'Enabled' : 'Disabled'}`);
+            console.log(`🔐 Authentication: ${this.authenticated ? 'Enabled' : 'Disabled'}`);
 
             const posts = [];
-            console.log(`🔍 DEBUG: posts array created, length=${posts.length}`);
             let postCount = 0;
-
-            // CRITICAL FIX: Capture 'this' context before requestHandler
-            const self = this;
+            const self = this; // Store reference for use in requestHandler
 
             const crawler = new PlaywrightCrawler({
                 launchContext: {
@@ -443,6 +383,7 @@ class FacebookCrawleeScraper {
                 // Crawlee's built-in anti-detection
                 browserPoolOptions: {
                     useFingerprints: true, // Randomize browser fingerprints
+                    maxOpenPagesPerBrowser: Math.max(1, Math.min(4, MAX_CRAWLEE_CONCURRENCY)),
                     fingerprintOptions: {
                         fingerprintGeneratorOptions: {
                             browsers: [
@@ -457,20 +398,17 @@ class FacebookCrawleeScraper {
                 },
                 maxRequestRetries: 3,
                 requestHandlerTimeoutSecs: timeout / 1000,
-                maxConcurrency: 1, // One page at a time for stability
+                maxConcurrency: MAX_CRAWLEE_CONCURRENCY,
+                maxRequestsPerCrawl: Math.min(maxPosts, MAX_REQUESTS_PER_CRAWL),
+                minConcurrency: 1,
                 
                 async requestHandler({ page, request, log }) {
                     log.info(`Scraping ${request.url}`);
 
-                    // Load authentication cookies if available (use 'self' instead of 'this')
+                    // Load authentication cookies if available
                     if (self.authenticated && self.cookies) {
-                        try {
-                            await page.context().addCookies(self.cookies);
-                            log.info('🔐 Using authenticated Facebook session');
-                        } catch (cookieError) {
-                            log.warn(`⚠️  Failed to add cookies: ${cookieError.message}`);
-                            log.warn('   Continuing without authentication...');
-                        }
+                        await page.context().addCookies(self.cookies);
+                        log.info('🔐 Using authenticated Facebook session');
                     }
 
                     // Navigate to page
@@ -479,126 +417,67 @@ class FacebookCrawleeScraper {
                         timeout: 30000 
                     });
 
-                    // Wait for content to load
-                    await page.waitForTimeout(5000); // Increased wait time
+                    // Wait for content to load - increased timeout for Facebook
+                    console.log('⏳ Waiting for Facebook to load posts...');
+                    await page.waitForTimeout(5000); // Increased from 3000
 
-                    // DEBUG: Check what elements are on the page
-                    const debugInfo = await page.evaluate(() => {
-                        const articles = document.querySelectorAll('[role="article"]');
-                        const feedUnits = document.querySelectorAll('[data-pagelet^="FeedUnit"]');
-                        const posts = document.querySelectorAll('div[data-ad-preview="message"]');
+                    // Try to wait for posts to appear
+                    try {
+                        await page.waitForSelector('[role="article"], [data-pagelet^="FeedUnit"], [data-testid="story-root"]', { 
+                            timeout: 10000 
+                        });
+                        console.log('✅ Found post elements on page');
+                    } catch (e) {
+                        console.warn('⚠️  No standard post selectors found, will try generic extraction');
                         
-                        return {
-                            articles: articles.length,
-                            feedUnits: feedUnits.length,
-                            posts: posts.length,
-                            bodyText: document.body.textContent.substring(0, 500)
-                        };
-                    });
-                    
-                    log.info(`🔍 DEBUG: Found ${debugInfo.articles} articles, ${debugInfo.feedUnits} feed units, ${debugInfo.posts} posts`);
-                    if (debugInfo.articles === 0 && debugInfo.feedUnits === 0) {
-                        log.warn('⚠️  No post elements found! Page might need more time to load or different selectors.');
-                        log.info(`Page preview: ${debugInfo.bodyText}`);
+                        // Take screenshot for debugging
+                        try {
+                            await page.screenshot({ path: '/tmp/facebook-debug.png', fullPage: false });
+                            console.log('📸 Screenshot saved to /tmp/facebook-debug.png');
+                        } catch (screenshotError) {
+                            console.warn('Could not save screenshot');
+                        }
                         
-                        // Save screenshot for debugging
-                        const screenshotPath = `./debug-screenshot-${Date.now()}.png`;
-                        await page.screenshot({ path: screenshotPath, fullPage: true });
-                        log.info(`📸 Screenshot saved to ${screenshotPath}`);
+                        // Get page HTML for debugging
+                        const htmlSample = await page.evaluate(() => {
+                            return document.body.innerHTML.substring(0, 2000);
+                        });
+                        console.log('🔍 HTML Sample (first 2000 chars):', htmlSample);
                     }
 
-                    // Close popups and modals (use 'self' instead of 'this')
+                    // Close popups and modals
                     await self.closePopupsAndModals(page);
 
-                    // Auto-scroll to load posts (use 'self' instead of 'this')
+                    // Auto-scroll to load posts
                     log.info(`📜 Scrolling to load ${maxPosts} posts...`);
-                    console.log(`🔍 DEBUG: About to call autoScrollAndCollectPosts with posts.length=${posts.length}`);
                     postCount = await self.autoScrollAndCollectPosts(page, maxPosts, posts);
-                    console.log(`🔍 DEBUG: autoScrollAndCollectPosts returned postCount=${postCount}, posts.length=${posts.length}`);
 
                     log.info(`✅ Collected ${postCount} posts`);
-                    
-                    // If no posts found on desktop site, try mobile Facebook
-                    if (postCount === 0 && !request.url.includes('m.facebook.com')) {
-                        log.warn('⚠️  No posts found on desktop site, trying mobile Facebook...');
-                        
-                        const mobileUrl = request.url.replace('www.facebook.com', 'm.facebook.com');
-                        log.info(`📱 Navigating to mobile URL: ${mobileUrl}`);
-                        
-                        await page.goto(mobileUrl, { 
-                            waitUntil: 'domcontentloaded',
-                            timeout: 30000 
-                        });
-                        
-                        await page.waitForTimeout(3000);
-                        
-                        // Try to extract posts from mobile version
-                        postCount = await self.autoScrollAndCollectPosts(page, maxPosts, posts);
-                        log.info(`📱 Mobile site collected ${postCount} posts`);
-                    }
                 }
             });
 
-            // Validate pageUrl before running crawler
-            if (!pageUrl || typeof pageUrl !== 'string' || pageUrl.trim() === '') {
-                throw new Error(`Invalid pageUrl provided: ${pageUrl}`);
-            }
-
-            console.log(`🔗 Running crawler with URL: ${pageUrl}`);
-            
             // Run the crawler
-            await crawler.run([pageUrl]);
-
-            console.log(`🔍 DEBUG: After crawler.run(), posts.length=${posts.length}`);
-
-            // ===== SERVER-SIDE DEDUPLICATION (Safety Net) =====
-            console.log(`\n🔍 Server-side deduplication check...`);
-            console.log(`📊 Before dedup: ${posts.length} posts`);
-            
-            // Deduplicate by postUrl
-            const uniquePostsMap = new Map();
-            posts.forEach(post => {
-                if (post.postUrl) {
-                    // Clean URL for deduplication
-                    let cleanUrl = post.postUrl;
-                    try {
-                        const urlObj = new URL(post.postUrl);
-                        cleanUrl = urlObj.origin + urlObj.pathname;
-                    } catch (e) {}
-                    
-                    // Keep first occurrence of each URL
-                    if (!uniquePostsMap.has(cleanUrl)) {
-                        uniquePostsMap.set(cleanUrl, post);
-                    } else {
-                        console.log(`⏭️  Server-side dedup: Skipping duplicate URL: ${cleanUrl}`);
-                    }
-                }
-            });
-            
-            const deduplicatedPosts = Array.from(uniquePostsMap.values());
-            console.log(`📊 After dedup: ${deduplicatedPosts.length} unique posts (removed ${posts.length - deduplicatedPosts.length} duplicates)`);
+            await crawler.addRequests([{ url: pageUrl }]);
+            await crawler.run();
 
             // Process and cache results
             const scrapedData = {
                 pageId: pageId,
                 pageUrl: pageUrl,
-                posts: deduplicatedPosts,
-                totalPosts: deduplicatedPosts.length,
+                posts: posts,
+                totalPosts: postCount,
                 scrapedAt: new Date().toISOString(),
                 authenticated: this.authenticated,
                 scrapeId: scrapeId
             };
 
-            console.log(`🔍 DEBUG: scrapedData created with totalPosts=${scrapedData.totalPosts}, posts.length=${scrapedData.posts.length}`);
-
             // Cache the data
             await this.cacheData(pageId, scrapedData);
 
             // Update page metadata
-            await this.updatePageMetadata(pageId, deduplicatedPosts.length);
+            await this.updatePageMetadata(pageId, postCount);
 
             this.isScrapingInProgress = false;
-            console.log(`🔍 DEBUG: Set isScrapingInProgress = false, returning scrapedData`);
             return scrapedData;
 
         } catch (error) {
@@ -616,347 +495,128 @@ class FacebookCrawleeScraper {
         const maxConsecutiveNoNewContent = 5; // More patience
         let previousPostCount = 0;
 
+        // First, debug what selectors are available
+        const debugInfo = await page.evaluate(() => {
+            return {
+                hasRoleArticle: document.querySelectorAll('[role="article"]').length,
+                hasFeedUnit: document.querySelectorAll('[data-pagelet^="FeedUnit"]').length,
+                hasStorybookPost: document.querySelectorAll('[data-testid="story-root"]').length,
+                hasDivRoot: document.querySelectorAll('div[class*="x1yztbdb"]').length,
+                totalDivs: document.querySelectorAll('div').length,
+                pageTitle: document.title,
+                url: window.location.href
+            };
+        });
+        
+        console.log('🔍 Page Debug Info:', JSON.stringify(debugInfo, null, 2));
+
         while (posts.length < maxPosts && scrollAttempts < maxScrollAttempts) {
             scrollAttempts++;
 
-            // Extract posts from current view
-            // First, click all "See More" buttons to expand content
-            await page.evaluate(() => {
-                const seeMoreButtons = Array.from(document.querySelectorAll('div[role="button"]'))
-                    .filter(btn => btn.textContent.match(/see more|show more/i));
-                seeMoreButtons.forEach(btn => {
-                    try {
-                        btn.click();
-                    } catch (e) {}
-                });
-            });
-
-            // Wait for content to expand
-            await page.waitForTimeout(500);
-
-            // Now extract posts with full content
+            // Extract posts from current view - try multiple selectors
             const newPosts = await page.evaluate(() => {
-                // ===== HELPER FUNCTION: PARSE RELATIVE TIMESTAMP =====
-                window.parseRelativeTimestamp = function(timeStr) {
-                    if (!timeStr) return null;
-                    
-                    const now = new Date();
-                    const str = timeStr.toLowerCase();
-                    
-                    // Just now / Recently
-                    if (str.match(/just now|recently/i)) {
-                        return now.toISOString();
-                    }
-                    
-                    // Yesterday
-                    if (str.match(/yesterday/i)) {
-                        const yesterday = new Date(now);
-                        yesterday.setDate(yesterday.getDate() - 1);
-                        return yesterday.toISOString();
-                    }
-                    
-                    // X seconds/minutes/hours/days/weeks/months/years ago
-                    const match = str.match(/(\d+)\s*(second|minute|hour|day|week|month|year)s?\s*ago/i);
-                    if (match) {
-                        const value = parseInt(match[1]);
-                        const unit = match[2].toLowerCase();
-                        const past = new Date(now);
-                        
-                        switch (unit) {
-                            case 'second': past.setSeconds(past.getSeconds() - value); break;
-                            case 'minute': past.setMinutes(past.getMinutes() - value); break;
-                            case 'hour': past.setHours(past.getHours() - value); break;
-                            case 'day': past.setDate(past.getDate() - value); break;
-                            case 'week': past.setDate(past.getDate() - (value * 7)); break;
-                            case 'month': past.setMonth(past.getMonth() - value); break;
-                            case 'year': past.setFullYear(past.getFullYear() - value); break;
-                        }
-                        
-                        return past.toISOString();
-                    }
-                    
-                    return null;
-                };
+                // Try multiple selectors in priority order
+                let postElements = document.querySelectorAll('[role="article"]');
                 
-                // Try multiple selectors to find post elements - COMPREHENSIVE STRATEGY
-                let postElements = [];
-                
-                // Strategy 1: Standard role="article"
-                postElements = document.querySelectorAll('[role="article"]');
-                console.log(`Strategy 1 - [role="article"]: ${postElements.length} elements`);
-                
-                // Strategy 2: FeedUnit pagelets
                 if (postElements.length === 0) {
                     postElements = document.querySelectorAll('[data-pagelet^="FeedUnit"]');
-                    console.log(`Strategy 2 - [data-pagelet^="FeedUnit"]: ${postElements.length} elements`);
                 }
                 
-                // Strategy 3: Story containers
                 if (postElements.length === 0) {
-                    postElements = document.querySelectorAll('div[data-testid="story-subtitle"]');
-                    console.log(`Strategy 3 - story-subtitle: ${postElements.length} elements`);
-                    // Get parent containers
-                    if (postElements.length > 0) {
-                        postElements = Array.from(postElements).map(el => {
-                            let parent = el;
-                            for (let i = 0; i < 5; i++) {
-                                parent = parent.parentElement;
-                                if (!parent) break;
-                            }
-                            return parent;
-                        }).filter(Boolean);
-                    }
+                    postElements = document.querySelectorAll('[data-testid="story-root"]');
                 }
                 
-                // Strategy 4: Look for divs with images and text content
                 if (postElements.length === 0) {
-                    const allDivs = document.querySelectorAll('div');
-                    postElements = Array.from(allDivs).filter(div => {
-                        const hasImage = div.querySelector('img[src*="scontent"]');
-                        const hasText = div.textContent && div.textContent.length > 50;
-                        const hasLink = div.querySelector('a[href*="facebook.com"]');
-                        return hasImage && hasText && hasLink;
-                    });
-                    console.log(`Strategy 4 - structural pattern (div+img+text+link): ${postElements.length} elements`);
+                    // Fallback: look for common Facebook post structure
+                    postElements = document.querySelectorAll('div[class*="x1yztbdb"]');
                 }
-                
-                console.log(`✅ Final post element count: ${postElements.length}`);
-                
+
+                console.log(`Found ${postElements.length} post elements`);
                 const results = [];
 
                 postElements.forEach((postEl, index) => {
-                    try {
-                        console.log(`\n--- Processing post ${index + 1} ---`);
-                        
-                        // ===== EXTRACT POST URL FIRST (for deduplication) =====
-                        let postUrl = null;
-                        
-                        // Strategy 1: Direct permalink/posts links
-                        let urlLink = postEl.querySelector('a[href*="/posts/"]');
-                        if (urlLink) {
-                            postUrl = urlLink.href;
-                            console.log(`📎 URL Strategy 1 (posts): ${postUrl}`);
-                        }
-                        
-                        if (!postUrl) {
-                            urlLink = postEl.querySelector('a[href*="/permalink/"]');
-                            if (urlLink) {
-                                postUrl = urlLink.href;
-                                console.log(`📎 URL Strategy 2 (permalink): ${postUrl}`);
-                            }
-                        }
-                        
-                        if (!postUrl) {
-                            urlLink = postEl.querySelector('a[href*="story_fbid"]');
-                            if (urlLink) {
-                                postUrl = urlLink.href;
-                                console.log(`📎 URL Strategy 3 (story_fbid): ${postUrl}`);
-                            }
-                        }
-                        
-                        // Strategy 2: Look for timestamp links (they usually point to post)
-                        if (!postUrl) {
-                            const allLinks = postEl.querySelectorAll('a[href]');
-                            for (const link of allLinks) {
-                                const text = link.textContent?.trim() || '';
-                                const href = link.href || '';
-                                // Check if link text looks like a timestamp
-                                if ((text.match(/ago|hr|min|day|week|month|year|recently/i) || 
-                                     href.includes('/posts/') || 
-                                     href.includes('/permalink/')) &&
-                                     href.includes('facebook.com')) {
-                                    postUrl = href;
-                                    console.log(`📎 URL Strategy 4 (timestamp link): ${postUrl} (text: "${text}")`);
-                                    break;
-                                }
-                            }
-                        }
-                        
-                        // Strategy 3: Find any facebook.com link in the post
-                        if (!postUrl) {
-                            const fbLink = postEl.querySelector('a[href*="facebook.com"]');
-                            if (fbLink && !fbLink.href.includes('/photo/') && !fbLink.href.includes('/watch/')) {
-                                postUrl = fbLink.href;
-                                console.log(`📎 URL Strategy 5 (any FB link): ${postUrl}`);
-                            }
-                        }
-                        
-                        // Clean URL for deduplication (remove query params)
-                        let cleanUrl = postUrl;
-                        if (postUrl) {
-                            try {
-                                const urlObj = new URL(postUrl);
-                                // Keep only path, remove query string for deduplication
-                                cleanUrl = urlObj.origin + urlObj.pathname;
-                            } catch (e) {}
-                        }
-                        
-                        // SKIP COMMENTS/REPLIES - Check if URL contains comment_id
-                        if (postUrl && postUrl.includes('comment_id=')) {
-                            console.log(`⏭️  Skipping comment/reply post: ${postUrl}`);
-                            return;
-                        }
-                        
-                        // DEDUPLICATION BY URL - Skip if already extracted
-                        if (cleanUrl && window.__extractedPostUrls?.has(cleanUrl)) {
-                            console.log(`⏭️  Skipping duplicate post URL: ${cleanUrl}`);
-                            return;
-                        }
-                        
-                        // Extract post ID (for identification only, not deduplication)
-                        const postId = postEl.getAttribute('data-pagelet') || 
-                                     postEl.querySelector('[data-ft]')?.getAttribute('data-ft') || 
-                                     postEl.id ||
-                                     `post_${index}_${Date.now()}`;
+                    // Extract post ID
+                    const postId = postEl.getAttribute('data-pagelet') || 
+                                 postEl.getAttribute('data-testid') ||
+                                 postEl.querySelector('[data-ft]')?.getAttribute('data-ft') || 
+                                 `post_${index}_${Date.now()}`;
 
-                        // ===== EXTRACT TIMESTAMP =====
-                        let timestamp = null;
-                        let timestampISO = null;
-                        
-                        // Strategy 1: abbr with data-utime (Unix timestamp - most reliable)
-                        let timeEl = postEl.querySelector('abbr[data-utime]');
-                        if (timeEl) {
-                            const unixTime = timeEl.getAttribute('data-utime');
-                            if (unixTime) {
-                                timestampISO = new Date(parseInt(unixTime) * 1000).toISOString();
-                                timestamp = timeEl.textContent?.trim() || timestampISO;
-                                console.log(`⏰ Timestamp Strategy 1 (data-utime): ${timestamp} (ISO: ${timestampISO})`);
-                            }
-                        }
-                        
-                        // Strategy 2: abbr with any data attribute
-                        if (!timestamp) {
-                            timeEl = postEl.querySelector('abbr[data-tooltip-content], abbr[title]');
-                            if (timeEl) {
-                                timestamp = timeEl.textContent?.trim() || timeEl.getAttribute('title');
-                                console.log(`⏰ Timestamp Strategy 2 (abbr): ${timestamp}`);
-                            }
-                        }
-                        
-                        // Strategy 3: Look for text with time keywords
-                        if (!timestamp) {
-                            const allText = postEl.querySelectorAll('span, a');
-                            for (const el of allText) {
-                                const text = el.textContent?.trim() || '';
-                                if (text.match(/\d+\s*(second|minute|hour|day|week|month|year)s?\s*ago/i) ||
-                                    text.match(/^(recently|just now|yesterday)$/i)) {
-                                    timestamp = text;
-                                    // Try to get the link for URL if we don't have it
-                                    if (!postUrl && el.tagName === 'A') {
-                                        postUrl = el.href;
-                                        console.log(`📎 URL from timestamp link: ${postUrl}`);
-                                    }
-                                    console.log(`⏰ Timestamp Strategy 3 (text pattern): ${timestamp}`);
-                                    break;
-                                }
-                            }
-                        }
-                        
-                        // ===== PARSE RELATIVE TIMESTAMP TO ISO =====
-                        if (timestamp && !timestampISO) {
-                            timestampISO = window.parseRelativeTimestamp(timestamp);
-                            if (timestampISO) {
-                                console.log(`📅 Parsed relative timestamp "${timestamp}" to ISO: ${timestampISO}`);
-                            }
-                        }
+                    // Skip if already extracted
+                    if (window.__extractedPostIds?.has(postId)) return;
 
-                        // ===== EXTRACT CONTENT =====
-                        let content = '';
-                        
-                        // Strategy 1: Facebook's message containers
-                        let contentEl = postEl.querySelector('[data-ad-comet-preview="message"]');
-                        if (contentEl) {
-                            content = contentEl.textContent?.trim() || '';
-                            console.log(`📝 Content Strategy 1 (data-ad-comet-preview): ${content.length} chars`);
-                        }
-                        
-                        if (!content) {
-                            contentEl = postEl.querySelector('[data-ad-preview="message"]');
-                            if (contentEl) {
-                                content = contentEl.textContent?.trim() || '';
-                                console.log(`📝 Content Strategy 2 (data-ad-preview): ${content.length} chars`);
-                            }
-                        }
-                        
-                        // Strategy 2: div with dir="auto" (common for text content)
-                        if (!content) {
-                            const dirAutoEls = postEl.querySelectorAll('div[dir="auto"]');
-                            for (const el of dirAutoEls) {
-                                const text = el.textContent?.trim() || '';
-                                // Get the longest meaningful text (likely the post content)
-                                if (text.length > content.length && text.length > 20) {
-                                    content = text;
-                                }
-                            }
-                            if (content) {
-                                console.log(`📝 Content Strategy 3 (dir="auto"): ${content.length} chars`);
-                            }
-                        }
-                        
-                        // Strategy 3: Find any substantial text content
-                        if (!content) {
-                            const allDivs = postEl.querySelectorAll('div');
-                            for (const div of allDivs) {
-                                // Skip if it has nested divs (too high level)
-                                if (div.querySelectorAll('div').length > 3) continue;
-                                
-                                const text = div.textContent?.trim() || '';
-                                if (text.length > content.length && text.length > 30) {
-                                    content = text;
-                                }
-                            }
-                            if (content) {
-                                console.log(`📝 Content Strategy 4 (substantial text): ${content.length} chars`);
-                            }
-                        }
+                    // Mark as extracted
+                    window.__extractedPostIds = window.__extractedPostIds || new Set();
+                    window.__extractedPostIds.add(postId);
 
-                        // ===== EXTRACT IMAGE =====
-                        let imageUrl = null;
-                        const firstImage = postEl.querySelector('img[src*="scontent"]');
-                        if (firstImage) {
-                            imageUrl = firstImage.src || firstImage.getAttribute('data-src');
-                            console.log(`🖼️  Image found: ${imageUrl?.substring(0, 80)}...`);
-                        } else {
-                            console.log(`🖼️  No image found`);
+                    // Extract post content - try multiple selectors
+                    let content = '';
+                    const contentSelectors = [
+                        '[data-ad-comet-preview="message"]',
+                        '[data-ad-preview="message"]',
+                        'div[dir="auto"]',
+                        '[data-testid="post_message"]',
+                        'div[class*="userContent"]'
+                    ];
+                    
+                    for (const selector of contentSelectors) {
+                        const contentEl = postEl.querySelector(selector);
+                        if (contentEl?.textContent?.trim()) {
+                            content = contentEl.textContent.trim();
+                            break;
                         }
+                    }
 
-                        // ===== VALIDATION =====
-                        const hasContent = content && content.length > 10;
-                        const hasImage = imageUrl !== null;
-                        const hasUrl = postUrl !== null;
-                        const hasTimestamp = timestamp !== null;
+                    // Extract images
+                    const images = Array.from(postEl.querySelectorAll('img[src*="scontent"], img[src*="fbcdn"]'))
+                        .map(img => img.src)
+                        .filter(src => !src.includes('emoji') && !src.includes('static'));
 
-                        console.log(`Validation: content=${hasContent}, image=${hasImage}, url=${hasUrl}, timestamp=${hasTimestamp}`);
-
-                        // STRICT VALIDATION: Must have (content OR image) AND URL, and NOT be a comment
-                        const isValid = (hasContent || hasImage) && hasUrl && !postUrl.includes('comment_id');
-                        
-                        if (isValid) {
-                            // Mark URL as extracted (for deduplication)
-                            window.__extractedPostUrls = window.__extractedPostUrls || new Set();
-                            if (cleanUrl) {
-                                window.__extractedPostUrls.add(cleanUrl);
-                            }
-                            
-                            results.push({
-                                id: postId,
-                                content: content || '', // Empty string if no content
-                                image: imageUrl, // Null if no image
-                                timestamp: timestamp || 'Recently',
-                                timestampISO: timestampISO,
-                                postUrl: postUrl,
-                                extractedAt: new Date().toISOString()
-                            });
-                            
-                            console.log(`✅ Post ${results.length} extracted: ${cleanUrl}`);
-                        } else {
-                            const reason = !hasUrl ? 'no URL' : 
-                                          !hasContent && !hasImage ? 'no content or image' :
-                                          postUrl.includes('comment_id') ? 'is a comment' : 'unknown';
-                            console.log(`❌ Post validation failed - ${reason}`);
+                    // Extract timestamp - try multiple approaches
+                    let timestamp = null;
+                    let postUrl = null;
+                    
+                    const timeLinkSelectors = [
+                        'a[href*="/posts/"]',
+                        'a[href*="/permalink/"]',
+                        'a[aria-label*="ago"]',
+                        'span[data-testid="story-subtitle"] a'
+                    ];
+                    
+                    for (const selector of timeLinkSelectors) {
+                        const timeLink = postEl.querySelector(selector);
+                        if (timeLink) {
+                            timestamp = timeLink.textContent?.trim() || 
+                                       timeLink.querySelector('abbr, span')?.textContent?.trim();
+                            postUrl = timeLink.href;
+                            if (timestamp && postUrl) break;
                         }
-                    } catch (error) {
-                        console.error(`❌ Error extracting post ${index}:`, error.message);
+                    }
+
+                    // Extract reactions
+                    const reactionsEl = postEl.querySelector('[aria-label*="reaction"], [aria-label*="like"]');
+                    const reactions = reactionsEl?.textContent?.trim() || '0';
+
+                    // Extract comments
+                    const commentsEl = postEl.querySelector('[aria-label*="comment"]');
+                    const comments = commentsEl?.textContent?.match(/\d+/)?.[0] || '0';
+
+                    // Extract shares
+                    const sharesEl = postEl.querySelector('[aria-label*="share"]');
+                    const shares = sharesEl?.textContent?.match(/\d+/)?.[0] || '0';
+
+                    // Only add if we have at least content or image
+                    if (content || images.length > 0) {
+                        results.push({
+                            id: postId,
+                            content: content.substring(0, 1000), // Limit content length
+                            images: images,
+                            timestamp: timestamp,
+                            postUrl: postUrl,
+                            reactions: reactions,
+                            comments: comments,
+                            shares: shares,
+                            extractedAt: new Date().toISOString()
+                        });
                     }
                 });
 
@@ -1048,20 +708,16 @@ class FacebookCrawleeScraper {
 
     // Cache data in Redis
     async cacheData(pageId, data) {
-        if (!this.redisClient) {
-            console.warn('⚠️  Redis not available, skipping cache');
-            return;
-        }
+        if (!this.redisClient) return;
 
         try {
             const cacheKey = `scraped_data:${pageId}`;
             const cacheExpiry = 4 * 60 * 60; // 4 hours
 
             await this.redisClient.setex(cacheKey, cacheExpiry, JSON.stringify(data));
-            console.log(`💾 Cached ${data.totalPosts} posts for page ${pageId} (expires in 4h)`);
-            console.log(`📌 Cache key: ${cacheKey}`);
+            console.log(`💾 Cached data for page ${pageId}`);
         } catch (error) {
-            console.error('❌ Error caching data:', error);
+            console.error('Error caching data:', error);
         }
     }
 
@@ -1207,48 +863,22 @@ module.exports = {
     // Scrape a specific page
     scrapePage: async (req, res) => {
         try {
-            const pageId = req.params.pageId || DEFAULT_PAGE.id;
-            const { maxPosts = 100 } = req.query;
+            const { pageId } = req.params;
+            const { maxPosts = 50 } = req.query;
 
-            console.log(`\n🔍 DEBUG scrapePage called:`);
-            console.log(`   pageId: ${pageId}`);
-            console.log(`   maxPosts (from query): ${maxPosts}`);
-            console.log(`   maxPosts (parsed): ${parseInt(maxPosts)}`);
-
-            let pageData = await scraperInstance.getPageData(pageId);
-            
-            // If no page data, use DEFAULT_PAGE
+            const pageData = await scraperInstance.getPageData(pageId);
             if (!pageData) {
-                if (pageId === DEFAULT_PAGE.id) {
-                    pageData = {
-                        id: DEFAULT_PAGE.id,
-                        url: DEFAULT_PAGE.url,
-                        name: DEFAULT_PAGE.name
-                    };
-                } else {
-                    return res.status(404).json({
-                        success: false,
-                        error: 'Page not found in tracker'
-                    });
-                }
+                return res.status(404).json({
+                    success: false,
+                    error: 'Page not found in tracker'
+                });
             }
-
-            console.log(`🚀 Scraping page: ${pageId} (${pageData.name || pageData.url})`);
-            console.log(`🔍 DEBUG: Calling scrapePageWithCrawlee with:`);
-            console.log(`   pageId: ${pageId}`);
-            console.log(`   url: ${pageData.url}`);
-            console.log(`   maxPosts: ${parseInt(maxPosts)}`);
 
             const result = await scraperInstance.scrapePageWithCrawlee(
                 pageId, 
                 pageData.url, 
                 { maxPosts: parseInt(maxPosts) }
             );
-
-            console.log(`🔍 DEBUG: scrapePageWithCrawlee returned:`);
-            console.log(`   totalPosts: ${result.totalPosts}`);
-            console.log(`   posts.length: ${result.posts ? result.posts.length : 'N/A'}`);
-            console.log(`✅ Scrape complete. Cached ${result.totalPosts} posts for page ${pageId}`);
 
             res.json({
                 success: true,
@@ -1265,20 +895,16 @@ module.exports = {
     // Get cached data
     getCachedData: async (req, res) => {
         try {
-            const pageId = req.params.pageId || DEFAULT_PAGE.id;
-            
-            console.log(`📦 Getting cached data for page: ${pageId}`);
+            const { pageId } = req.params;
             const cachedData = await scraperInstance.getCachedData(pageId);
 
             if (!cachedData) {
-                console.log(`⚠️  No cache found for page ${pageId}`);
                 return res.status(404).json({
                     success: false,
                     error: 'No cached data available'
                 });
             }
 
-            console.log(`✅ Cache hit! Returning ${cachedData.totalPosts} posts for page ${pageId}`);
             res.json({
                 success: true,
                 data: cachedData
@@ -1329,88 +955,6 @@ module.exports = {
         });
     },
 
-    // Clear all cache or specific page cache
-    clearCache: async (req, res) => {
-        try {
-            const { pageId } = req.params;
-            
-            if (!scraperInstance.redisClient) {
-                return res.status(503).json({
-                    success: false,
-                    error: 'Redis not available'
-                });
-            }
-
-            let clearedKeys = [];
-
-            if (pageId) {
-                // Clear specific page cache
-                const cacheKey = `scraped_data:${pageId}`;
-                const deleted = await scraperInstance.redisClient.del(cacheKey);
-                if (deleted > 0) {
-                    clearedKeys.push(cacheKey);
-                }
-                console.log(`🗑️  Cleared cache for page: ${pageId}`);
-            } else {
-                // Clear ALL Facebook scraper caches
-                const keys = await scraperInstance.redisClient.keys('scraped_data:*');
-                
-                if (keys.length > 0) {
-                    for (const key of keys) {
-                        await scraperInstance.redisClient.del(key);
-                        clearedKeys.push(key);
-                    }
-                    console.log(`🗑️  Cleared ${keys.length} cache entries`);
-                }
-            }
-
-            res.json({
-                success: true,
-                message: pageId 
-                    ? `Cache cleared for page ${pageId}` 
-                    : `All cache cleared (${clearedKeys.length} entries)`,
-                clearedKeys: clearedKeys,
-                timestamp: new Date().toISOString()
-            });
-        } catch (error) {
-            res.status(500).json({
-                success: false,
-                error: error.message
-            });
-        }
-    },
-
     // Export scraper instance for internal use
     scraperInstance
 };
-
-// Auto-scrape on server startup (with delay for server stability)
-setTimeout(async () => {
-    try {
-        console.log('\n🚀 ========================================');
-        console.log('🚀 AUTO-SCRAPING ON SERVER STARTUP');
-        console.log('🚀 ========================================\n');
-        
-        console.log(`📊 Scraping default page: ${DEFAULT_PAGE.name} (${DEFAULT_PAGE.id})`);
-        console.log(`📎 URL: ${DEFAULT_PAGE.url}\n`);
-        
-        const result = await scraperInstance.scrapePageWithCrawlee(
-            DEFAULT_PAGE.id,
-            DEFAULT_PAGE.url,
-            { maxPosts: 50 }
-        );
-        
-        if (result.success) {
-            console.log(`\n✅ AUTO-SCRAPE SUCCESS!`);
-            console.log(`   Posts scraped: ${result.data.totalPosts}`);
-            console.log(`   Cached: ${result.data.cached ? 'Yes' : 'No'}`);
-            console.log(`   Timestamp: ${result.data.scrapedAt}`);
-        } else {
-            console.warn(`\n⚠️  AUTO-SCRAPE FAILED: ${result.error}`);
-        }
-        
-        console.log('\n🚀 ========================================\n');
-    } catch (error) {
-        console.error(`\n❌ AUTO-SCRAPE ERROR: ${error.message}\n`);
-    }
-}, 5000); // 5-second delay for server stability

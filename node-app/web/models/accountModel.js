@@ -15,12 +15,12 @@ async function getAccounts() {
     }
 }
 
-async function addAccount(email, role, program, createdByEmail, sdaoRank = null, sectionId = null) {
+async function addAccount(email, role, program, createdByEmail) {
     const connection = await pool.getConnection();
     try {
         const [rows] = await connection.query(
-            'CALL AddManagedAccount(?, ?, ?, ?, ?, ?)', 
-            [email, role, program, createdByEmail, sdaoRank, sectionId]
+            'CALL AddManagedAccount(?, ?, ?, ?)', 
+            [email, role, program, createdByEmail]
         );
         return rows[0];
     }
@@ -33,7 +33,7 @@ async function addAccount(email, role, program, createdByEmail, sdaoRank = null,
     }
 }
 
-async function updateAccount(user_id, role, program, status, updatedByEmail, sdaoRank = null) {
+async function updateAccount(user_id, role, program, status, updatedByEmail) {
     const connection = await pool.getConnection();
     try {
         // Handle null/undefined program values
@@ -42,8 +42,8 @@ async function updateAccount(user_id, role, program, status, updatedByEmail, sda
             : program;
             
         const [rows] = await connection.query(
-            'CALL UpdateManagedAccount(?, ?, ?, ?, ?, ?)',
-            [user_id, role, programName, status, updatedByEmail, sdaoRank]
+            'CALL UpdateManagedAccount(?, ?, ?, ?, ?)',
+            [user_id, role, programName, status, updatedByEmail]
         );
         return rows[0];
     }
@@ -197,36 +197,6 @@ async function getUserRoleAndStatus(email) {
     }
 }
 
-async function getAvailableSdaoRanks(excludeUserId = null) {
-    const connection = await pool.getConnection();
-    try {
-        // Get all ranks 1-3
-        const allRanks = [1, 2, 3];
-        
-        // Get currently assigned ranks
-        let query = 'SELECT sdao_rank FROM tbl_sdao_approver';
-        let params = [];
-        
-        if (excludeUserId) {
-            query += ' WHERE user_id != ?';
-            params.push(excludeUserId);
-        }
-        
-        const [rows] = await connection.query(query, params);
-        const assignedRanks = rows.map(row => row.sdao_rank);
-        
-        // Return ranks not currently assigned (excluding the specified user if provided)
-        const availableRanks = allRanks.filter(rank => !assignedRanks.includes(rank));
-        
-        return availableRanks;
-    } catch (error) {
-        console.error('Error getting available SDAO ranks:', error);
-        throw error;
-    } finally {
-        connection.release();
-    }
-}
-
 module.exports = {
     getAccounts,
     addAccount,
@@ -235,7 +205,6 @@ module.exports = {
     unarchiveAccount,
     getPrograms,
     getRoles,
-    getAvailableSdaoRanks,
     addUserApplication,
     getAllPendingUsersAndApplications,
     approveUserApplication,

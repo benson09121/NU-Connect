@@ -246,7 +246,7 @@ router.get('/terms', async (req, res) => {
             term_name: term.term_name,
             start_date: term.start_date,
             end_date: term.end_date,
-            is_current_term: term.is_current_term
+            is_active: term.is_active
         }));
         
         res.json({

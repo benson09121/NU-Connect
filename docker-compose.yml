@@ -21,8 +21,19 @@ services:
   node-app:
     container_name: node-app
     build: ./node-app
+    shm_size: '2gb'
     environment:
       TZ: Asia/Manila
+      OPENROUTER_API_KEY: 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
+      NODE_ENV: "production"
+      NODE_OPTIONS: "--max-old-space-size=2048 --max-semi-space-size=512"
+      # Crawlee (Playwright) configuration
+      FB_CRAWLEE_MAX_CONCURRENCY: "3"
+      FB_CRAWLEE_QUICK_CONCURRENCY: "2"
+      FB_CRAWLEE_MAX_REQUESTS: "150"
+      # Puppeteer configuration
+      FB_PUPPETEER_MAX_CONCURRENCY: "2"
+      FB_PUPPETEER_MAX_POSTS: "100"
     volumes:
       - /opt/certificates/templates:/app/certificates/templates
       - /opt/certificates/generated:/app/certificates/generated
@@ -30,6 +41,10 @@ services:
       - /opt/organizations:/app/organizations
       - /opt/applications:/app/applications
       - /opt/events:/app/events
+      # Facebook Scraper persistent storage
+      - facebook_auth:/app/.auth
+      - crawlee_storage:/app/storage
+      - playwright_cache:/root/.cache/ms-playwright
     networks:
       - my-network
     ports:
@@ -68,7 +83,18 @@ services:
   redis:
     image: redis:8.0-M01
     container_name: redis
-    command: redis-server --requirepass redis_password_nuconnect
+    command:
+      - redis-server
+      - "--requirepass"
+      - "redis_password_nuconnect"
+      - "--maxmemory"
+      - "2048mb"
+      - "--maxmemory-policy"
+      - "allkeys-lfu"
+      - "--appendonly"
+      - "yes"
+      - "--appendfsync"
+      - "everysec"
     ports:
       - "6380:6379"
     volumes:
@@ -95,4 +121,8 @@ networks:
 volumes:
   mysql_volume:
   redis_volume:
+  # Facebook Scraper volumes
+  facebook_auth:
+  crawlee_storage:
+  playwright_cache:
   # clamav_data:
