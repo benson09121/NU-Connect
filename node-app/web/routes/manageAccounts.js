@@ -8,6 +8,7 @@ router.get('/manage/pending-users-applications', middleware.validateAzureJWT, mi
 
 router.get('/manage/programs', middleware.validateAzureJWT, middleware.hasPermission("MANAGE_ACCOUNT"), accountController.getPrograms);
 router.get('/manage/roles', middleware.validateAzureJWT, middleware.hasPermission("MANAGE_ACCOUNT"), accountController.getRoles);
+router.get('/manage/sdao-ranks/available', middleware.validateAzureJWT, middleware.hasPermission("MANAGE_ACCOUNT"), accountController.getAvailableSdaoRanks);
 
 router.post('/manage/accounts', middleware.validateAzureJWT, middleware.hasPermission("MANAGE_ACCOUNT"), accountController.addAccount);
 router.put('/manage/accounts', middleware.validateAzureJWT, middleware.hasPermission("MANAGE_ACCOUNT"), accountController.updateAccount);

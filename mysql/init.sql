@@ -47,12 +47,36 @@ CREATE TABLE tbl_program(
         FOREIGN KEY (college_id) REFERENCES tbl_college(college_id) ON DELETE CASCADE
 );
 
+-- Section Management System
+-- Sections organize students by program and year level
+CREATE TABLE tbl_section (
+    section_id INT PRIMARY KEY AUTO_INCREMENT,
+    section_name VARCHAR(100) NOT NULL,
+    program_id INT NOT NULL,
+    year_level INT NULL,  -- Made nullable, year level no longer required
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    
+    CONSTRAINT fk_section_program 
+        FOREIGN KEY (program_id) REFERENCES tbl_program(program_id) 
+        ON DELETE RESTRICT ON UPDATE CASCADE,
+    
+    CONSTRAINT uk_section_program_name 
+        UNIQUE (program_id, section_name)
+);
+
+CREATE INDEX idx_section_program ON tbl_section(program_id);
+CREATE INDEX idx_section_active ON tbl_section(is_active);
+CREATE INDEX idx_section_year ON tbl_section(year_level);
+
 CREATE TABLE tbl_user(
     user_id VARCHAR(200) UNIQUE NOT NULL PRIMARY KEY,
     f_name VARCHAR(50) NULL,
     l_name VARCHAR(50) NULL,
     email VARCHAR(100) UNIQUE NOT NULL,
     program_id INT NULL,
+    section_id INT NULL,
     role_id INT NOT NULL,
     profile_picture VARCHAR(255),
     status ENUM('Active', 'Pending', 'Archive') DEFAULT 'Active',
@@ -63,8 +87,11 @@ CREATE TABLE tbl_user(
     archived_reason VARCHAR(255),
     FOREIGN KEY (role_id) REFERENCES tbl_role(role_id),
     FOREIGN KEY (program_id) REFERENCES tbl_program(program_id),
+    FOREIGN KEY (section_id) REFERENCES tbl_section(section_id) ON DELETE SET NULL ON UPDATE CASCADE,
     FOREIGN KEY (archived_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE
 );
+
+CREATE INDEX idx_user_section ON tbl_user(section_id);
 
 ALTER TABLE tbl_college
   ADD CONSTRAINT fk_college_archived_by
@@ -107,6 +134,19 @@ CREATE TABLE tbl_role_permission(
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (role_id) REFERENCES tbl_role(role_id) ON DELETE CASCADE,
     FOREIGN KEY (permission_id) REFERENCES tbl_permission(permission_id) ON DELETE CASCADE
+);
+
+-- SDAO hierarchical ranking system (Ranks 1-3)
+-- Rank 1: Final approver (highest authority)
+-- Rank 2/3: First-level approvers
+-- Each rank can only be assigned to ONE user
+CREATE TABLE tbl_sdao_approver(
+    user_id VARCHAR(200) PRIMARY KEY,
+    sdao_rank INT NOT NULL UNIQUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES tbl_user(user_id) ON DELETE CASCADE,
+    CHECK (sdao_rank BETWEEN 1 AND 3)
 );
 
 CREATE TABLE tbl_organization (
@@ -3263,6 +3303,8 @@ BEGIN
         'email', u.email,
         'program_id', p.program_id,
         'program_name', p.name,
+        'section_id', s.section_id,
+        'section_name', s.section_name,
         'permissions', COALESCE(
             (
                 SELECT JSON_ARRAYAGG(
@@ -3511,6 +3553,7 @@ BEGIN
     FROM tbl_user u
     JOIN tbl_role r ON u.role_id = r.role_id
     LEFT JOIN tbl_program p ON u.program_id = p.program_id
+    LEFT JOIN tbl_section s ON u.section_id = s.section_id
     WHERE u.email = p_user_email;
 END $$
 DELIMITER ;
@@ -3603,6 +3646,7 @@ BEGIN
            u.email,
            p.name as program,
            r.role_name as role,
+           sa.sdao_rank,
            u.status,
            u.created_at,
            u.updated_at,
@@ -3610,6 +3654,7 @@ BEGIN
     FROM tbl_user u
     JOIN tbl_role r ON u.role_id = r.role_id
     LEFT JOIN tbl_program p ON u.program_id = p.program_id
+    LEFT JOIN tbl_sdao_approver sa ON u.user_id = sa.user_id
     WHERE u.role_id != student_role_id;
 
 END $$
@@ -3620,13 +3665,17 @@ CREATE DEFINER='admin'@'%' PROCEDURE AddManagedAccount(
     IN p_email VARCHAR(100),
     IN p_role_name VARCHAR(100),
     IN p_program_id INT,
-    IN p_created_by_email VARCHAR(100)
+    IN p_created_by_email VARCHAR(100),
+    IN p_sdao_rank INT,  -- NULL for non-SDAO roles, 1-3 for SDAO
+    IN p_section_id INT  -- NULL for non-Student roles, required for Student
 )
 BEGIN
     DECLARE v_role_id INT;
     DECLARE v_existing_user INT DEFAULT 0;
     DECLARE student_role_id INT;
     DECLARE v_created_by_id VARCHAR(200);
+    DECLARE v_user_id VARCHAR(200);
+    DECLARE v_section_program_id INT;
 
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
@@ -3655,6 +3704,32 @@ BEGIN
         SIGNAL SQLSTATE '45000' 
         SET MESSAGE_TEXT = 'Invalid role specified';
     END IF;
+    
+    -- Section validation for Students
+    IF p_role_name = 'Student' THEN
+        IF p_section_id IS NULL THEN
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Students must be assigned to a section';
+        END IF;
+        
+        -- Verify section exists and is active
+        SELECT program_id INTO v_section_program_id
+        FROM tbl_section
+        WHERE section_id = p_section_id AND is_active = TRUE;
+        
+        IF v_section_program_id IS NULL THEN
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Section not found or inactive';
+        END IF;
+        
+        -- Verify section belongs to specified program
+        IF p_program_id IS NOT NULL AND v_section_program_id != p_program_id THEN
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Section does not belong to the specified program';
+        END IF;
+    ELSE
+        -- Non-students cannot have sections
+        IF p_section_id IS NOT NULL THEN
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Only students can be assigned to sections';
+        END IF;
+    END IF;
 
     -- Check if user exists
     SELECT COUNT(*) INTO v_existing_user
@@ -3666,19 +3741,34 @@ BEGIN
         UPDATE tbl_user
         SET role_id = v_role_id,
             program_id = p_program_id,
+            section_id = p_section_id,
             status = 'Active',
             archived_at = NULL,
             archived_by = NULL,
             archived_reason = NULL,
             updated_at = CURRENT_TIMESTAMP
         WHERE email = p_email;
+        
+        -- Get user_id for SDAO rank handling
+        SELECT user_id INTO v_user_id FROM tbl_user WHERE email = p_email LIMIT 1;
+        
+        -- Handle SDAO rank assignment
+        IF p_role_name = 'SDAO' AND p_sdao_rank IS NOT NULL THEN
+            -- Insert or update SDAO rank
+            INSERT INTO tbl_sdao_approver (user_id, sdao_rank)
+            VALUES (v_user_id, p_sdao_rank)
+            ON DUPLICATE KEY UPDATE sdao_rank = p_sdao_rank;
+        ELSE
+            -- Remove from sdao_approver if changing from SDAO to another role
+            DELETE FROM tbl_sdao_approver WHERE user_id = v_user_id;
+        END IF;
 
         -- Log the update using LogAction
         CALL LogAction(
             p_created_by_email,
             'Updated managed account access',
             'account',
-            JSON_OBJECT('role_name', p_role_name, 'program_id', p_program_id, 'target_email', p_email),
+            JSON_OBJECT('role_name', p_role_name, 'program_id', p_program_id, 'target_email', p_email, 'sdao_rank', p_sdao_rank),
             NULL,
             NULL
         );
@@ -3689,21 +3779,32 @@ BEGIN
             email,
             role_id,
             program_id,
+            section_id,
             status
         ) VALUES (
             UUID(),
             p_email,
             v_role_id,
             p_program_id,
+            p_section_id,
             'Pending'
         );
+        
+        -- Get the newly created user_id
+        SELECT user_id INTO v_user_id FROM tbl_user WHERE email = p_email LIMIT 1;
+        
+        -- Handle SDAO rank for new accounts
+        IF p_role_name = 'SDAO' AND p_sdao_rank IS NOT NULL THEN
+            INSERT INTO tbl_sdao_approver (user_id, sdao_rank)
+            VALUES (v_user_id, p_sdao_rank);
+        END IF;
 
         -- Log the creation using LogAction
         CALL LogAction(
             p_created_by_email,
             'Created new managed account',
             'account',
-            JSON_OBJECT('role_name', p_role_name, 'program_id', p_program_id, 'target_email', p_email),
+            JSON_OBJECT('role_name', p_role_name, 'program_id', p_program_id, 'section_id', p_section_id, 'target_email', p_email, 'sdao_rank', p_sdao_rank),
             NULL,
             NULL
         );
@@ -3716,6 +3817,9 @@ BEGIN
            u.email,
            p.name as program,
            r.role_name as role,
+           s.section_name,
+           s.section_id,
+           sa.sdao_rank,
            u.status,
            u.created_at,
            u.updated_at,
@@ -3725,6 +3829,8 @@ BEGIN
     FROM tbl_user u
     JOIN tbl_role r ON u.role_id = r.role_id
     LEFT JOIN tbl_program p ON u.program_id = p.program_id
+    LEFT JOIN tbl_section s ON u.section_id = s.section_id
+    LEFT JOIN tbl_sdao_approver sa ON u.user_id = sa.user_id
     WHERE u.role_id != student_role_id AND u.email = p_email;
 END $$
 DELIMITER ;
@@ -3735,7 +3841,8 @@ CREATE DEFINER='admin'@'%' PROCEDURE UpdateManagedAccount(
     IN p_role_name VARCHAR(100),
     IN p_program_name VARCHAR(100), -- Can now be NULL
     IN p_status ENUM('Active', 'Pending', 'Archive'),
-    IN p_updated_by_email VARCHAR(100)
+    IN p_updated_by_email VARCHAR(100),
+    IN p_sdao_rank INT  -- NULL for non-SDAO roles, 1-3 for SDAO
 )
 BEGIN
     DECLARE v_role_id INT;
@@ -3743,6 +3850,7 @@ BEGIN
     DECLARE v_email VARCHAR(100);
     DECLARE v_updated_by_id VARCHAR(200);
     DECLARE v_current_status ENUM('Active', 'Pending', 'Archive');
+    DECLARE v_previous_role VARCHAR(100);
 
     -- Get updater user_id for logging
     SELECT user_id INTO v_updated_by_id FROM tbl_user WHERE email = p_updated_by_email LIMIT 1;
@@ -3750,8 +3858,12 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Updater user not found';
     END IF;
 
-    -- Get current email and status for logging
-    SELECT email, status INTO v_email, v_current_status FROM tbl_user WHERE user_id = p_user_id;
+    -- Get current email, status, and role for logging
+    SELECT u.email, u.status, r.role_name 
+    INTO v_email, v_current_status, v_previous_role 
+    FROM tbl_user u 
+    JOIN tbl_role r ON u.role_id = r.role_id 
+    WHERE u.user_id = p_user_id;
 
     IF v_email IS NULL THEN
         SIGNAL SQLSTATE '45000' 
@@ -3793,6 +3905,17 @@ BEGIN
         archived_reason = CASE WHEN p_status = 'Archive' AND v_current_status != 'Archive' THEN 'Status updated to Archive' ELSE archived_reason END,
         updated_at = CURRENT_TIMESTAMP
     WHERE user_id = p_user_id;
+    
+    -- Handle SDAO rank changes
+    IF p_role_name = 'SDAO' AND p_sdao_rank IS NOT NULL THEN
+        -- Assign or update SDAO rank
+        INSERT INTO tbl_sdao_approver (user_id, sdao_rank)
+        VALUES (p_user_id, p_sdao_rank)
+        ON DUPLICATE KEY UPDATE sdao_rank = p_sdao_rank;
+    ELSEIF v_previous_role = 'SDAO' AND p_role_name != 'SDAO' THEN
+        -- Remove from sdao_approver if changing from SDAO to another role
+        DELETE FROM tbl_sdao_approver WHERE user_id = p_user_id;
+    END IF;
 
     -- Log the update using LogAction
     CALL LogAction(
@@ -3804,7 +3927,9 @@ BEGIN
             'program_name', COALESCE(p_program_name, 'No Program'), 
             'status', p_status,
             'target_email', v_email,
-            'previous_status', v_current_status
+            'previous_status', v_current_status,
+            'previous_role', v_previous_role,
+            'sdao_rank', p_sdao_rank
         ),
         NULL,
         NULL
@@ -3815,6 +3940,7 @@ BEGIN
            u.email,
            COALESCE(p.name, 'No Program') as program,
            r.role_name as role,
+           sa.sdao_rank,
            u.status,
            u.created_at,
            u.updated_at,
@@ -3824,6 +3950,7 @@ BEGIN
     FROM tbl_user u
     JOIN tbl_role r ON u.role_id = r.role_id
     LEFT JOIN tbl_program p ON u.program_id = p.program_id
+    LEFT JOIN tbl_sdao_approver sa ON u.user_id = sa.user_id
     WHERE u.user_id = p_user_id;
 END $$
 DELIMITER ;
@@ -3963,6 +4090,262 @@ BEGIN
     JOIN tbl_role r ON u.role_id = r.role_id
     LEFT JOIN tbl_program p ON u.program_id = p.program_id
     WHERE u.user_id = p_user_id;
+END $$
+DELIMITER ;
+
+-- =====================================================
+-- SECTION MANAGEMENT STORED PROCEDURES
+-- =====================================================
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE AddSection(
+    IN p_section_name VARCHAR(100),
+    IN p_program_id INT
+)
+BEGIN
+    DECLARE v_program_exists INT;
+    
+    -- Validate section name
+    IF p_section_name IS NULL OR TRIM(p_section_name) = '' THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Section name cannot be empty';
+    END IF;
+    
+    IF LENGTH(TRIM(p_section_name)) < 2 OR LENGTH(TRIM(p_section_name)) > 100 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Section name must be 2-100 characters';
+    END IF;
+    
+    -- Validate no spaces or special characters (only letters, numbers, hyphens, underscores)
+    IF p_section_name REGEXP '[^a-zA-Z0-9_-]' THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Section name can only contain letters, numbers, hyphens, and underscores';
+    END IF;
+    
+    -- Check if program exists and is active
+    SELECT COUNT(*) INTO v_program_exists 
+    FROM tbl_program 
+    WHERE program_id = p_program_id AND status = 'Active';
+    
+    IF v_program_exists = 0 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Program does not exist or is inactive';
+    END IF;
+    
+    -- Check for duplicate section name in same program
+    IF EXISTS (
+        SELECT 1 FROM tbl_section 
+        WHERE program_id = p_program_id 
+        AND section_name = TRIM(p_section_name)
+    ) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Section name already exists in this program';
+    END IF;
+    
+    -- Insert section (year_level removed)
+    INSERT INTO tbl_section (section_name, program_id)
+    VALUES (TRIM(p_section_name), p_program_id);
+    
+    -- Return the new section
+    SELECT 
+        section_id,
+        section_name,
+        program_id,
+        is_active,
+        created_at
+    FROM tbl_section
+    WHERE section_id = LAST_INSERT_ID();
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE UpdateSection(
+    IN p_section_id INT,
+    IN p_section_name VARCHAR(100),
+    IN p_program_id INT
+)
+BEGIN
+    -- Validate section ID
+    IF NOT EXISTS (SELECT 1 FROM tbl_section WHERE section_id = p_section_id) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Section not found';
+    END IF;
+    
+    -- Validate section name
+    IF p_section_name IS NULL OR TRIM(p_section_name) = '' THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Section name cannot be empty';
+    END IF;
+    
+    IF LENGTH(TRIM(p_section_name)) < 2 OR LENGTH(TRIM(p_section_name)) > 100 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Section name must be 2-100 characters';
+    END IF;
+    
+    -- Validate no spaces or special characters (only letters, numbers, hyphens, underscores)
+    IF p_section_name REGEXP '[^a-zA-Z0-9_-]' THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Section name can only contain letters, numbers, hyphens, and underscores';
+    END IF;
+    
+    -- Validate program exists
+    IF NOT EXISTS (SELECT 1 FROM tbl_program WHERE program_id = p_program_id) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Program not found';
+    END IF;
+    
+    -- Check for duplicate name in the new program (excluding current section)
+    IF EXISTS (
+        SELECT 1 FROM tbl_section 
+        WHERE program_id = p_program_id 
+        AND section_name = TRIM(p_section_name)
+        AND section_id != p_section_id
+    ) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Section name already exists in this program';
+    END IF;
+    
+    -- Update section (both name and program can be changed)
+    UPDATE tbl_section
+    SET section_name = TRIM(p_section_name),
+        program_id = p_program_id,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE section_id = p_section_id;
+    
+    -- Return updated section
+    SELECT 
+        section_id,
+        section_name,
+        program_id,
+        is_active,
+        created_at,
+        updated_at
+    FROM tbl_section
+    WHERE section_id = p_section_id;
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetAllSections(
+    IN p_program_id INT,
+    IN p_is_active BOOLEAN
+)
+BEGIN
+    SELECT 
+        s.section_id,
+        s.section_name,
+        s.program_id,
+        s.is_active,
+        s.created_at,
+        s.updated_at,
+        p.name AS program_name,
+        p.abbreviation AS program_abbreviation,
+        c.name AS college_name,
+        COUNT(u.user_id) AS student_count
+    FROM tbl_section s
+    INNER JOIN tbl_program p ON s.program_id = p.program_id
+    INNER JOIN tbl_college c ON p.college_id = c.college_id
+    LEFT JOIN tbl_user u ON s.section_id = u.section_id
+    WHERE (p_program_id IS NULL OR s.program_id = p_program_id)
+      AND (p_is_active IS NULL OR s.is_active = p_is_active)
+    GROUP BY s.section_id, s.section_name, s.program_id, 
+             s.is_active, s.created_at, s.updated_at,
+             p.name, p.abbreviation, c.name
+    ORDER BY c.name, p.abbreviation, s.section_name;
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetSectionById(
+    IN p_section_id INT
+)
+BEGIN
+    -- Section details with program info
+    SELECT 
+        s.section_id,
+        s.section_name,
+        s.program_id,
+        s.is_active,
+        s.created_at,
+        s.updated_at,
+        p.name AS program_name,
+        p.abbreviation AS program_abbreviation,
+        c.college_name,
+        COUNT(u.user_id) AS student_count
+    FROM tbl_section s
+    INNER JOIN tbl_program p ON s.program_id = p.program_id
+    INNER JOIN tbl_college c ON p.college_id = c.college_id
+    LEFT JOIN tbl_user u ON s.section_id = u.section_id
+    WHERE s.section_id = p_section_id
+    GROUP BY s.section_id, s.section_name, s.program_id,
+             s.is_active, s.created_at, s.updated_at,
+             p.name, p.abbreviation, c.college_name;
+    
+    -- Students in this section
+    SELECT 
+        u.user_id,
+        CONCAT(u.f_name, ' ', u.l_name) AS name,
+        u.email
+    FROM tbl_user u
+    WHERE u.section_id = p_section_id
+    ORDER BY u.l_name, u.f_name;
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE ArchiveSection(
+    IN p_section_id INT
+)
+BEGIN
+    DECLARE v_student_count INT;
+    
+    -- Check if section exists
+    IF NOT EXISTS (SELECT 1 FROM tbl_section WHERE section_id = p_section_id) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Section not found';
+    END IF;
+    
+    -- Check if section has students
+    SELECT COUNT(*) INTO v_student_count
+    FROM tbl_user
+    WHERE section_id = p_section_id;
+    
+    IF v_student_count > 0 THEN
+        SIGNAL SQLSTATE '45000' 
+        SET MESSAGE_TEXT = 'Cannot archive section with students. Please reassign students first.';
+    END IF;
+    
+    -- Archive section
+    UPDATE tbl_section
+    SET is_active = FALSE,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE section_id = p_section_id;
+    
+    -- Return updated section
+    SELECT 
+        section_id,
+        section_name,
+        program_id,
+        is_active,
+        updated_at
+    FROM tbl_section
+    WHERE section_id = p_section_id;
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE UnarchiveSection(
+    IN p_section_id INT
+)
+BEGIN
+    -- Check if section exists
+    IF NOT EXISTS (SELECT 1 FROM tbl_section WHERE section_id = p_section_id) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Section not found';
+    END IF;
+    
+    -- Unarchive section
+    UPDATE tbl_section
+    SET is_active = TRUE,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE section_id = p_section_id;
+    
+    -- Return updated section
+    SELECT 
+        section_id,
+        section_name,
+        program_id,
+        is_active,
+        updated_at
+    FROM tbl_section
+    WHERE section_id = p_section_id;
 END $$
 DELIMITER ;
 
@@ -4385,13 +4768,50 @@ BEGIN
             END IF;
         ELSE
             -- For subsequent steps, use the standard role-based selection
-            SET v_approver_id = (
-                SELECT user_id
-                FROM tbl_user
-                WHERE role_id = v_role_id
-                  AND status = 'Active'
-                LIMIT 1
-            );
+            -- Special handling for SDAO: Select by rank (Rank 2/3 first, then Rank 1)
+            IF v_role_id = (SELECT role_id FROM tbl_role WHERE role_name = 'SDAO') THEN
+                -- Check if a Rank 2 or 3 SDAO has already been assigned
+                IF NOT EXISTS (
+                    SELECT 1 FROM tbl_approval_process ap
+                    JOIN tbl_sdao_approver sa ON ap.approver_id = sa.user_id
+                    WHERE ap.application_id = p_application_id
+                      AND ap.period_id = v_period_id
+                      AND ap.approval_role_id = v_role_id
+                      AND sa.sdao_rank IN (2, 3)
+                ) THEN
+                    -- Assign Rank 2 or 3 SDAO (first approval level)
+                    SET v_approver_id = (
+                        SELECT u.user_id
+                        FROM tbl_user u
+                        JOIN tbl_sdao_approver sa ON u.user_id = sa.user_id
+                        WHERE u.role_id = v_role_id
+                          AND u.status = 'Active'
+                          AND sa.sdao_rank IN (2, 3)
+                        ORDER BY sa.sdao_rank ASC  -- Prefer Rank 2 over Rank 3
+                        LIMIT 1
+                    );
+                ELSE
+                    -- Assign Rank 1 SDAO (final approval level)
+                    SET v_approver_id = (
+                        SELECT u.user_id
+                        FROM tbl_user u
+                        JOIN tbl_sdao_approver sa ON u.user_id = sa.user_id
+                        WHERE u.role_id = v_role_id
+                          AND u.status = 'Active'
+                          AND sa.sdao_rank = 1
+                        LIMIT 1
+                    );
+                END IF;
+            ELSE
+                -- Standard role-based selection for non-SDAO roles
+                SET v_approver_id = (
+                    SELECT user_id
+                    FROM tbl_user
+                    WHERE role_id = v_role_id
+                      AND status = 'Active'
+                    LIMIT 1
+                );
+            END IF;
         END IF;
 
         IF v_approver_id IS NOT NULL THEN
@@ -5578,7 +5998,11 @@ BEGIN
             SELECT 
                 ap.approval_id as id,
                 ap.step,
-                r.role_name,
+                CASE 
+                    WHEN r.role_name = 'SDAO' AND sa.sdao_rank IS NOT NULL 
+                    THEN CONCAT('SDAO (Rank ', sa.sdao_rank, ')')
+                    ELSE r.role_name
+                END as role_name,
                 ap.status,
                 u.email,
                 u.f_name,
@@ -5591,6 +6015,8 @@ BEGIN
                 ON ap.approval_role_id = r.role_id
             LEFT JOIN tbl_user u 
                 ON ap.approver_id = u.user_id
+            LEFT JOIN tbl_sdao_approver sa
+                ON u.user_id = sa.user_id
             WHERE ap.application_id = p_application_id
             ORDER BY ap.step;
 END $$
@@ -11985,13 +12411,19 @@ DELIMITER ;
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetRoles()
 BEGIN
-    -- Return all roles
+    -- Return all roles (approvers + Faculty for account management)
+    -- Excludes only Student role from dropdown
     SELECT 
         role_id,
         role_name
     FROM tbl_role 
-    WHERE is_approver = 1
-    ORDER BY hierarchy_order;
+    WHERE role_name != 'Student'  -- Exclude Student from role selection
+    ORDER BY 
+        CASE 
+            WHEN hierarchy_order IS NULL THEN 999  -- Non-approver roles (Faculty, SDAO) at end
+            ELSE hierarchy_order 
+        END,
+        role_name;
 END $$
 DELIMITER ;
 
@@ -19487,7 +19919,8 @@ VALUES("Student",0,null),
 ("Program Chair",1,2),
 ("SDAO",1,5),
 ("Dean",1,3),
-("Academic Director",1,4);
+("Academic Director",1,4),
+("Faculty",0,null);  -- View-only role for faculty members
 
 -- Create system user for automated logging
 INSERT INTO tbl_user (user_id, f_name, l_name, email, role_id, status, created_at)
@@ -19606,6 +20039,13 @@ VALUES
 (5,4),
 (6,4);
 
+-- Faculty permissions (role_id 7): WEB_ACCESS, VIEW_ORGANIZATION, VIEW_EVENT
+INSERT INTO tbl_role_permission (role_id, permission_id)
+VALUES
+(7,23),  -- WEB_ACCESS
+(7,9),   -- VIEW_ORGANIZATION
+(7,4);   -- VIEW_EVENT
+
 INSERT INTO tbl_college (name, abbreviation) VALUES 
 ("School of Arts, Sciences, and Education", "SASE"),
 ("School of Business, Management, and Accountancy", "SBMA"),
@@ -19629,15 +20069,65 @@ INSERT INTO tbl_program (college_id, name, abbreviation) VALUES
 (3,"Bachelor of Science in Architecture", "BSArch"),
 (3,"Bachelor of Science in Computer Science with specialization in Machine Learning", "BSCS-ML");
 
-INSERT INTO tbl_user (user_id, f_name, l_name, email, program_id, role_id) VALUES
--- ('_ExbgMDtE-90mt0wLlA74VFYH5I1freBLw4NMY9RcBU', ' Geraldine', 'Aris', 'arisgc@students.nu-dasma.edu.ph', 1, 2),
-('6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0', 'Benson', 'Javier', 'javierbb@students.nu-dasma.edu.ph', NULL, 4),
-('cyQuRJT6GaT0Y89NFQua6nMhFJF6E-SAIk_rpryVY1k', ' Carl Roehl', 'Falcon', 'falconcs@students.nu-dasma.edu.ph', NULL, 6),
-('dumalagim@students.nu-dasma.edu.ph', 'Iver', 'Dumalag', 'dumalagim@students.nu-dasma.edu.ph', 1, 1),
-('LBmQ-WzvRhVmb55Ucidrc14aL39ae9Ei-7xfbOrPeEA', ' Samantha Joy', 'Madrunio', 'madruniosm@students.nu-dasma.edu.ph', 13, 2),
-('NqBfAZcMXHZF5g9ztwkQ1ykPgtNmZwYRcIPKKK40ROc', ' Alister Dylan Emmanuel', 'Realo', 'realoam@students.nu-dasma.edu.ph', 13, 1),
-('CyTLmjW4Edhvk2WvWFDNuWLYjW0WJETBPbY2HWk-ZqE', ' Loraine', 'Miraballes', 'miraballesl@students.nu-dasma.edu.ph', NULL, 1),
-('CY4e1GmCXysMRn8VYudhqDy7CDJ8xVidGO1v8RnRj1E', ' Shamiah M', 'Mendoza', 'mendozasm@students.nu-dasma.edu.ph', 13, 3);
+-- Insert sections for Computer Science (program_id = 11)
+INSERT INTO tbl_section (section_name, program_id) VALUES
+('COM251', 11),
+('COM252', 11),
+('COM253', 11),
+('COM241', 11),
+('COM242', 11),
+('COM231', 11),
+('COM232', 11),
+('COM221', 11);
+
+-- Insert sections for BSIT (program_id = 13)
+INSERT INTO tbl_section (section_name, program_id) VALUES
+('INF251', 13),
+('INF252', 13),
+('INF253', 13),
+('INF254', 13),
+('INF255', 13),
+('INF241', 13),
+('INF242', 13),
+('INF243', 13),
+('INF244', 13),
+('INF245', 13),
+('INF246', 13),
+('INF231', 13),
+('INF232', 13),
+('INF233', 13),
+('INF234', 13),
+('INF221', 13),
+('INF222', 13),
+('INF223', 13),
+('INF224', 13);
+
+INSERT INTO tbl_user (user_id, f_name, l_name, email, program_id, section_id, role_id) VALUES
+-- SDAO and other roles (no program/section needed)
+('6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0', 'Benson', 'Javier', 'javierbb@students.nu-dasma.edu.ph', NULL, NULL, 4),
+('cyQuRJT6GaT0Y89NFQua6nMhFJF6E-SAIk_rpryVY1k', ' Carl Roehl', 'Falcon', 'falconcs@students.nu-dasma.edu.ph', NULL, NULL, 6),
+-- Advisers for Computer Science (program_id = 11)
+('adviser1@nu-dasma.edu.ph', 'Maria', 'Santos', 'adviser1@nu-dasma.edu.ph', 11, NULL, 2),
+('adviser2@nu-dasma.edu.ph', 'Juan', 'Dela Cruz', 'adviser2@nu-dasma.edu.ph', 11, NULL, 2),
+-- Advisers for BSIT (program_id = 13)
+('CyTLmjW4Edhvk2WvWFDNuWLYjW0WJETBPbY2HWk-ZqE', ' Loraine', 'Miraballes', 'miraballesl@students.nu-dasma.edu.ph', 13, NULL, 2),
+('adviser3@nu-dasma.edu.ph', 'Roberto', 'Garcia', 'adviser3@nu-dasma.edu.ph', 13, NULL, 2),
+-- Students with BSIT program (program_id = 13) and sections
+('dumalagim@students.nu-dasma.edu.ph', 'Iver', 'Dumalag', 'dumalagim@students.nu-dasma.edu.ph', 13, (SELECT section_id FROM tbl_section WHERE section_name = 'INF251' AND program_id = 13), 1),
+('LBmQ-WzvRhVmb55Ucidrc14aL39ae9Ei-7xfbOrPeEA', ' Samantha Joy', 'Madrunio', 'madruniosm@students.nu-dasma.edu.ph', 13, (SELECT section_id FROM tbl_section WHERE section_name = 'INF252' AND program_id = 13), 1),
+('NqBfAZcMXHZF5g9ztwkQ1ykPgtNmZwYRcIPKKK40ROc', ' Alister Dylan Emmanuel', 'Realo', 'realoam@students.nu-dasma.edu.ph', 13, (SELECT section_id FROM tbl_section WHERE section_name = 'INF241' AND program_id = 13), 1),
+-- Students with Computer Science program (program_id = 11) and sections
+('CY4e1GmCXysMRn8VYudhqDy7CDJ8xVidGO1v8RnRj1E', ' Shamiah M', 'Mendoza', 'mendozasm@students.nu-dasma.edu.ph', 11, (SELECT section_id FROM tbl_section WHERE section_name = 'COM251' AND program_id = 11), 1);
+
+-- Migrate existing SDAO users to tbl_sdao_approver with rank 1 (default)
+-- Assigns rank 1 to all users with SDAO role (role_id = 4)
+INSERT INTO tbl_sdao_approver (user_id, sdao_rank)
+SELECT user_id, 1
+FROM tbl_user
+WHERE role_id = (SELECT role_id FROM tbl_role WHERE role_name = 'SDAO')
+  AND user_id != 'sys-system'  -- Exclude system user
+ORDER BY created_at ASC
+LIMIT 1;  -- Only migrate the first SDAO user to rank 1
 
 
 -- INSERT INTO tbl_application_requirement (requirement_name, is_applicable_to, file_path, created_by) VALUES
@@ -20538,41 +21028,41 @@ ON DUPLICATE KEY UPDATE user_id=user_id;
 
 /* 2) Organization versions */
 INSERT INTO tbl_organization_version (name, status, created_by)
-VALUES ('Tech Innovators Society AY2025', 'Approved', @sdao);
+VALUES ('CS Tech Innovators Society AY2025', 'Approved', @sdao);
 SET ov1 = LAST_INSERT_ID();
 
 INSERT INTO tbl_organization_version (name, status, created_by)
-VALUES ('Business Leaders Guild AY2025', 'Approved', @sdao);
+VALUES ('BSIT Web Development Club AY2025', 'Approved', @sdao);
 SET ov2 = LAST_INSERT_ID();
 
 INSERT INTO tbl_organization_version (name, status, created_by)
-VALUES ('Arts & Culture Circle AY2025', 'Approved', @sdao);
+VALUES ('CS AI & Machine Learning Circle AY2025', 'Approved', @sdao);
 SET ov3 = LAST_INSERT_ID();
 
 INSERT INTO tbl_organization_version (name, status, created_by)
-VALUES ('Green Earth Advocates AY2025', 'Approved', @sdao);
+VALUES ('BSIT Mobile App Developers AY2025', 'Approved', @sdao);
 SET ov4 = LAST_INSERT_ID();
 
 /* 3) Organizations */
 INSERT INTO tbl_organization (adviser_id, current_org_version_id, name, description, base_program_id, logo, status, membership_fee_type, category, membership_fee_amount, is_recruiting, is_open_to_all_courses, archived_at, archived_by, archived_reason)
-VALUES ('ADV001', ov1, 'Tech Innovators Society', 'Organization focused on technology innovation and hackathons', 13, NULL, 'Approved', 'Free', 'Co-Curricular Organization', NULL, TRUE, TRUE, NULL, NULL, NULL);
+VALUES ('adviser1@nu-dasma.edu.ph', ov1, 'CS Tech Innovators Society', 'Computer Science organization focused on technology innovation and hackathons', 11, NULL, 'Approved', 'Free', 'Co-Curricular Organization', NULL, TRUE, FALSE, NULL, NULL, NULL);
 SET org1 = LAST_INSERT_ID();
-UPDATE tbl_organization_version SET organization_id=org1, name='Tech Innovators Society' WHERE org_version_id=ov1;
+UPDATE tbl_organization_version SET organization_id=org1, name='CS Tech Innovators Society', base_program_id=11 WHERE org_version_id=ov1;
 
 INSERT INTO tbl_organization (adviser_id, current_org_version_id, name, description, base_program_id, logo, status, membership_fee_type, category, membership_fee_amount, is_recruiting, is_open_to_all_courses, archived_at, archived_by, archived_reason)
-VALUES ('ADV002', ov2, 'Business Leaders Guild', 'Leadership and business case org', 8, NULL, 'Approved', 'Free', 'Co-Curricular Organization', NULL, TRUE, TRUE, NULL, NULL, NULL);
+VALUES ('CyTLmjW4Edhvk2WvWFDNuWLYjW0WJETBPbY2HWk-ZqE', ov2, 'BSIT Web Development Club', 'BSIT organization for web development and modern web technologies', 13, NULL, 'Approved', 'Free', 'Co-Curricular Organization', NULL, TRUE, FALSE, NULL, NULL, NULL);
 SET org2 = LAST_INSERT_ID();
-UPDATE tbl_organization_version SET organization_id=org2, name='Business Leaders Guild' WHERE org_version_id=ov2;
+UPDATE tbl_organization_version SET organization_id=org2, name='BSIT Web Development Club', base_program_id=13 WHERE org_version_id=ov2;
 
 INSERT INTO tbl_organization (adviser_id, current_org_version_id, name, description, base_program_id, logo, status, membership_fee_type, category, membership_fee_amount, is_recruiting, is_open_to_all_courses, archived_at, archived_by, archived_reason)
-VALUES ('ADV003', ov3, 'Arts & Culture Circle', 'Fosters arts, culture, and performances', 1, NULL, 'Approved', 'Free', 'Co-Curricular Organization', NULL, TRUE, TRUE, NULL, NULL, NULL);
+VALUES ('adviser2@nu-dasma.edu.ph', ov3, 'CS AI & Machine Learning Circle', 'Computer Science organization focused on AI and ML research and projects', 11, NULL, 'Approved', 'Free', 'Co-Curricular Organization', NULL, TRUE, FALSE, NULL, NULL, NULL);
 SET org3 = LAST_INSERT_ID();
-UPDATE tbl_organization_version SET organization_id=org3, name='Arts & Culture Circle' WHERE org_version_id=ov3;
+UPDATE tbl_organization_version SET organization_id=org3, name='CS AI & Machine Learning Circle', base_program_id=11 WHERE org_version_id=ov3;
 
 INSERT INTO tbl_organization (adviser_id, current_org_version_id, name, description, base_program_id, logo, status, membership_fee_type, category, membership_fee_amount, is_recruiting, is_open_to_all_courses, archived_at, archived_by, archived_reason)
-VALUES ('ADV004', ov4, 'Green Earth Advocates', 'Environmental sustainability and green initiatives', 11, NULL, 'Approved', 'Free', 'Co-Curricular Organization', NULL, TRUE, TRUE, NULL, NULL, NULL);
+VALUES ('adviser3@nu-dasma.edu.ph', ov4, 'BSIT Mobile App Developers', 'BSIT organization for mobile application development and innovation', 13, NULL, 'Approved', 'Free', 'Co-Curricular Organization', NULL, TRUE, FALSE, NULL, NULL, NULL);
 SET org4 = LAST_INSERT_ID();
-UPDATE tbl_organization_version SET organization_id=org4, name='Green Earth Advocates' WHERE org_version_id=ov4;
+UPDATE tbl_organization_version SET organization_id=org4, name='BSIT Mobile App Developers', base_program_id=13 WHERE org_version_id=ov4;
 
 /* 4) Renewal cycles */
 INSERT INTO tbl_renewal_cycle (organization_id, cycle_number, start_date, president_id, org_version_id, created_at)

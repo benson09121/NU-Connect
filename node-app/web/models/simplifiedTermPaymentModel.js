@@ -29,10 +29,14 @@ class TermModel {
                     term_id,
                     academic_year,
                     term_name,
+                    term_description,
                     start_date,
                     end_date,
-                    is_active,
-                    created_at
+                    created_at,
+                    updated_at,
+                    created_by,
+                    -- Calculated field: is term currently active based on dates
+                    (CURDATE() BETWEEN start_date AND end_date) AS is_current_term
                 FROM tbl_academic_term 
                 ORDER BY start_date DESC
             `);
@@ -49,21 +53,27 @@ class TermModel {
     static async createTerm(termData) {
         const connection = await pool.getConnection();
         try {
-            // First, deactivate all current active terms
-            await connection.query('UPDATE tbl_academic_term SET is_active = FALSE');
+            // Validate date range
+            if (new Date(termData.end_date) <= new Date(termData.start_date)) {
+                throw new Error('End date must be after start date');
+            }
             
-            // Create new term
+            // Create new term (no is_active column - date ranges determine active status)
             const [result] = await connection.query(`
                 INSERT INTO tbl_academic_term (
-                    academic_year, term_name, start_date, end_date, 
-                    is_active, created_by
+                    academic_year, 
+                    term_name, 
+                    term_description,
+                    start_date, 
+                    end_date, 
+                    created_by
                 ) VALUES (?, ?, ?, ?, ?, ?)
             `, [
                 termData.academic_year,
                 termData.term_name,
+                termData.term_description || null,
                 termData.start_date,
                 termData.end_date,
-                termData.is_active || true,
                 termData.created_by
             ]);
             
@@ -80,24 +90,50 @@ class TermModel {
     static async updateTerm(termId, termData) {
         const connection = await pool.getConnection();
         try {
-            if (termData.is_active) {
-                // If setting this term as active, deactivate all others first
-                await connection.query('UPDATE tbl_academic_term SET is_active = FALSE');
+            // Validate date range if dates are being updated
+            if (termData.start_date && termData.end_date) {
+                if (new Date(termData.end_date) <= new Date(termData.start_date)) {
+                    throw new Error('End date must be after start date');
+                }
             }
+            
+            // Build dynamic UPDATE query based on provided fields
+            const updates = [];
+            const values = [];
+            
+            if (termData.academic_year !== undefined) {
+                updates.push('academic_year = ?');
+                values.push(termData.academic_year);
+            }
+            if (termData.term_name !== undefined) {
+                updates.push('term_name = ?');
+                values.push(termData.term_name);
+            }
+            if (termData.term_description !== undefined) {
+                updates.push('term_description = ?');
+                values.push(termData.term_description);
+            }
+            if (termData.start_date !== undefined) {
+                updates.push('start_date = ?');
+                values.push(termData.start_date);
+            }
+            if (termData.end_date !== undefined) {
+                updates.push('end_date = ?');
+                values.push(termData.end_date);
+            }
+            
+            if (updates.length === 0) {
+                throw new Error('No fields to update');
+            }
+            
+            updates.push('updated_at = NOW()');
+            values.push(termId);
             
             const [result] = await connection.query(`
                 UPDATE tbl_academic_term 
-                SET academic_year = ?, term_name = ?, start_date = ?, 
-                    end_date = ?, is_active = ?, updated_at = NOW()
+                SET ${updates.join(', ')}
                 WHERE term_id = ?
-            `, [
-                termData.academic_year,
-                termData.term_name,
-                termData.start_date,
-                termData.end_date,
-                termData.is_active,
-                termId
-            ]);
+            `, values);
             
             return result.affectedRows > 0;
         } catch (error) {
