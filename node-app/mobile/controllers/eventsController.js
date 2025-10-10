@@ -392,75 +392,28 @@ async function getEventCertificate(req, res) {
 
 async function scanTicket(req, res) {
     try {
-        // ===== COMPREHENSIVE DEBUG LOGGING =====
-        console.log('='.repeat(60));
-        console.log('scanTicket: REQUEST RECEIVED');
-        console.log('='.repeat(60));
-        console.log('scanTicket: Full req.body:', JSON.stringify(req.body, null, 2));
-        console.log('scanTicket: req.body type:', typeof req.body);
-        console.log('scanTicket: req.body keys:', Object.keys(req.body));
-        console.log('scanTicket: req.headers[\'content-type\']:', req.headers['content-type']);
-        console.log('scanTicket: Authenticated user email:', req.user?.email);
-        console.log('-'.repeat(60));
-        
         const { email, event_id } = req.body;  // Changed from event_title to event_id
         const user = await userModel.getUser(req.user.email);
-        
-        console.log('scanTicket: Extracted email:', email);
-        console.log('scanTicket: Extracted event_id:', event_id);
-        console.log('scanTicket: Scanner user_id:', user?.user_id);
-        console.log('scanTicket: Scanner email:', user?.email);
-        console.log('-'.repeat(60));
+        console.log('scanTicket: email:', email, 'event_id:', event_id);
 
-        // Validate extracted data
-        if (!email) {
-            console.error('scanTicket: ERROR - email is missing from request body');
-            return res.status(400).json({ 
-                message: 'Missing required field: email',
-                received_body: req.body 
-            });
-        }
-        
-        if (!event_id) {
-            console.error('scanTicket: ERROR - event_id is missing from request body');
-            return res.status(400).json({ 
-                message: 'Missing required field: event_id',
-                received_body: req.body 
-            });
-        }
-
-        console.log('scanTicket: Calling database procedure ScanTicket...');
         const scannedTicket = await eventModel.scanTicket(email, event_id, user.user_id);
-        console.log('scanTicket: Database response:', JSON.stringify(scannedTicket, null, 2));
-        
         if (!scannedTicket) {
-            console.warn('scanTicket: No ticket found');
             return res.status(404).json({ message: 'Ticket not found' });
         }
-        
-        console.log('scanTicket: Fetching updated attendees list...');
         await webEventModel.getAttendeesByEventId(event_id);
         
         const attendees = await webEventModel.getOneEventAttendeesWithDetails(event_id, email);
-        console.log('scanTicket: Broadcasting to real-time channel...');
         const ch = `attendees_${event_id}`;
-        publishToChannel(ch, {
-            channel: ch,
-            operation: 'UPDATE',
-            data: attendees
-        });
-        
-        console.log('scanTicket: SUCCESS - Ticket scanned successfully');
-        console.log('='.repeat(60));
+    publishToChannel(ch, {
+      channel: ch,
+      operation: 'UPDATE',
+      data: attendees
+    });
+        console.log('scanTicket: Scanned ticket:', scannedTicket);
         res.status(200).json(scannedTicket);
     } catch (error) {
-        console.error('='.repeat(60));
-        console.error('scanTicket: EXCEPTION CAUGHT');
-        console.error('scanTicket: Error message:', error.message);
-        console.error('scanTicket: Error stack:', error.stack);
-        console.error('scanTicket: req.body was:', JSON.stringify(req.body, null, 2));
-        console.error('='.repeat(60));
         res.status(500).json({ message: error.message });
+        console.error('scanTicket: Error:', error.message);
     }
 }
 
