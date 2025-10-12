@@ -69,18 +69,23 @@ async function updateTransaction(params) {
     const {
       transaction_id,
       user_email,
+      payer_name = null,
+      payee_name = null,
+      transaction_type_code = null,      // NEW: Allow changing transaction type
+      payment_type_code = null,          // NEW: Allow changing payment type
       payment_description = null,
       amount = null,
       status = null,
-      proof_image = null,          // new path if replacing; null/'' ignored unless remove flag = 1
+      transaction_date = null,           // NEW: Allow changing transaction date
+      proof_image = null,
       receipt_no = null,
       category_code = null,
-      payer_name = null,
-      payee_name = null,
       payer_name_override = null,
       event_remarks = null,
-      remove_proof_image = 0,      // boolean-like (0/1)
-      org_version_id = null        // new parameter for organization version
+      organization_id = null,            // NEW: Allow changing organization
+      cycle_number = null,               // NEW: Allow changing cycle
+      org_version_id = null,
+      remove_proof_image = 0
     } = params;
 
     const removeFlag =
@@ -90,22 +95,27 @@ async function updateTransaction(params) {
       (typeof remove_proof_image === 'string' && remove_proof_image.toLowerCase() === 'true')
         ? 1 : 0;
 
-    const sql = `CALL UpdateTransaction(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+    const sql = `CALL UpdateTransaction(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
     const safeParams = [
       transaction_id || null,
       user_email || null,
+      payer_name,
+      payee_name,
+      transaction_type_code,
+      payment_type_code,
       payment_description,
       amount,
       status,
-      proof_image,          // may be null/''/path (proc handles tri-state with removeFlag)
+      transaction_date,
+      proof_image,
       receipt_no,
       category_code,
-      payer_name,
-      payee_name,
       payer_name_override,
       event_remarks,
-      removeFlag,
-      org_version_id
+      organization_id,
+      cycle_number,
+      org_version_id,
+      removeFlag
     ];
 
     console.log('[transactionModel.updateTransaction] SQL:', sql);
@@ -249,6 +259,32 @@ async function updateAttendance(transaction_id) {
   }
 }
 
+async function getTransactionAuditTrail(transaction_id) {
+  const conn = await pool.getConnection();
+  try {
+    const [rows] = await conn.query(
+      'CALL GetTransactionAuditTrail(?);',
+      [transaction_id]
+    );
+    return rows[0] || [];
+  } finally {
+    conn.release();
+  }
+}
+
+async function getAllTransactionAudits(limit = 50, offset = 0) {
+  const conn = await pool.getConnection();
+  try {
+    const [rows] = await conn.query(
+      'CALL GetAllTransactionAudits(?, ?);',
+      [limit, offset]
+    );
+    return rows[0] || [];
+  } finally {
+    conn.release();
+  }
+}
+
 module.exports = {
   createTransaction,
   updateTransaction,
@@ -261,5 +297,7 @@ module.exports = {
   getPaymentTypes,
   getFinancialCategories,
   getTransactionTypes,
-  getTransactionsByOrganization
+  getTransactionsByOrganization,
+  getTransactionAuditTrail,
+  getAllTransactionAudits
 };

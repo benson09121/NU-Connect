@@ -579,15 +579,18 @@ CREATE TABLE tbl_event_requirement_submissions (
     event_application_id INT,
     requirement_id INT NOT NULL,
     cycle_number INT NOT NULL,
-    status enum('Pending', 'Approved', 'Rejected') DEFAULT 'Pending',
+    status ENUM('Pending', 'Approved', 'Rejected', 'Viewed') DEFAULT 'Pending',
     organization_id INT NOT NULL,
     file_path VARCHAR(255) NOT NULL,
     submitted_by VARCHAR(200) NOT NULL,
     submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    viewed_by VARCHAR(200) NULL,
+    viewed_at TIMESTAMP NULL,
     FOREIGN KEY (event_id) REFERENCES tbl_event(event_id),
     FOREIGN KEY (event_application_id) REFERENCES tbl_event_application(event_application_id),
     FOREIGN KEY (requirement_id) REFERENCES tbl_event_application_requirement(requirement_id),
     FOREIGN KEY (submitted_by) REFERENCES tbl_user(user_id),
+    FOREIGN KEY (viewed_by) REFERENCES tbl_user(user_id),
     FOREIGN KEY (organization_id, cycle_number) REFERENCES tbl_renewal_cycle(organization_id, cycle_number) ON DELETE CASCADE
 );
 
@@ -905,6 +908,37 @@ CREATE TABLE tbl_event_attendance (
     FOREIGN KEY (user_id) REFERENCES tbl_user(user_id) ON UPDATE CASCADE
 );
 
+-- Event Reminder Log Table
+-- Purpose: Track which email reminders have been sent to prevent duplicates
+CREATE TABLE IF NOT EXISTS tbl_event_reminder_log (
+    log_id INT AUTO_INCREMENT PRIMARY KEY,
+    event_id INT NOT NULL,
+    user_id VARCHAR(200) NOT NULL,
+    reminder_type ENUM('week_before', 'day_before', 'day_of') NOT NULL,
+    sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    recipient_email VARCHAR(255) NOT NULL,
+    
+    -- Indexes for performance
+    INDEX idx_event_user (event_id, user_id),
+    INDEX idx_reminder_type (reminder_type),
+    INDEX idx_sent_at (sent_at),
+    
+    -- Unique constraint to prevent duplicate reminders
+    UNIQUE KEY unique_reminder (event_id, user_id, reminder_type),
+    
+    -- Foreign keys
+    CONSTRAINT fk_reminder_event 
+        FOREIGN KEY (event_id) 
+        REFERENCES tbl_event(event_id) 
+        ON DELETE CASCADE,
+    
+    CONSTRAINT fk_reminder_user 
+        FOREIGN KEY (user_id) 
+        REFERENCES tbl_user(user_id) 
+        ON DELETE CASCADE
+        ON UPDATE CASCADE
+);
+
 
 -- Membership Specialization Table
 CREATE TABLE tbl_transaction_membership (
@@ -935,6 +969,35 @@ CREATE TABLE tbl_receipt_sequence (
 
 ALTER TABLE tbl_transaction
   ADD UNIQUE KEY uq_transaction_receipt_no (receipt_no);
+
+-- Transaction Audit Trail Table
+-- Purpose: Track all changes to transactions for accountability and prevent unauthorized modifications
+CREATE TABLE tbl_transaction_audit_trail (
+    audit_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    transaction_id INT NOT NULL,
+    action_type ENUM('CREATE', 'UPDATE', 'ARCHIVE', 'COMPLETE', 'CANCEL', 'DELETE') NOT NULL,
+    changed_by VARCHAR(200) NULL,
+    changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    old_status ENUM('Pending', 'Completed', 'Failed', 'Cancelled') NULL,
+    new_status ENUM('Pending', 'Completed', 'Failed', 'Cancelled') NULL,
+    old_amount DECIMAL(10,2) NULL,
+    new_amount DECIMAL(10,2) NULL,
+    old_payment_type_id INT NULL,
+    new_payment_type_id INT NULL,
+    old_category_id INT NULL,
+    new_category_id INT NULL,
+    old_proof_image VARCHAR(500) NULL,
+    new_proof_image VARCHAR(500) NULL,
+    changes_json JSON NULL COMMENT 'Detailed field-by-field changes',
+    reason VARCHAR(500) NULL COMMENT 'Reason for change (especially for archives/cancellations)',
+    ip_address VARCHAR(45) NULL,
+    user_agent VARCHAR(255) NULL,
+    FOREIGN KEY (transaction_id) REFERENCES tbl_transaction(transaction_id) ON DELETE CASCADE,
+    FOREIGN KEY (changed_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
+    INDEX idx_transaction_audit (transaction_id, changed_at),
+    INDEX idx_action_type (action_type),
+    INDEX idx_changed_by (changed_by)
+) COMMENT='Immutable audit log for all transaction changes';
 
 CREATE TABLE tbl_ai_conversation (
   conversation_id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -1147,6 +1210,178 @@ BEGIN
             SET MESSAGE_TEXT = 'New organizations cannot be created already archived';
     END IF;
 END$$
+DELIMITER ;
+
+-- ===================================================================
+-- TRANSACTION AUDIT TRAIL TRIGGERS
+-- Purpose: Prevent editing completed transactions and log all changes
+-- ===================================================================
+
+DELIMITER $$
+
+/* ---- Block editing transactions that have reached 'Completed' status ---- */
+CREATE TRIGGER trg_transaction_before_update
+BEFORE UPDATE ON tbl_transaction
+FOR EACH ROW
+BEGIN
+    -- Prevent ANY modifications to completed transactions
+    IF OLD.status = 'Completed' THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Cannot modify a transaction that has reached Completed status. Transaction is locked for audit compliance.';
+    END IF;
+    
+    -- Validate status transitions (no reverting from terminal states)
+    IF OLD.status = 'Failed' AND NEW.status != 'Failed' THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Cannot change status from Failed to another status';
+    END IF;
+    
+    IF OLD.status = 'Cancelled' AND NEW.status != 'Cancelled' THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Cannot change status from Cancelled to another status';
+    END IF;
+END$$
+
+/* ---- Log transaction creation ---- */
+CREATE TRIGGER trg_transaction_after_insert
+AFTER INSERT ON tbl_transaction
+FOR EACH ROW
+BEGIN
+    INSERT INTO tbl_transaction_audit_trail (
+        transaction_id,
+        action_type,
+        changed_by,
+        new_status,
+        new_amount,
+        new_payment_type_id,
+        new_category_id,
+        new_proof_image,
+        changes_json
+    ) VALUES (
+        NEW.transaction_id,
+        'CREATE',
+        NEW.user_id,
+        NEW.status,
+        NEW.amount,
+        NEW.payment_type_id,
+        NEW.category_id,
+        NEW.proof_image,
+        JSON_OBJECT(
+            'payer_name', NEW.payer_name,
+            'payee_name', NEW.payee_name,
+            'payment_description', NEW.payment_description,
+            'receipt_no', NEW.receipt_no,
+            'org_version_id', NEW.org_version_id
+        )
+    );
+END$$
+
+/* ---- Log transaction updates and status changes ---- */
+CREATE TRIGGER trg_transaction_after_update
+AFTER UPDATE ON tbl_transaction
+FOR EACH ROW
+BEGIN
+    DECLARE v_action_type VARCHAR(20);
+    DECLARE v_reason VARCHAR(500);
+    DECLARE v_changes JSON;
+    
+    -- Determine action type
+    SET v_action_type = CASE
+        WHEN NEW.status = 'Completed' AND OLD.status != 'Completed' THEN 'COMPLETE'
+        WHEN NEW.status = 'Cancelled' AND OLD.status != 'Cancelled' THEN 'CANCEL'
+        WHEN NEW.archived_at IS NOT NULL AND OLD.archived_at IS NULL THEN 'ARCHIVE'
+        ELSE 'UPDATE'
+    END;
+    
+    -- Build detailed changes JSON
+    SET v_changes = JSON_OBJECT(
+        'status_changed', OLD.status != NEW.status,
+        'amount_changed', OLD.amount != NEW.amount,
+        'payment_type_changed', OLD.payment_type_id != NEW.payment_type_id,
+        'category_changed', OLD.category_id != NEW.category_id,
+        'proof_image_changed', OLD.proof_image != NEW.proof_image,
+        'receipt_no_changed', OLD.receipt_no != NEW.receipt_no,
+        'payer_name_changed', OLD.payer_name != NEW.payer_name,
+        'payee_name_changed', OLD.payee_name != NEW.payee_name,
+        'description_changed', OLD.payment_description != NEW.payment_description
+    );
+    
+    -- Get archive reason if applicable
+    IF NEW.archived_at IS NOT NULL AND OLD.archived_at IS NULL THEN
+        SET v_reason = NEW.archived_reason;
+    END IF;
+    
+    -- Log to audit trail
+    INSERT INTO tbl_transaction_audit_trail (
+        transaction_id,
+        action_type,
+        changed_by,
+        old_status,
+        new_status,
+        old_amount,
+        new_amount,
+        old_payment_type_id,
+        new_payment_type_id,
+        old_category_id,
+        new_category_id,
+        old_proof_image,
+        new_proof_image,
+        changes_json,
+        reason
+    ) VALUES (
+        NEW.transaction_id,
+        v_action_type,
+        COALESCE(NEW.archived_by, NEW.user_id),
+        OLD.status,
+        NEW.status,
+        OLD.amount,
+        NEW.amount,
+        OLD.payment_type_id,
+        NEW.payment_type_id,
+        OLD.category_id,
+        NEW.category_id,
+        OLD.proof_image,
+        NEW.proof_image,
+        v_changes,
+        v_reason
+    );
+END$$
+
+/* ---- Log transaction deletion (soft or hard delete) ---- */
+CREATE TRIGGER trg_transaction_after_delete
+AFTER DELETE ON tbl_transaction
+FOR EACH ROW
+BEGIN
+    INSERT INTO tbl_transaction_audit_trail (
+        transaction_id,
+        action_type,
+        changed_by,
+        old_status,
+        old_amount,
+        old_payment_type_id,
+        old_category_id,
+        old_proof_image,
+        changes_json,
+        reason
+    ) VALUES (
+        OLD.transaction_id,
+        'DELETE',
+        OLD.archived_by,
+        OLD.status,
+        OLD.amount,
+        OLD.payment_type_id,
+        OLD.category_id,
+        OLD.proof_image,
+        JSON_OBJECT(
+            'payer_name', OLD.payer_name,
+            'payee_name', OLD.payee_name,
+            'payment_description', OLD.payment_description,
+            'receipt_no', OLD.receipt_no
+        ),
+        OLD.archived_reason
+    );
+END$$
+
 DELIMITER ;
 
 -- PROCEDURES
@@ -1521,6 +1756,7 @@ BEGIN
     DECLARE v_org_token VARCHAR(16);
     DECLARE v_yyyymm CHAR(6);
     DECLARE v_organization_name VARCHAR(255);
+    DECLARE v_event_title VARCHAR(300);
 
     -- Get user_id from email
     SELECT user_id INTO v_user_id
@@ -1534,6 +1770,10 @@ BEGIN
     SELECT name into v_organization_name
     FROM tbl_organization
     WHERE organization_id = p_organization_id;
+    
+    SELECT title INTO v_event_title
+    FROM tbl_event
+    WHERE event_id = p_event_id;
     
     -- Get transaction type ID for INCOME (event payments are income)
     SELECT transaction_type_id INTO v_transaction_type_id 
@@ -1639,13 +1879,15 @@ BEGIN
     -- Log the action
     CALL LogAction(
         p_user_email,
-        'Successfully created event payment transaction',
+        CONCAT('Payment submitted for "', v_event_title, '" (Amount: ₱', FORMAT(p_amount, 2), ')'),
         'Event Payment',
         JSON_OBJECT(
             'transaction_id', v_transaction_id,
             'amount', p_amount,
             'event_id', p_event_id,
+            'event_title', v_event_title,
             'organization_id', p_organization_id,
+            'organization_name', v_organization_name,
             'organization_version_id', p_organization_version_id,
             'receipt_no', v_receipt_no
         ),
@@ -2257,6 +2499,7 @@ CREATE DEFINER='admin'@'%' PROCEDURE DeleteEvent(
 )
 BEGIN
     DECLARE v_user_email VARCHAR(100);
+    DECLARE v_event_title VARCHAR(300);
 
     IF p_event_id IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'event_id required';
@@ -2269,6 +2512,9 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Only SDAO events can be deleted with this procedure';
     END IF;
 
+    -- Get event title before deletion
+    SELECT title INTO v_event_title FROM tbl_event WHERE event_id = p_event_id;
+
     DELETE FROM tbl_event WHERE event_id = p_event_id;
 
     SELECT email INTO v_user_email FROM tbl_user WHERE user_id = p_user_id LIMIT 1;
@@ -2276,9 +2522,9 @@ BEGIN
 
     CALL LogAction(
         v_user_email,
-        CONCAT('Permanently deleted event', IF(p_reason IS NOT NULL, CONCAT(' - Reason: ', p_reason), '')),
+        CONCAT('Permanently deleted event "', v_event_title, '"', IF(p_reason IS NOT NULL, CONCAT(' - Reason: ', p_reason), '')),
         'Event Management',
-        JSON_OBJECT('event_id', p_event_id, 'deleted_at', NOW(), 'reason', p_reason),
+        JSON_OBJECT('event_id', p_event_id, 'event_title', v_event_title, 'deleted_at', NOW(), 'reason', p_reason),
         '/events',
         NULL
     );
@@ -2294,8 +2540,15 @@ CREATE DEFINER='admin'@'%' PROCEDURE RegisterEvent(
 )
 BEGIN
     DECLARE v_status ENUM('Pending','Registered','Evaluated','Attended','Rejected');
+    DECLARE v_user_email VARCHAR(100);
+    DECLARE v_event_title VARCHAR(300);
+    DECLARE v_action_message TEXT;
 
     SET v_status = COALESCE(p_status, 'Registered');
+
+    -- Get user email and event title for logging
+    SELECT email INTO v_user_email FROM tbl_user WHERE user_id = p_user_id;
+    SELECT title INTO v_event_title FROM tbl_event WHERE event_id = p_event_id;
 
     -- Insert new attendance or update existing rejected/completed registration
     IF NOT EXISTS (
@@ -2324,10 +2577,14 @@ BEGIN
             WHERE event_id = p_event_id
               AND user_id = p_user_id
               AND deleted_at IS NULL;
+            
+            SET v_action_message = CONCAT('Re-registered for event "', v_event_title, '"');
         ELSE
             -- Insert new record
             INSERT INTO tbl_event_attendance (event_id, user_id, status, transaction_id)
             VALUES (p_event_id, p_user_id, v_status, p_transaction_id);
+            
+            SET v_action_message = CONCAT('Registered for event "', v_event_title, '"');
         END IF;
     ELSE
         -- Update existing active registration (only overwrite transaction_id if provided)
@@ -2341,6 +2598,25 @@ BEGIN
         WHERE event_id = p_event_id
           AND user_id  = p_user_id
           AND deleted_at IS NULL;
+        
+        SET v_action_message = CONCAT('Updated registration for event "', v_event_title, '"');
+    END IF;
+
+    -- Log the registration
+    IF v_user_email IS NOT NULL THEN
+        CALL LogAction(
+            v_user_email,
+            v_action_message,
+            'REGISTER',
+            JSON_OBJECT(
+                'event_id', p_event_id,
+                'event_title', v_event_title,
+                'status', v_status,
+                'transaction_id', p_transaction_id
+            ),
+            CONCAT('/events/', p_event_id),
+            NULL
+        );
     END IF;
 
     -- Return the attendance row centered on tbl_event_attendance
@@ -2380,6 +2656,13 @@ CREATE DEFINER='admin'@'%' PROCEDURE UnRegisterEvent(IN
     p_user_id VARCHAR(200)
 )
 BEGIN
+    DECLARE v_user_email VARCHAR(100);
+    DECLARE v_event_title VARCHAR(300);
+
+    -- Get user email and event title for logging
+    SELECT email INTO v_user_email FROM tbl_user WHERE user_id = p_user_id;
+    SELECT title INTO v_event_title FROM tbl_event WHERE event_id = p_event_id;
+
 -- Select the record first for real-time updates
 SELECT
     ea.attendance_id as id,
@@ -2408,6 +2691,21 @@ WHERE ea.event_id = p_event_id AND ea.user_id = p_user_id;
 
 -- Then delete the record
 DELETE FROM tbl_event_attendance WHERE event_id = p_event_id AND user_id = p_user_id;
+
+    -- Log the cancellation
+    IF v_user_email IS NOT NULL THEN
+        CALL LogAction(
+            v_user_email,
+            CONCAT('Cancelled registration for event "', v_event_title, '"'),
+            'UNREGISTER',
+            JSON_OBJECT(
+                'event_id', p_event_id,
+                'event_title', v_event_title
+            ),
+            CONCAT('/events/', p_event_id),
+            NULL
+        );
+    END IF;
 END $$
 DELIMITER ;
 
@@ -2899,6 +3197,7 @@ CREATE DEFINER='admin'@'%' PROCEDURE AddCertificateTemplate(
 )
 BEGIN
     DECLARE v_user_email VARCHAR(100);
+    DECLARE v_event_title VARCHAR(300);
 
     -- Check if uploaded_by exists
     IF NOT EXISTS (SELECT 1 FROM tbl_user WHERE user_id = p_uploaded_by) THEN
@@ -2910,8 +3209,9 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Event does not exist';
     END IF;
 
-    -- Get email for logging
+    -- Get email and event title for logging
     SELECT email INTO v_user_email FROM tbl_user WHERE user_id = p_uploaded_by LIMIT 1;
+    SELECT title INTO v_event_title FROM tbl_event WHERE event_id = p_event_id;
 
     IF EXISTS (SELECT 1 FROM tbl_certificate_template WHERE event_id = p_event_id) THEN
         UPDATE tbl_certificate_template 
@@ -2927,9 +3227,9 @@ BEGIN
     -- Log the action
     CALL LogAction(
         v_user_email,
-        'Updated certificate template',
+        CONCAT('Updated certificate template for event "', v_event_title, '"'),
         'Certificate Management',
-        JSON_OBJECT('event_id', p_event_id, 'template_path', p_template_path),
+        JSON_OBJECT('event_id', p_event_id, 'event_title', v_event_title, 'template_path', p_template_path),
         CONCAT('/events/', p_event_id),
         p_template_path
     );
@@ -2944,6 +3244,7 @@ BEGIN
     DECLARE v_template_path VARCHAR(255);
     DECLARE v_uploaded_by VARCHAR(200);
     DECLARE v_user_email VARCHAR(100);
+    DECLARE v_event_title VARCHAR(300);
 
     -- Ensure the event exists
     IF NOT EXISTS (SELECT 1 FROM tbl_event WHERE event_id = p_event_id) THEN
@@ -2961,15 +3262,16 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'No certificate template to delete for this event';
     END IF;
 
-    -- Get email for logging
+    -- Get email and event title for logging
     SELECT email INTO v_user_email FROM tbl_user WHERE user_id = v_uploaded_by LIMIT 1;
+    SELECT title INTO v_event_title FROM tbl_event WHERE event_id = p_event_id;
 
     -- Log the action
     CALL LogAction(
         v_user_email,
-        'Removed certificate template',
-        'certificate',
-        JSON_OBJECT('event_id', p_event_id, 'template_path', v_template_path),
+        CONCAT('Removed certificate template for event "', v_event_title, '"'),
+        'Certificate Management',
+        JSON_OBJECT('event_id', p_event_id, 'event_title', v_event_title, 'template_path', v_template_path),
         CONCAT('/events/', p_event_id),
         v_template_path
     );
@@ -3028,6 +3330,7 @@ BEGIN
     DECLARE v_category_id INT;
     DECLARE v_transaction_id INT;
     DECLARE v_cycle_number INT;
+    DECLARE v_organization_name VARCHAR(255);
 
     DECLARE v_receipt_no VARCHAR(100);
     DECLARE v_series_key VARCHAR(100);
@@ -3052,6 +3355,11 @@ BEGIN
     IF v_cycle_number IS NULL THEN 
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Cycle number not found for the given organization version'; 
     END IF;
+
+    -- Get organization name
+    SELECT name INTO v_organization_name
+    FROM tbl_organization
+    WHERE organization_id = p_organization_id;
 
     -- Get transaction type ID for INCOME
     SELECT transaction_type_id INTO v_transaction_type_id 
@@ -3128,12 +3436,13 @@ BEGIN
     -- Log the action
     CALL LogAction(
         p_user_email,
-        CONCAT('Created membership transaction for organization ', p_organization_id),
-        'MEMBERSHIP_TRANSACTION_CREATE',
+        CONCAT('Membership payment submitted for "', v_organization_name, '" (Amount: ₱', FORMAT(p_amount, 2), ')'),
+        'Membership Payment',
         JSON_OBJECT(
             'transaction_id', v_transaction_id,
             'amount', p_amount,
             'organization_id', p_organization_id,
+            'organization_name', v_organization_name,
             'organization_version_id', p_organization_version_id,
             'cycle_number', v_cycle_number,
             'receipt_no', v_receipt_no
@@ -3144,6 +3453,83 @@ BEGIN
 
     -- Return the created transaction
     CALL GetTransaction(v_transaction_id);
+END $$
+DELIMITER ;
+
+-- ===================================================================
+-- TRANSACTION AUDIT TRAIL HELPER PROCEDURES
+-- ===================================================================
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetTransactionAuditTrail(
+    IN p_transaction_id INT
+)
+BEGIN
+    SELECT 
+        tat.audit_id,
+        tat.transaction_id,
+        tat.action_type,
+        tat.changed_by,
+        u.f_name,
+        u.l_name,
+        u.email,
+        tat.changed_at,
+        tat.old_status,
+        tat.new_status,
+        tat.old_amount,
+        tat.new_amount,
+        tat.old_payment_type_id,
+        tat.new_payment_type_id,
+        opt.label as old_payment_type,
+        npt.label as new_payment_type,
+        tat.old_category_id,
+        tat.new_category_id,
+        ofc.label as old_category,
+        nfc.label as new_category,
+        tat.old_proof_image,
+        tat.new_proof_image,
+        tat.changes_json,
+        tat.reason,
+        tat.ip_address,
+        tat.user_agent
+    FROM tbl_transaction_audit_trail tat
+    LEFT JOIN tbl_user u ON tat.changed_by = u.user_id
+    LEFT JOIN tbl_payment_type opt ON tat.old_payment_type_id = opt.payment_type_id
+    LEFT JOIN tbl_payment_type npt ON tat.new_payment_type_id = npt.payment_type_id
+    LEFT JOIN tbl_financial_category ofc ON tat.old_category_id = ofc.category_id
+    LEFT JOIN tbl_financial_category nfc ON tat.new_category_id = nfc.category_id
+    WHERE tat.transaction_id = p_transaction_id
+    ORDER BY tat.changed_at DESC, tat.audit_id DESC;
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetAllTransactionAudits(
+    IN p_limit INT,
+    IN p_offset INT
+)
+BEGIN
+    SELECT 
+        tat.audit_id,
+        tat.transaction_id,
+        t.receipt_no,
+        t.payment_description,
+        tat.action_type,
+        tat.changed_by,
+        u.f_name,
+        u.l_name,
+        u.email,
+        tat.changed_at,
+        tat.old_status,
+        tat.new_status,
+        tat.old_amount,
+        tat.new_amount,
+        tat.reason
+    FROM tbl_transaction_audit_trail tat
+    LEFT JOIN tbl_transaction t ON tat.transaction_id = t.transaction_id
+    LEFT JOIN tbl_user u ON tat.changed_by = u.user_id
+    ORDER BY tat.changed_at DESC, tat.audit_id DESC
+    LIMIT p_limit OFFSET p_offset;
 END $$
 DELIMITER ;
 
@@ -3650,12 +4036,22 @@ BEGIN
            u.status,
            u.created_at,
            u.updated_at,
-           u.archived_at
+           u.archived_at,
+           u.archived_reason,
+           CONCAT(archived_by_user.f_name, ' ', archived_by_user.l_name) as archived_by_name,
+           archived_by_user.email as archived_by_email,
+           o.organization_id,
+           o.name as organization_name,
+           o.logo as organization_logo,
+           o.status as organization_status
     FROM tbl_user u
     JOIN tbl_role r ON u.role_id = r.role_id
     LEFT JOIN tbl_program p ON u.program_id = p.program_id
     LEFT JOIN tbl_sdao_approver sa ON u.user_id = sa.user_id
-    WHERE u.role_id != student_role_id;
+    LEFT JOIN tbl_user archived_by_user ON u.archived_by = archived_by_user.user_id
+    LEFT JOIN tbl_organization o ON u.user_id = o.adviser_id
+    WHERE u.role_id != student_role_id
+    ORDER BY u.created_at DESC;
 
 END $$
 DELIMITER ;
@@ -4100,10 +4496,14 @@ DELIMITER ;
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE AddSection(
     IN p_section_name VARCHAR(100),
-    IN p_program_id INT
+    IN p_program_id INT,
+    IN p_user_email VARCHAR(100)
 )
 BEGIN
     DECLARE v_program_exists INT;
+    DECLARE v_program_name VARCHAR(255);
+    DECLARE v_section_id INT;
+    DECLARE v_sdao_emails JSON;
     
     -- Validate section name
     IF p_section_name IS NULL OR TRIM(p_section_name) = '' THEN
@@ -4119,12 +4519,12 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Section name can only contain letters, numbers, hyphens, and underscores';
     END IF;
     
-    -- Check if program exists and is active
-    SELECT COUNT(*) INTO v_program_exists 
+    -- Check if program exists and is active, get program name
+    SELECT name INTO v_program_name
     FROM tbl_program 
     WHERE program_id = p_program_id AND status = 'Active';
     
-    IF v_program_exists = 0 THEN
+    IF v_program_name IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Program does not exist or is inactive';
     END IF;
     
@@ -4141,6 +4541,45 @@ BEGIN
     INSERT INTO tbl_section (section_name, program_id)
     VALUES (TRIM(p_section_name), p_program_id);
     
+    SET v_section_id = LAST_INSERT_ID();
+    
+    -- Log the action
+    CALL LogAction(
+        p_user_email,
+        CONCAT('Created section "', TRIM(p_section_name), '" in program "', v_program_name, '"'),
+        'CREATE',
+        JSON_OBJECT(
+            'section_id', v_section_id,
+            'section_name', TRIM(p_section_name),
+            'program_id', p_program_id,
+            'program_name', v_program_name
+        ),
+        CONCAT('/sections/', v_section_id),
+        NULL
+    );
+    
+    -- Get SDAO admins for notification
+    SET v_sdao_emails = (
+        SELECT JSON_ARRAYAGG(u.email)
+        FROM tbl_user u
+        INNER JOIN tbl_role r ON u.role_id = r.role_id
+        WHERE r.name = 'SDAO'
+    );
+    
+    -- Notify SDAO admins
+    IF v_sdao_emails IS NOT NULL AND JSON_LENGTH(v_sdao_emails) > 0 THEN
+        CALL CreateNotification(
+            'New Section Created',
+            CONCAT('Section "', TRIM(p_section_name), '" has been created in program "', v_program_name, '"'),
+            CONCAT('/sections/', v_section_id),
+            'system',
+            v_section_id,
+            p_user_email,
+            v_sdao_emails,
+            'SECTION_CREATED'
+        );
+    END IF;
+    
     -- Return the new section
     SELECT 
         section_id,
@@ -4149,7 +4588,7 @@ BEGIN
         is_active,
         created_at
     FROM tbl_section
-    WHERE section_id = LAST_INSERT_ID();
+    WHERE section_id = v_section_id;
 END $$
 DELIMITER ;
 
@@ -4157,11 +4596,22 @@ DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE UpdateSection(
     IN p_section_id INT,
     IN p_section_name VARCHAR(100),
-    IN p_program_id INT
+    IN p_program_id INT,
+    IN p_user_email VARCHAR(100)
 )
 BEGIN
-    -- Validate section ID
-    IF NOT EXISTS (SELECT 1 FROM tbl_section WHERE section_id = p_section_id) THEN
+    DECLARE v_old_section_name VARCHAR(100);
+    DECLARE v_old_program_id INT;
+    DECLARE v_program_name VARCHAR(255);
+    DECLARE v_sdao_emails JSON;
+    
+    -- Validate section ID and get old values
+    SELECT section_name, program_id 
+    INTO v_old_section_name, v_old_program_id
+    FROM tbl_section 
+    WHERE section_id = p_section_id;
+    
+    IF v_old_section_name IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Section not found';
     END IF;
     
@@ -4179,8 +4629,12 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Section name can only contain letters, numbers, hyphens, and underscores';
     END IF;
     
-    -- Validate program exists
-    IF NOT EXISTS (SELECT 1 FROM tbl_program WHERE program_id = p_program_id) THEN
+    -- Validate program exists and get name
+    SELECT name INTO v_program_name
+    FROM tbl_program 
+    WHERE program_id = p_program_id;
+    
+    IF v_program_name IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Program not found';
     END IF;
     
@@ -4200,6 +4654,45 @@ BEGIN
         program_id = p_program_id,
         updated_at = CURRENT_TIMESTAMP
     WHERE section_id = p_section_id;
+    
+    -- Log the action
+    CALL LogAction(
+        p_user_email,
+        CONCAT('Updated section "', v_old_section_name, '" to "', TRIM(p_section_name), '"'),
+        'UPDATE',
+        JSON_OBJECT(
+            'section_id', p_section_id,
+            'old_section_name', v_old_section_name,
+            'new_section_name', TRIM(p_section_name),
+            'old_program_id', v_old_program_id,
+            'new_program_id', p_program_id,
+            'program_name', v_program_name
+        ),
+        CONCAT('/sections/', p_section_id),
+        NULL
+    );
+    
+    -- Get SDAO admins for notification
+    SET v_sdao_emails = (
+        SELECT JSON_ARRAYAGG(u.email)
+        FROM tbl_user u
+        INNER JOIN tbl_role r ON u.role_id = r.role_id
+        WHERE r.name = 'SDAO'
+    );
+    
+    -- Notify SDAO admins
+    IF v_sdao_emails IS NOT NULL AND JSON_LENGTH(v_sdao_emails) > 0 THEN
+        CALL CreateNotification(
+            'Section Updated',
+            CONCAT('Section "', v_old_section_name, '" has been updated to "', TRIM(p_section_name), '" in program "', v_program_name, '"'),
+            CONCAT('/sections/', p_section_id),
+            'system',
+            p_section_id,
+            p_user_email,
+            v_sdao_emails,
+            'SECTION_UPDATED'
+        );
+    END IF;
     
     -- Return updated section
     SELECT 
@@ -4283,13 +4776,24 @@ DELIMITER ;
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE ArchiveSection(
-    IN p_section_id INT
+    IN p_section_id INT,
+    IN p_user_email VARCHAR(100)
 )
 BEGIN
     DECLARE v_student_count INT;
+    DECLARE v_section_name VARCHAR(100);
+    DECLARE v_program_id INT;
+    DECLARE v_program_name VARCHAR(255);
+    DECLARE v_sdao_emails JSON;
     
-    -- Check if section exists
-    IF NOT EXISTS (SELECT 1 FROM tbl_section WHERE section_id = p_section_id) THEN
+    -- Check if section exists and get details
+    SELECT s.section_name, s.program_id, p.name
+    INTO v_section_name, v_program_id, v_program_name
+    FROM tbl_section s
+    INNER JOIN tbl_program p ON s.program_id = p.program_id
+    WHERE s.section_id = p_section_id;
+    
+    IF v_section_name IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Section not found';
     END IF;
     
@@ -4309,6 +4813,43 @@ BEGIN
         updated_at = CURRENT_TIMESTAMP
     WHERE section_id = p_section_id;
     
+    -- Log the action
+    CALL LogAction(
+        p_user_email,
+        CONCAT('Archived section "', v_section_name, '" in program "', v_program_name, '"'),
+        'ARCHIVE',
+        JSON_OBJECT(
+            'section_id', p_section_id,
+            'section_name', v_section_name,
+            'program_id', v_program_id,
+            'program_name', v_program_name
+        ),
+        CONCAT('/sections/', p_section_id),
+        NULL
+    );
+    
+    -- Get SDAO admins for notification
+    SET v_sdao_emails = (
+        SELECT JSON_ARRAYAGG(u.email)
+        FROM tbl_user u
+        INNER JOIN tbl_role r ON u.role_id = r.role_id
+        WHERE r.name = 'SDAO'
+    );
+    
+    -- Notify SDAO admins
+    IF v_sdao_emails IS NOT NULL AND JSON_LENGTH(v_sdao_emails) > 0 THEN
+        CALL CreateNotification(
+            'Section Archived',
+            CONCAT('Section "', v_section_name, '" in program "', v_program_name, '" has been archived'),
+            CONCAT('/sections/', p_section_id),
+            'system',
+            p_section_id,
+            p_user_email,
+            v_sdao_emails,
+            'SECTION_ARCHIVED'
+        );
+    END IF;
+    
     -- Return updated section
     SELECT 
         section_id,
@@ -4323,11 +4864,23 @@ DELIMITER ;
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE UnarchiveSection(
-    IN p_section_id INT
+    IN p_section_id INT,
+    IN p_user_email VARCHAR(100)
 )
 BEGIN
-    -- Check if section exists
-    IF NOT EXISTS (SELECT 1 FROM tbl_section WHERE section_id = p_section_id) THEN
+    DECLARE v_section_name VARCHAR(100);
+    DECLARE v_program_id INT;
+    DECLARE v_program_name VARCHAR(255);
+    DECLARE v_sdao_emails JSON;
+    
+    -- Check if section exists and get details
+    SELECT s.section_name, s.program_id, p.name
+    INTO v_section_name, v_program_id, v_program_name
+    FROM tbl_section s
+    INNER JOIN tbl_program p ON s.program_id = p.program_id
+    WHERE s.section_id = p_section_id;
+    
+    IF v_section_name IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Section not found';
     END IF;
     
@@ -4336,6 +4889,43 @@ BEGIN
     SET is_active = TRUE,
         updated_at = CURRENT_TIMESTAMP
     WHERE section_id = p_section_id;
+    
+    -- Log the action
+    CALL LogAction(
+        p_user_email,
+        CONCAT('Restored section "', v_section_name, '" in program "', v_program_name, '"'),
+        'UNARCHIVE',
+        JSON_OBJECT(
+            'section_id', p_section_id,
+            'section_name', v_section_name,
+            'program_id', v_program_id,
+            'program_name', v_program_name
+        ),
+        CONCAT('/sections/', p_section_id),
+        NULL
+    );
+    
+    -- Get SDAO admins for notification
+    SET v_sdao_emails = (
+        SELECT JSON_ARRAYAGG(u.email)
+        FROM tbl_user u
+        INNER JOIN tbl_role r ON u.role_id = r.role_id
+        WHERE r.name = 'SDAO'
+    );
+    
+    -- Notify SDAO admins
+    IF v_sdao_emails IS NOT NULL AND JSON_LENGTH(v_sdao_emails) > 0 THEN
+        CALL CreateNotification(
+            'Section Restored',
+            CONCAT('Section "', v_section_name, '" in program "', v_program_name, '" has been restored'),
+            CONCAT('/sections/', p_section_id),
+            'system',
+            p_section_id,
+            p_user_email,
+            v_sdao_emails,
+            'SECTION_UNARCHIVED'
+        );
+    END IF;
     
     -- Return updated section
     SELECT 
@@ -8822,16 +9412,23 @@ BEGIN
         ers.requirement_id,
         req.requirement_name,
         req.is_applicable_to,
+        ers.status,
         ers.file_path,
         ers.submitted_by,
         u.f_name,
         u.l_name,
         u.email,
-        ers.submitted_at
+        ers.submitted_at,
+        ers.viewed_by,
+        v.f_name AS viewer_f_name,
+        v.l_name AS viewer_l_name,
+        v.email AS viewer_email,
+        ers.viewed_at
     FROM tbl_event_requirement_submissions ers
     LEFT JOIN tbl_event_application ea ON ers.event_application_id = ea.event_application_id
     LEFT JOIN tbl_event_application_requirement req ON ers.requirement_id = req.requirement_id
     LEFT JOIN tbl_user u ON ers.submitted_by = u.user_id
+    LEFT JOIN tbl_user v ON ers.viewed_by = v.user_id
     LEFT JOIN tbl_event e ON ers.event_id = e.event_id
     WHERE ers.event_id = p_event_id
       AND (p_event_application_id IS NULL OR ers.event_application_id = p_event_application_id)
@@ -8839,6 +9436,86 @@ BEGIN
       AND (p_submitted_by IS NULL OR ers.submitted_by = p_submitted_by)
     ORDER BY ers.submitted_at DESC;
 
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE MarkEventRequirementAsViewed(
+    IN p_submission_id INT,
+    IN p_user_email VARCHAR(100)
+)
+BEGIN
+    DECLARE v_viewer_id VARCHAR(200);
+    DECLARE v_current_status ENUM('Pending', 'Approved', 'Rejected', 'Viewed');
+
+    -- Get user_id from email
+    SELECT user_id INTO v_viewer_id
+      FROM tbl_user 
+     WHERE email = p_user_email 
+     LIMIT 1;
+    
+    IF v_viewer_id IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'User not found';
+    END IF;
+
+    -- Get current status
+    SELECT status INTO v_current_status
+      FROM tbl_event_requirement_submissions
+     WHERE submission_id = p_submission_id
+     LIMIT 1;
+    
+    IF v_current_status IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Submission not found';
+    END IF;
+
+    -- Update status to Viewed if it's currently Pending or already Viewed
+    -- Don't change Approved/Rejected status
+    IF v_current_status IN ('Pending', 'Viewed') THEN
+        UPDATE tbl_event_requirement_submissions
+           SET status = 'Viewed',
+               viewed_by = v_viewer_id,
+               viewed_at = CURRENT_TIMESTAMP
+         WHERE submission_id = p_submission_id;
+    END IF;
+
+    -- Log the action
+    CALL LogAction(
+        p_user_email,
+        CONCAT('Viewed event requirement submission #', p_submission_id),
+        'EVENT_REQUIREMENT_VIEWED',
+        JSON_OBJECT(
+            'submission_id', p_submission_id,
+            'viewed_by', v_viewer_id,
+            'previous_status', v_current_status
+        ),
+        CONCAT('/event-requirements/submissions/', p_submission_id),
+        NULL
+    );
+
+    -- Return updated submission
+    SELECT 
+        ers.submission_id,
+        ers.event_id,
+        e.title AS event_title,
+        ers.event_application_id,
+        ers.requirement_id,
+        req.requirement_name,
+        ers.status,
+        ers.file_path,
+        ers.submitted_by,
+        CONCAT(u.f_name, ' ', u.l_name) AS submitted_by_name,
+        ers.submitted_at,
+        ers.viewed_by,
+        CONCAT(v.f_name, ' ', v.l_name) AS viewed_by_name,
+        ers.viewed_at,
+        ers.organization_id,
+        ers.cycle_number
+    FROM tbl_event_requirement_submissions ers
+    LEFT JOIN tbl_event e ON ers.event_id = e.event_id
+    LEFT JOIN tbl_event_application_requirement req ON ers.requirement_id = req.requirement_id
+    LEFT JOIN tbl_user u ON ers.submitted_by = u.user_id
+    LEFT JOIN tbl_user v ON ers.viewed_by = v.user_id
+    WHERE ers.submission_id = p_submission_id;
 END$$
 DELIMITER ;
 
@@ -8904,6 +9581,7 @@ CREATE DEFINER='admin'@'%' PROCEDURE ArchiveOrganization(
 )
 BEGIN
     DECLARE v_user_email VARCHAR(100);
+    DECLARE v_organization_name VARCHAR(255);
 
     -- Validate inputs
     IF p_organization_id IS NULL THEN
@@ -8915,6 +9593,9 @@ BEGIN
     IF p_reason IS NULL OR TRIM(p_reason) = '' THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'archive reason required';
     END IF;
+
+    -- Get organization name before archiving
+    SELECT name INTO v_organization_name FROM tbl_organization WHERE organization_id = p_organization_id;
 
     -- Archive organization
     UPDATE tbl_organization
@@ -8940,9 +9621,9 @@ BEGIN
 
     CALL LogAction(
         v_user_email,
-        CONCAT('Archived organization ID ', p_organization_id, IF(p_reason IS NOT NULL, CONCAT(' (Reason: ', p_reason, ')'), '')),
-        'organization',
-        JSON_OBJECT('organization_id', p_organization_id, 'archived_at', NOW(), 'reason', p_reason),
+        CONCAT('Archived organization "', v_organization_name, '"', IF(p_reason IS NOT NULL, CONCAT(' (Reason: ', p_reason, ')'), '')),
+        'Organization Management',
+        JSON_OBJECT('organization_id', p_organization_id, 'organization_name', v_organization_name, 'archived_at', NOW(), 'reason', p_reason),
         CONCAT('/admin/organizations/', p_organization_id),
         NULL
     );
@@ -8960,6 +9641,7 @@ CREATE DEFINER='admin'@'%' PROCEDURE UnarchiveOrganization(
 )
 BEGIN
     DECLARE v_user_email VARCHAR(100);
+    DECLARE v_organization_name VARCHAR(255);
 
     IF p_organization_id IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'organization_id required';
@@ -8967,6 +9649,9 @@ BEGIN
     IF p_user_id IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'user_id required';
     END IF;
+
+    -- Get organization name before unarchiving
+    SELECT name INTO v_organization_name FROM tbl_organization WHERE organization_id = p_organization_id;
 
     -- Unarchive organization
     UPDATE tbl_organization
@@ -8994,9 +9679,9 @@ BEGIN
 
     CALL LogAction(
         v_user_email,
-        CONCAT('Unarchived organization ID ', p_organization_id, IF(p_reason IS NOT NULL AND p_reason != '', CONCAT(' (Reason: ', p_reason, ')'), '')),
-        'organization',
-        JSON_OBJECT('organization_id', p_organization_id, 'unarchived_at', NOW(), 'reason', p_reason),
+        CONCAT('Restored organization "', v_organization_name, '"', IF(p_reason IS NOT NULL AND p_reason != '', CONCAT(' (Reason: ', p_reason, ')'), '')),
+        'Organization Management',
+        JSON_OBJECT('organization_id', p_organization_id, 'organization_name', v_organization_name, 'unarchived_at', NOW(), 'reason', p_reason),
         CONCAT('/admin/organizations/', p_organization_id),
         NULL
     );
@@ -13111,13 +13796,14 @@ CREATE DEFINER='admin'@'%' PROCEDURE ArchiveProgram(
 BEGIN
     DECLARE v_user_id VARCHAR(200);
     DECLARE v_status ENUM('Active','Archived');
+    DECLARE v_program_name VARCHAR(200);
 
     SELECT user_id INTO v_user_id FROM tbl_user WHERE email = p_user_email LIMIT 1;
     IF v_user_id IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='User not found for provided email';
     END IF;
 
-    SELECT status INTO v_status FROM tbl_program WHERE program_id = p_program_id;
+    SELECT status, name INTO v_status, v_program_name FROM tbl_program WHERE program_id = p_program_id;
     IF v_status IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Program not found';
     END IF;
@@ -13134,9 +13820,9 @@ BEGIN
 
     CALL LogAction(
         p_user_email,
-        CONCAT('Archived program ID ', p_program_id, COALESCE(CONCAT(' - reason: ', p_reason), '')),
-        'Program.Archive',
-        JSON_OBJECT('program_id', p_program_id, 'reason', p_reason),
+        CONCAT('Archived program "', v_program_name, '"', COALESCE(CONCAT(' - Reason: ', p_reason), '')),
+        'Program Management',
+        JSON_OBJECT('program_id', p_program_id, 'program_name', v_program_name, 'reason', p_reason),
         NULL, NULL
     );
 
@@ -13878,45 +14564,104 @@ DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE UpdateTransaction(
     IN p_transaction_id INT,
     IN p_user_email VARCHAR(100),
-    IN p_payment_description VARCHAR(255),
-    IN p_amount DECIMAL(10,2),
-    IN p_status ENUM('Pending','Completed','Failed'),
-    IN p_proof_image VARCHAR(500),       -- new path if replacing; NULL/'' to not set
-    IN p_receipt_no VARCHAR(100),
-    IN p_category_code VARCHAR(50),
     IN p_payer_name VARCHAR(255),
     IN p_payee_name VARCHAR(255),
+    IN p_transaction_type_code VARCHAR(50),
+    IN p_payment_type_code VARCHAR(50),
+    IN p_payment_description VARCHAR(255),
+    IN p_amount DECIMAL(10,2),
+    IN p_status ENUM('Pending','Completed','Failed','Cancelled'),
+    IN p_transaction_date DATETIME,
+    IN p_proof_image VARCHAR(500),
+    IN p_receipt_no VARCHAR(100),
+    IN p_category_code VARCHAR(50),
     IN p_payer_name_override VARCHAR(255),
     IN p_event_remarks VARCHAR(255),
-    IN p_remove_proof_image TINYINT,     -- 1 = remove image, 0/NULL = don't remove
-    IN p_org_version_id INT              -- new parameter for organization version
+    IN p_organization_id INT,
+    IN p_cycle_number INT,
+    IN p_org_version_id INT,
+    IN p_remove_proof_image TINYINT
 )
 BEGIN
     DECLARE v_actor_id VARCHAR(200);
-    DECLARE v_type_code VARCHAR(50);
     DECLARE v_transaction_type_id INT;
+    DECLARE v_payment_type_id INT;
     DECLARE v_category_id INT;
     DECLARE v_exists INT;
+    DECLARE v_current_status ENUM('Pending','Completed','Failed','Cancelled');
+    DECLARE v_error_msg VARCHAR(255);
+    DECLARE v_old_amount DECIMAL(10,2);
+    DECLARE v_old_receipt_no VARCHAR(100);
+    DECLARE v_actor_name VARCHAR(200);
 
     -- Actor must exist
-    SELECT user_id INTO v_actor_id
+    SELECT user_id, CONCAT(f_name, ' ', l_name) INTO v_actor_id, v_actor_name
       FROM tbl_user WHERE email = p_user_email LIMIT 1;
     IF v_actor_id IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Actor user not found';
     END IF;
 
-    -- Get existing transaction's type (code + id)
-    SELECT t.transaction_type_id, tt.code
-      INTO v_transaction_type_id, v_type_code
-      FROM tbl_transaction t
-      JOIN tbl_transaction_type tt ON t.transaction_type_id = tt.transaction_type_id
-     WHERE t.transaction_id = p_transaction_id
+    -- Get existing transaction data
+    SELECT status, amount, receipt_no
+      INTO v_current_status, v_old_amount, v_old_receipt_no
+      FROM tbl_transaction
+     WHERE transaction_id = p_transaction_id
      LIMIT 1;
-    IF v_type_code IS NULL THEN
+    IF v_current_status IS NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Transaction not found';
     END IF;
 
-    -- Resolve category if provided and validate pair against type
+    -- ===== AUDIT TRAIL VALIDATION =====
+    IF v_current_status = 'Completed' THEN
+        SIGNAL SQLSTATE '45000' 
+            SET MESSAGE_TEXT = 'Cannot modify a completed transaction. Transaction is locked for audit compliance.';
+    END IF;
+    
+    IF v_current_status = 'Failed' THEN
+        SIGNAL SQLSTATE '45000' 
+            SET MESSAGE_TEXT = 'Cannot modify a failed transaction. Transaction is locked for audit compliance.';
+    END IF;
+    
+    IF v_current_status = 'Cancelled' THEN
+        SIGNAL SQLSTATE '45000' 
+            SET MESSAGE_TEXT = 'Cannot modify a cancelled transaction. Transaction is locked for audit compliance.';
+    END IF;
+
+    -- Validate status transitions
+    IF p_status IS NOT NULL AND p_status != v_current_status THEN
+        IF v_current_status = 'Pending' THEN
+            IF p_status NOT IN ('Completed', 'Failed', 'Cancelled', 'Pending') THEN
+                SET v_error_msg = CONCAT('Invalid status transition from Pending to ', p_status);
+                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = v_error_msg;
+            END IF;
+        ELSE
+            SET v_error_msg = CONCAT('Cannot change status from ', v_current_status, ' to ', p_status);
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = v_error_msg;
+        END IF;
+    END IF;
+    -- ===== END AUDIT TRAIL VALIDATION =====
+
+    -- Resolve transaction type ID if provided
+    IF p_transaction_type_code IS NOT NULL AND p_transaction_type_code <> '' THEN
+        SELECT transaction_type_id INTO v_transaction_type_id 
+        FROM tbl_transaction_type 
+        WHERE code = p_transaction_type_code LIMIT 1;
+        IF v_transaction_type_id IS NULL THEN 
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Transaction type not found'; 
+        END IF;
+    END IF;
+
+    -- Resolve payment type ID if provided
+    IF p_payment_type_code IS NOT NULL AND p_payment_type_code <> '' THEN
+        SELECT payment_type_id INTO v_payment_type_id 
+        FROM tbl_payment_type 
+        WHERE code = p_payment_type_code LIMIT 1;
+        IF v_payment_type_id IS NULL THEN 
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Payment type not found'; 
+        END IF;
+    END IF;
+
+    -- Resolve category ID if provided and validate
     IF p_category_code IS NOT NULL AND p_category_code <> '' THEN
         SELECT category_id INTO v_category_id
           FROM tbl_financial_category
@@ -13926,18 +14671,21 @@ BEGIN
             SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Financial category not found or inactive';
         END IF;
 
-        IF NOT EXISTS (
-            SELECT 1
-              FROM tbl_transaction_type_category
-             WHERE transaction_type_id = v_transaction_type_id
-               AND category_id = v_category_id
-        ) THEN
-            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Category not allowed for this transaction type';
+        -- Validate category with transaction type
+        IF v_transaction_type_id IS NOT NULL AND v_category_id IS NOT NULL THEN
+            IF NOT EXISTS (
+                SELECT 1
+                  FROM tbl_transaction_type_category
+                 WHERE transaction_type_id = v_transaction_type_id
+                   AND category_id = v_category_id
+            ) THEN
+                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Category not allowed for this transaction type';
+            END IF;
         END IF;
     END IF;
 
-    -- Enforce unique receipt when changing
-    IF p_receipt_no IS NOT NULL AND p_receipt_no <> '' THEN
+    -- Enforce unique receipt number
+    IF p_receipt_no IS NOT NULL AND p_receipt_no <> '' AND p_receipt_no != v_old_receipt_no THEN
         IF EXISTS (
             SELECT 1 FROM tbl_transaction
              WHERE receipt_no = p_receipt_no
@@ -13947,21 +14695,24 @@ BEGIN
         END IF;
     END IF;
 
-    -- Update main row (tri-state image logic)
+    -- Update main transaction row
     UPDATE tbl_transaction
-       SET payment_description = COALESCE(p_payment_description, payment_description),
+       SET payer_name          = COALESCE(NULLIF(p_payer_name,''), payer_name),
+           payee_name          = COALESCE(NULLIF(p_payee_name,''), payee_name),
+           transaction_type_id = COALESCE(v_transaction_type_id, transaction_type_id),
+           payment_type_id     = COALESCE(v_payment_type_id, payment_type_id),
+           payment_description = COALESCE(p_payment_description, payment_description),
            amount              = COALESCE(p_amount, amount),
            status              = COALESCE(p_status, status),
+           transaction_date    = COALESCE(p_transaction_date, transaction_date),
            receipt_no          = COALESCE(NULLIF(p_receipt_no,''), receipt_no),
            category_id         = COALESCE(v_category_id, category_id),
            org_version_id      = COALESCE(p_org_version_id, org_version_id),
-           payer_name          = COALESCE(NULLIF(p_payer_name,''), payer_name),
-           payee_name          = COALESCE(NULLIF(p_payee_name,''), payee_name),
            proof_image         =
                CASE
-                 WHEN p_remove_proof_image = 1 THEN NULL             -- remove
-                 WHEN p_proof_image IS NOT NULL AND p_proof_image <> '' THEN p_proof_image -- replace
-                 ELSE proof_image                                    -- keep
+                 WHEN p_remove_proof_image = 1 THEN NULL
+                 WHEN p_proof_image IS NOT NULL AND p_proof_image <> '' THEN p_proof_image
+                 ELSE proof_image
                END,
            updated_at          = CURRENT_TIMESTAMP
      WHERE transaction_id = p_transaction_id;
@@ -13970,32 +14721,69 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Update failed';
     END IF;
 
-    -- If income transaction: update event link fields when row exists
-    IF v_type_code = 'INCOME' THEN
-        SELECT COUNT(*) INTO v_exists FROM tbl_transaction_event WHERE transaction_id = p_transaction_id;
-        IF v_exists = 1 THEN
-            UPDATE tbl_transaction_event
-               SET payer_name_override = COALESCE(NULLIF(p_payer_name_override,''), payer_name_override),
-                   remarks            = COALESCE(NULLIF(p_event_remarks,''), remarks)
-             WHERE transaction_id = p_transaction_id;
-        END IF;
+    -- Update event-specific fields if exists
+    SELECT COUNT(*) INTO v_exists FROM tbl_transaction_event WHERE transaction_id = p_transaction_id;
+    IF v_exists = 1 THEN
+        UPDATE tbl_transaction_event
+           SET payer_name_override = COALESCE(NULLIF(p_payer_name_override,''), payer_name_override),
+               remarks            = COALESCE(NULLIF(p_event_remarks,''), remarks)
+         WHERE transaction_id = p_transaction_id;
     END IF;
 
-    -- Audit log
+    -- User-friendly logging
     CALL LogAction(
         p_user_email,
-        CONCAT('Updated transaction #', p_transaction_id, ' (', v_type_code, ')'),
+        CASE 
+            WHEN p_status = 'Completed' AND v_current_status != 'Completed' THEN 
+                CONCAT('Completed Transaction #', p_transaction_id, ' - ', COALESCE(p_payment_description, 'Payment'))
+            WHEN p_status = 'Failed' AND v_current_status != 'Failed' THEN 
+                CONCAT('Marked Transaction #', p_transaction_id, ' as Failed')
+            WHEN p_status = 'Cancelled' AND v_current_status != 'Cancelled' THEN 
+                CONCAT('Cancelled Transaction #', p_transaction_id)
+            ELSE 
+                CONCAT('Updated Transaction #', p_transaction_id)
+        END,
         'TRANSACTION_UPDATE',
         JSON_OBJECT(
             'transaction_id', p_transaction_id,
-            'amount', p_amount,
-            'status', p_status,
-            'category', p_category_code,
-            'remove_image', IFNULL(p_remove_proof_image,0)
+            'old_amount', v_old_amount,
+            'new_amount', p_amount,
+            'old_status', v_current_status,
+            'new_status', p_status,
+            'receipt_no', COALESCE(p_receipt_no, v_old_receipt_no),
+            'updated_by', v_actor_name
         ),
-        NULL,
+        CONCAT('/transactions/', p_transaction_id),
         p_proof_image
     );
+
+    -- Send notification if status changed to Completed
+    IF p_status = 'Completed' AND v_current_status != 'Completed' THEN
+        CALL CreateNotification(
+            'Transaction Completed',
+            CONCAT('Your transaction of ₱', FORMAT(COALESCE(p_amount, v_old_amount), 2), ' has been completed successfully. Receipt: ', COALESCE(p_receipt_no, v_old_receipt_no)),
+            'transaction',
+            p_transaction_id,
+            v_actor_id,
+            (SELECT user_id FROM tbl_transaction WHERE transaction_id = p_transaction_id),
+            CONCAT('/transactions/', p_transaction_id),
+            'VIEW_DETAIL'
+        );
+    END IF;
+
+    -- Send notification if status changed to Failed
+    IF p_status = 'Failed' AND v_current_status != 'Failed' THEN
+        CALL CreateNotification(
+            'Transaction Failed',
+            CONCAT('Your transaction of ₱', FORMAT(COALESCE(p_amount, v_old_amount), 2), ' has failed. Please contact support for assistance.'),
+            'transaction',
+            p_transaction_id,
+            v_actor_id,
+            (SELECT user_id FROM tbl_transaction WHERE transaction_id = p_transaction_id),
+            CONCAT('/transactions/', p_transaction_id),
+            'VIEW_DETAIL'
+        );
+    END IF;
 
     -- Return updated row
     CALL GetTransaction(p_transaction_id);
@@ -14010,8 +14798,27 @@ CREATE DEFINER='admin'@'%' PROCEDURE ArchiveTransaction(
 )
 BEGIN
     DECLARE v_actor_id VARCHAR(200);
+    DECLARE v_current_status ENUM('Pending','Completed','Failed','Cancelled');
+    
     SELECT user_id INTO v_actor_id FROM tbl_user WHERE email = p_user_email LIMIT 1;
     IF v_actor_id IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Actor user not found'; END IF;
+
+    -- Get current transaction status
+    SELECT status INTO v_current_status 
+      FROM tbl_transaction 
+     WHERE transaction_id = p_transaction_id 
+     LIMIT 1;
+    
+    IF v_current_status IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Transaction not found';
+    END IF;
+
+    -- ===== AUDIT TRAIL VALIDATION: Cannot archive completed transactions =====
+    IF v_current_status = 'Completed' THEN
+        SIGNAL SQLSTATE '45000' 
+            SET MESSAGE_TEXT = 'Cannot archive a completed transaction. Completed transactions are permanent records for audit compliance.';
+    END IF;
+    -- ===== END AUDIT TRAIL VALIDATION =====
 
     UPDATE tbl_transaction
        SET archived_at = CURRENT_TIMESTAMP,
@@ -14020,7 +14827,7 @@ BEGIN
      WHERE transaction_id = p_transaction_id
        AND archived_at IS NULL;
 
-    IF ROW_COUNT() = 0 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Transaction not found or already archived'; END IF;
+    IF ROW_COUNT() = 0 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Transaction already archived'; END IF;
 
     -- Log the action
     CALL LogAction(
@@ -14619,8 +15426,10 @@ BEGIN
     -- Return final results with ranking and calculated trend status
     SELECT 
         RANK() OVER (ORDER BY org_stats.average_attendance DESC) AS rank_position,
+        org_stats.organization_id,
         org_stats.organization_name,
-        org_stats.current_org_version_id,
+        org_stats.category,
+        org_stats.current_org_version_id AS organization_version_id,
         org_stats.cycle_number,
         org_stats.total_events_held,
         org_stats.average_attendance,
@@ -14636,6 +15445,7 @@ BEGIN
     FROM (
         SELECT 
             o.organization_id,
+            o.category,
             ov.name AS organization_name,
             rc.org_version_id AS current_org_version_id,
             rc.cycle_number,
@@ -14749,6 +15559,282 @@ BEGIN
         ) event_stats ON o.organization_id = event_stats.organization_id 
             AND rc.cycle_number = event_stats.cycle_number
         WHERE o.status = 'Approved'
+        GROUP BY o.organization_id, rc.cycle_number
+    ) trend_data ON org_stats.organization_id = trend_data.organization_id 
+        AND org_stats.cycle_number = trend_data.cycle_number
+    ORDER BY rank_position;
+    
+END$$
+DELIMITER ;
+
+DELIMITER $$
+CREATE DEFINER='admin'@'%' PROCEDURE GetOrganizationsEventStatisticsByCategory()
+BEGIN
+    -- Co-Curricular Organizations Leaderboard
+    SELECT 
+        'Co-Curricular' AS category,
+        RANK() OVER (ORDER BY org_stats.average_attendance DESC) AS rank_position,
+        org_stats.organization_id,
+        org_stats.organization_name,
+        org_stats.current_org_version_id AS organization_version_id,
+        org_stats.cycle_number,
+        org_stats.total_events_held,
+        org_stats.average_attendance,
+        org_stats.total_participants,
+        CASE
+            WHEN org_stats.total_events_held < 2 THEN 'Insufficient Data'
+            WHEN trend_data.earlier_avg = 0 AND trend_data.recent_avg > 0 THEN 'Growing'
+            WHEN trend_data.earlier_avg > 0 AND trend_data.recent_avg > trend_data.earlier_avg * 1.1 THEN 'Growing'
+            WHEN trend_data.earlier_avg > 0 AND trend_data.recent_avg < trend_data.earlier_avg * 0.9 THEN 'Declining'
+            ELSE 'Stable'
+        END AS participation_trend_status,
+        CAST(IFNULL(org_stats.participation_trend, JSON_ARRAY()) AS CHAR) AS participation_trend
+    FROM (
+        SELECT 
+            o.organization_id,
+            o.category,
+            ov.name AS organization_name,
+            rc.org_version_id AS current_org_version_id,
+            rc.cycle_number,
+            (
+                SELECT COUNT(DISTINCT e.event_id)
+                FROM tbl_event e
+                WHERE e.organization_id = o.organization_id
+                AND e.cycle_number = rc.cycle_number
+                AND e.status = 'Approved'
+            ) AS total_events_held,
+            (
+                SELECT 
+                    CASE 
+                        WHEN COUNT(DISTINCT e.event_id) > 0 
+                        THEN ROUND(COUNT(ea.attendance_id) / COUNT(DISTINCT e.event_id), 2)
+                        ELSE 0.00
+                    END
+                FROM tbl_event e
+                LEFT JOIN tbl_event_attendance ea ON e.event_id = ea.event_id 
+                    AND ea.status IN ('Attended', 'Evaluated')
+                    AND ea.deleted_at IS NULL
+                LEFT JOIN tbl_user u ON ea.user_id = u.user_id AND u.status = 'Active'
+                WHERE e.organization_id = o.organization_id
+                AND e.cycle_number = rc.cycle_number
+                AND e.status = 'Approved'
+            ) AS average_attendance,
+            (
+                SELECT COUNT(DISTINCT ea.user_id)
+                FROM tbl_event_attendance ea
+                INNER JOIN tbl_event e ON ea.event_id = e.event_id
+                INNER JOIN tbl_user u ON ea.user_id = u.user_id
+                WHERE e.organization_id = o.organization_id
+                AND e.cycle_number = rc.cycle_number
+                AND e.status = 'Approved'
+                AND ea.status IN ('Attended', 'Evaluated')
+                AND ea.deleted_at IS NULL
+                AND u.status = 'Active'
+            ) AS total_participants,
+            (
+                SELECT JSON_ARRAYAGG(
+                    JSON_OBJECT(
+                        'eventName', event_title,
+                        'participants', participant_count
+                    )
+                )
+                FROM (
+                    SELECT 
+                        e.title AS event_title,
+                        COUNT(DISTINCT CASE 
+                            WHEN ea.user_id IS NOT NULL AND u.status = 'Active' 
+                            THEN ea.user_id 
+                        END) AS participant_count
+                    FROM tbl_event e
+                    LEFT JOIN tbl_event_attendance ea ON e.event_id = ea.event_id 
+                        AND ea.status IN ('Attended', 'Evaluated')
+                        AND ea.deleted_at IS NULL
+                    LEFT JOIN tbl_user u ON ea.user_id = u.user_id
+                    WHERE e.organization_id = o.organization_id
+                    AND e.cycle_number = rc.cycle_number
+                    AND e.status = 'Approved'
+                    GROUP BY e.event_id, e.title, e.start_date, e.start_time
+                    ORDER BY e.start_date ASC, e.start_time ASC
+                ) event_data
+            ) AS participation_trend
+        FROM tbl_organization o
+        INNER JOIN (
+            SELECT organization_id, MAX(cycle_number) as max_cycle
+            FROM tbl_renewal_cycle
+            GROUP BY organization_id
+        ) latest ON o.organization_id = latest.organization_id
+        INNER JOIN tbl_renewal_cycle rc ON o.organization_id = rc.organization_id 
+            AND rc.cycle_number = latest.max_cycle
+        INNER JOIN tbl_organization_version ov ON rc.org_version_id = ov.org_version_id
+        WHERE o.status = 'Approved' AND o.category = 'Co-Curricular Organization'
+    ) org_stats
+    LEFT JOIN (
+        SELECT 
+            o.organization_id,
+            rc.cycle_number,
+            COALESCE(AVG(CASE WHEN event_order <= midpoint THEN participant_count END), 0) as recent_avg,
+            COALESCE(AVG(CASE WHEN event_order > midpoint THEN participant_count END), 0) as earlier_avg
+        FROM tbl_organization o
+        INNER JOIN (
+            SELECT organization_id, MAX(cycle_number) as max_cycle
+            FROM tbl_renewal_cycle
+            GROUP BY organization_id
+        ) latest ON o.organization_id = latest.organization_id
+        INNER JOIN tbl_renewal_cycle rc ON o.organization_id = rc.organization_id 
+            AND rc.cycle_number = latest.max_cycle
+        LEFT JOIN (
+            SELECT 
+                e.organization_id,
+                e.cycle_number,
+                e.event_id,
+                ROW_NUMBER() OVER (PARTITION BY e.organization_id, e.cycle_number ORDER BY e.start_date, e.start_time) as event_order,
+                COUNT(DISTINCT CASE WHEN u.status = 'Active' THEN ea.user_id END) as participant_count,
+                CEIL(COUNT(*) OVER(PARTITION BY e.organization_id, e.cycle_number) / 2.0) as midpoint
+            FROM tbl_event e
+            LEFT JOIN tbl_event_attendance ea ON e.event_id = ea.event_id 
+                AND ea.status IN ('Attended', 'Evaluated')
+                AND ea.deleted_at IS NULL
+            LEFT JOIN tbl_user u ON ea.user_id = u.user_id
+            WHERE e.status = 'Approved'
+            GROUP BY e.organization_id, e.cycle_number, e.event_id, e.start_date, e.start_time
+        ) event_stats ON o.organization_id = event_stats.organization_id 
+            AND rc.cycle_number = event_stats.cycle_number
+        WHERE o.status = 'Approved' AND o.category = 'Co-Curricular Organization'
+        GROUP BY o.organization_id, rc.cycle_number
+    ) trend_data ON org_stats.organization_id = trend_data.organization_id 
+        AND org_stats.cycle_number = trend_data.cycle_number
+    ORDER BY rank_position;
+
+    -- Extra-Curricular Organizations Leaderboard
+    SELECT 
+        'Extra-Curricular' AS category,
+        RANK() OVER (ORDER BY org_stats.average_attendance DESC) AS rank_position,
+        org_stats.organization_id,
+        org_stats.organization_name,
+        org_stats.current_org_version_id AS organization_version_id,
+        org_stats.cycle_number,
+        org_stats.total_events_held,
+        org_stats.average_attendance,
+        org_stats.total_participants,
+        CASE
+            WHEN org_stats.total_events_held < 2 THEN 'Insufficient Data'
+            WHEN trend_data.earlier_avg = 0 AND trend_data.recent_avg > 0 THEN 'Growing'
+            WHEN trend_data.earlier_avg > 0 AND trend_data.recent_avg > trend_data.earlier_avg * 1.1 THEN 'Growing'
+            WHEN trend_data.earlier_avg > 0 AND trend_data.recent_avg < trend_data.earlier_avg * 0.9 THEN 'Declining'
+            ELSE 'Stable'
+        END AS participation_trend_status,
+        CAST(IFNULL(org_stats.participation_trend, JSON_ARRAY()) AS CHAR) AS participation_trend
+    FROM (
+        SELECT 
+            o.organization_id,
+            o.category,
+            ov.name AS organization_name,
+            rc.org_version_id AS current_org_version_id,
+            rc.cycle_number,
+            (
+                SELECT COUNT(DISTINCT e.event_id)
+                FROM tbl_event e
+                WHERE e.organization_id = o.organization_id
+                AND e.cycle_number = rc.cycle_number
+                AND e.status = 'Approved'
+            ) AS total_events_held,
+            (
+                SELECT 
+                    CASE 
+                        WHEN COUNT(DISTINCT e.event_id) > 0 
+                        THEN ROUND(COUNT(ea.attendance_id) / COUNT(DISTINCT e.event_id), 2)
+                        ELSE 0.00
+                    END
+                FROM tbl_event e
+                LEFT JOIN tbl_event_attendance ea ON e.event_id = ea.event_id 
+                    AND ea.status IN ('Attended', 'Evaluated')
+                    AND ea.deleted_at IS NULL
+                LEFT JOIN tbl_user u ON ea.user_id = u.user_id AND u.status = 'Active'
+                WHERE e.organization_id = o.organization_id
+                AND e.cycle_number = rc.cycle_number
+                AND e.status = 'Approved'
+            ) AS average_attendance,
+            (
+                SELECT COUNT(DISTINCT ea.user_id)
+                FROM tbl_event_attendance ea
+                INNER JOIN tbl_event e ON ea.event_id = e.event_id
+                INNER JOIN tbl_user u ON ea.user_id = u.user_id
+                WHERE e.organization_id = o.organization_id
+                AND e.cycle_number = rc.cycle_number
+                AND e.status = 'Approved'
+                AND ea.status IN ('Attended', 'Evaluated')
+                AND ea.deleted_at IS NULL
+                AND u.status = 'Active'
+            ) AS total_participants,
+            (
+                SELECT JSON_ARRAYAGG(
+                    JSON_OBJECT(
+                        'eventName', event_title,
+                        'participants', participant_count
+                    )
+                )
+                FROM (
+                    SELECT 
+                        e.title AS event_title,
+                        COUNT(DISTINCT CASE 
+                            WHEN ea.user_id IS NOT NULL AND u.status = 'Active' 
+                            THEN ea.user_id 
+                        END) AS participant_count
+                    FROM tbl_event e
+                    LEFT JOIN tbl_event_attendance ea ON e.event_id = ea.event_id 
+                        AND ea.status IN ('Attended', 'Evaluated')
+                        AND ea.deleted_at IS NULL
+                    LEFT JOIN tbl_user u ON ea.user_id = u.user_id
+                    WHERE e.organization_id = o.organization_id
+                    AND e.cycle_number = rc.cycle_number
+                    AND e.status = 'Approved'
+                    GROUP BY e.event_id, e.title, e.start_date, e.start_time
+                    ORDER BY e.start_date ASC, e.start_time ASC
+                ) event_data
+            ) AS participation_trend
+        FROM tbl_organization o
+        INNER JOIN (
+            SELECT organization_id, MAX(cycle_number) as max_cycle
+            FROM tbl_renewal_cycle
+            GROUP BY organization_id
+        ) latest ON o.organization_id = latest.organization_id
+        INNER JOIN tbl_renewal_cycle rc ON o.organization_id = rc.organization_id 
+            AND rc.cycle_number = latest.max_cycle
+        INNER JOIN tbl_organization_version ov ON rc.org_version_id = ov.org_version_id
+        WHERE o.status = 'Approved' AND o.category = 'Extra Curricular Organization'
+    ) org_stats
+    LEFT JOIN (
+        SELECT 
+            o.organization_id,
+            rc.cycle_number,
+            COALESCE(AVG(CASE WHEN event_order <= midpoint THEN participant_count END), 0) as recent_avg,
+            COALESCE(AVG(CASE WHEN event_order > midpoint THEN participant_count END), 0) as earlier_avg
+        FROM tbl_organization o
+        INNER JOIN (
+            SELECT organization_id, MAX(cycle_number) as max_cycle
+            FROM tbl_renewal_cycle
+            GROUP BY organization_id
+        ) latest ON o.organization_id = latest.organization_id
+        INNER JOIN tbl_renewal_cycle rc ON o.organization_id = rc.organization_id 
+            AND rc.cycle_number = latest.max_cycle
+        LEFT JOIN (
+            SELECT 
+                e.organization_id,
+                e.cycle_number,
+                e.event_id,
+                ROW_NUMBER() OVER (PARTITION BY e.organization_id, e.cycle_number ORDER BY e.start_date, e.start_time) as event_order,
+                COUNT(DISTINCT CASE WHEN u.status = 'Active' THEN ea.user_id END) as participant_count,
+                CEIL(COUNT(*) OVER(PARTITION BY e.organization_id, e.cycle_number) / 2.0) as midpoint
+            FROM tbl_event e
+            LEFT JOIN tbl_event_attendance ea ON e.event_id = ea.event_id 
+                AND ea.status IN ('Attended', 'Evaluated')
+                AND ea.deleted_at IS NULL
+            LEFT JOIN tbl_user u ON ea.user_id = u.user_id
+            WHERE e.status = 'Approved'
+            GROUP BY e.organization_id, e.cycle_number, e.event_id, e.start_date, e.start_time
+        ) event_stats ON o.organization_id = event_stats.organization_id 
+            AND rc.cycle_number = event_stats.cycle_number
+        WHERE o.status = 'Approved' AND o.category = 'Extra Curricular Organization'
         GROUP BY o.organization_id, rc.cycle_number
     ) trend_data ON org_stats.organization_id = trend_data.organization_id 
         AND org_stats.cycle_number = trend_data.cycle_number
@@ -16705,6 +17791,20 @@ BEGIN
     );
     
     SELECT CONCAT('Cleaned up ', cleaned_count, ' expired QR tokens') AS result;
+END $$
+DELIMITER ;
+
+DELIMITER $$
+CREATE PROCEDURE CleanupOldReminderLogs()
+BEGIN
+    DECLARE deleted_count INT DEFAULT 0;
+    
+    DELETE FROM tbl_event_reminder_log
+    WHERE sent_at < DATE_SUB(NOW(), INTERVAL 1 YEAR);
+    
+    SET deleted_count = ROW_COUNT();
+    
+    SELECT CONCAT('Cleaned up ', deleted_count, ' old reminder logs') AS result;
 END $$
 DELIMITER ;
 
@@ -19881,6 +20981,30 @@ LEFT JOIN tbl_transaction_verification tv ON t.transaction_id = tv.transaction_i
     AND tv2.is_revoked = FALSE
   )
 ORDER BY t.transaction_id DESC;
+
+-- Event Reminders View
+-- Purpose: Monitor event reminder emails sent to participants
+CREATE VIEW vw_event_reminders AS
+SELECT 
+    erl.log_id,
+    erl.event_id,
+    e.title AS event_title,
+    e.start_date,
+    e.start_time,
+    erl.user_id,
+    u.email,
+    CONCAT(u.f_name, ' ', u.l_name) AS participant_name,
+    erl.reminder_type,
+    erl.sent_at,
+    CASE erl.reminder_type
+        WHEN 'week_before' THEN '1 Week Before'
+        WHEN 'day_before' THEN '1 Day Before'
+        WHEN 'day_of' THEN 'Day Of Event'
+    END AS reminder_description
+FROM tbl_event_reminder_log erl
+INNER JOIN tbl_event e ON erl.event_id = e.event_id
+INNER JOIN tbl_user u ON erl.user_id = u.user_id
+ORDER BY erl.sent_at DESC;
 
 
 

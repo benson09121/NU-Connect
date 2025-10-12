@@ -72,8 +72,8 @@ if (transporter) {
       console.log(`   📡 SMTP: Gmail (smtp.gmail.com:465) with reputation optimization`);
       console.log('   🛡️ Anti-Spam: Comprehensive headers and authentication');
       
-      // Send a warm-up email to improve reputation
-      sendWarmupEmail();
+      // Warm-up email disabled to reduce spam
+      // Use "Send Test Email" button in Manage Accounts if needed
       
       // Print deliverability tips
       printInboxDeliveryTips();
@@ -85,17 +85,18 @@ if (transporter) {
 }
 
 // Function to send a warm-up email to improve sender reputation
-async function sendWarmupEmail() {
-  if (!process.env.GMAIL_USER) return;
-  
-  try {
-    console.log('🔥 Sending reputation warm-up email...');
-    await sendTestEmail(process.env.GMAIL_USER);
-    console.log('✅ Warm-up email sent to improve sender reputation');
-  } catch (error) {
-    console.log('⚠️ Warm-up email failed (non-critical):', error.message);
-  }
-}
+// DISABLED: Use "Send Test Email" button in Manage Accounts interface instead
+// async function sendWarmupEmail() {
+//   if (!process.env.GMAIL_USER) return;
+//   
+//   try {
+//     console.log('🔥 Sending reputation warm-up email...');
+//     await sendTestEmail(process.env.GMAIL_USER);
+//     console.log('✅ Warm-up email sent to improve sender reputation');
+//   } catch (error) {
+//     console.log('⚠️ Warm-up email failed (non-critical):', error.message);
+//   }
+// }
 
 // Function to provide inbox delivery recommendations
 function printInboxDeliveryTips() {
@@ -329,44 +330,38 @@ async function diagnoseEmailDelivery(recipient) {
     return { success: false, message: 'SMTP connection failed' };
   }
   
-  // Check 3: Send test email with detailed tracking
-  console.log('\n3. Sending Test Email with Tracking:');
-  const testResult = await sendTestEmail(recipient);
+  // Check 3: Email configuration validation (test email removed to prevent spam)
+  console.log('\n3. Email Configuration:');
+  console.log('   ✅ SMTP connection verified');
+  console.log('   ✅ Email service ready to send');
+  console.log('   � Use "Send Test Email" button to send actual test email');
   
-  if (testResult.success) {
-    console.log('   ✅ Email sent successfully');
-    console.log(`   📧 Message ID: ${testResult.messageId}`);
-    console.log(`   📤 SMTP Response: ${testResult.response}`);
-    
-    // Delivery troubleshooting tips
-    console.log('\n💡 Delivery Troubleshooting Tips:');
-    console.log('   1. Check recipient\'s SPAM/Junk folder');
-    console.log('   2. Ask recipient to whitelist your email domain');
-    console.log('   3. Verify recipient email address is correct');
-    console.log('   4. Corporate emails may have stricter filters');
-    console.log('   5. Check your Gmail account\'s reputation');
-    console.log('   6. Ensure 2FA is enabled on your Gmail account');
-    console.log('   7. Try sending to a different email provider (Gmail, Yahoo, etc.)');
-    
-    return { 
-      success: true, 
-      message: 'Email sent - check recipient spam folder',
-      diagnostics: {
-        smtpConnection: 'OK',
-        emailSent: true,
-        messageId: testResult.messageId,
-        troubleshootingSteps: [
-          'Check spam/junk folder',
-          'Whitelist sender domain',
-          'Verify recipient email',
-          'Try different email provider'
-        ]
-      }
-    };
-  } else {
-    console.log('   ❌ Email send failed:', testResult.error);
-    return { success: false, message: testResult.error };
-  }
+  // Delivery troubleshooting tips
+  console.log('\n💡 Email Delivery Best Practices:');
+  console.log('   1. Check recipient\'s SPAM/Junk folder');
+  console.log('   2. Ask recipient to whitelist your email domain');
+  console.log('   3. Verify recipient email address is correct');
+  console.log('   4. Corporate emails may have stricter filters');
+  console.log('   5. Check your Gmail account\'s reputation');
+  console.log('   6. Ensure 2FA is enabled on your Gmail account');
+  console.log('   7. Use "Send Test Email" button to test email delivery');
+  
+  return { 
+    success: true, 
+    message: 'Email configuration verified - ready to send emails',
+    diagnostics: {
+      smtpConnection: 'OK',
+      emailConfigured: true,
+      readyToSend: true,
+      note: 'Use "Send Test Email" button to send actual test email',
+      troubleshootingSteps: [
+        'Check spam/junk folder',
+        'Whitelist sender domain',
+        'Verify recipient email',
+        'Try different email provider'
+      ]
+    }
+  };
 }
 
 function generateInvitationTemplate(redemptionUrl, isResend = false, isStudent = false, programName = 'your program') {
@@ -725,9 +720,16 @@ function generateInvitationTemplate(redemptionUrl, isResend = false, isStudent =
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light dark">
+    <meta name="supported-color-schemes" content="light dark">
     <title>NU CONNECT Invitation</title>
     <style>
       @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+      
+      :root {
+        color-scheme: light dark;
+        supported-color-schemes: light dark;
+      }
       
       * {
         box-sizing: border-box;
@@ -742,6 +744,82 @@ function generateInvitationTemplate(redemptionUrl, isResend = false, isStudent =
         background-color: #f5f5fa;
         letter-spacing: -0.3px;
         -webkit-text-size-adjust: 100%;
+      }
+      
+      /* Dark mode support */
+      @media (prefers-color-scheme: dark) {
+        body {
+          background-color: #1a1a1a;
+          color: #e0e0e0;
+        }
+        
+        .email-wrapper {
+          background-color: #1a1a1a !important;
+        }
+        
+        .container {
+          background-color: #2d2d2d !important;
+          box-shadow: 0 4px 6px rgba(0, 0, 0, 0.5) !important;
+        }
+        
+        .header {
+          background: linear-gradient(135deg, #4e59c9 0%, #343fb0 100%) !important;
+        }
+        
+        .reminder-banner {
+          background-color: #3a2f1f !important;
+          border-left-color: #fcc737 !important;
+          color: #ffd780 !important;
+        }
+        
+        .content p {
+          color: #d0d0d0 !important;
+        }
+        
+        .info-card {
+          background-color: #3a3a3a !important;
+          border-color: #4a4a4a !important;
+        }
+        
+        .info-card h3 {
+          color: #ffffff !important;
+        }
+        
+        .info-card p {
+          color: #d0d0d0 !important;
+        }
+        
+        .url-box {
+          background-color: #3a3a3a !important;
+          border-color: #4a4a4a !important;
+          color: #d0d0d0 !important;
+        }
+        
+        .warning-box {
+          background-color: #3a2f1f !important;
+          border-color: #fcc737 !important;
+        }
+        
+        .warning-box p {
+          color: #ffd780 !important;
+        }
+        
+        .divider {
+          background-color: #4a4a4a !important;
+        }
+        
+        .footer {
+          background-color: #2d2d2d !important;
+          border-top-color: #4a4a4a !important;
+        }
+        
+        .footer p {
+          color: #a0a0a0 !important;
+        }
+        
+        .footer .logo {
+          color: #5474b4 !important;
+        }
       }
       
       .email-wrapper {
@@ -1014,9 +1092,16 @@ function generateRejectionTemplate(rejectionReason, canReapply) {
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light dark">
+    <meta name="supported-color-schemes" content="light dark">
     <title>NU CONNECT Application Status</title>
     <style>
       @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+      
+      :root {
+        color-scheme: light dark;
+        supported-color-schemes: light dark;
+      }
       
       * {
         box-sizing: border-box;
@@ -1049,7 +1134,7 @@ function generateRejectionTemplate(rejectionReason, canReapply) {
       }
       
       .header {
-        background: linear-gradient(135deg, #dc2626 0%, #b91c1c 100%);
+        background: linear-gradient(135deg, #424ec6 0%, #2c389e 100%);
         padding: 40px 32px;
         text-align: center;
         color: white;
@@ -1182,6 +1267,97 @@ function generateRejectionTemplate(rejectionReason, canReapply) {
         color: #9ca3af;
         margin-top: 16px;
         font-style: italic;
+      }
+      
+      /* Dark Mode Support */
+      @media (prefers-color-scheme: dark) {
+        body {
+          background-color: #1a1a1a !important;
+          color: #e0e0e0 !important;
+        }
+        
+        .email-wrapper {
+          background-color: #1a1a1a !important;
+        }
+        
+        .container {
+          background-color: #2d2d2d !important;
+          box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3) !important;
+        }
+        
+        .header {
+          background: linear-gradient(135deg, #4e59c9 0%, #343fb0 100%) !important;
+        }
+        
+        .content {
+          background-color: #2d2d2d !important;
+        }
+        
+        .content p {
+          color: #e0e0e0 !important;
+        }
+        
+        .reason-card {
+          background-color: #3a2525 !important;
+          border-color: #7c2d2d !important;
+          border-left-color: #ef4444 !important;
+        }
+        
+        .reason-card h3 {
+          color: #f87171 !important;
+        }
+        
+        .reason-card p {
+          color: #fca5a5 !important;
+        }
+        
+        .reapply-card {
+          background-color: #1e3a32 !important;
+          border-color: #2d5a4d !important;
+          border-left-color: #34d399 !important;
+        }
+        
+        .reapply-card h3 {
+          color: #6ee7b7 !important;
+        }
+        
+        .reapply-card p {
+          color: #a7f3d0 !important;
+        }
+        
+        .info-card {
+          background-color: #3a3a3a !important;
+          border-color: #4a4a4a !important;
+        }
+        
+        .info-card h3 {
+          color: #e0e0e0 !important;
+        }
+        
+        .info-card p {
+          color: #b0b0b0 !important;
+        }
+        
+        .divider {
+          background-color: #4a4a4a !important;
+        }
+        
+        .footer {
+          background-color: #2d2d2d !important;
+          border-top-color: #4a4a4a !important;
+        }
+        
+        .footer p {
+          color: #9ca3af !important;
+        }
+        
+        .footer .logo {
+          color: #7c87e0 !important;
+        }
+        
+        .footer .disclaimer {
+          color: #6b7280 !important;
+        }
       }
       
       @media (max-width: 600px) {
@@ -1508,6 +1684,503 @@ async function sendStudentInvitationEmail(recipient, redemptionUrl, programName 
 }
 
 
+/**
+ * Send event reminder email (1 week, 1 day, or day-of)
+ * @param {string} recipient - Email address of the participant
+ * @param {Object} eventDetails - Event information
+ * @param {string} reminderType - 'week_before', 'day_before', or 'day_of'
+ */
+async function sendEventReminderEmail(recipient, eventDetails, reminderType) {
+  if (!transporter) {
+    console.warn('📧 Email service not configured. Skipping event reminder email.');
+    return { success: false, message: 'Email service not configured' };
+  }
+
+  const reminderTitles = {
+    week_before: '📅 Reminder: Your event is coming up in 1 week!',
+    day_before: '⏰ Tomorrow: Don\'t forget your event!',
+    day_of: '🎯 Today: Your event is happening today!'
+  };
+
+  const subject = `${reminderTitles[reminderType]} - ${eventDetails.title}`;
+
+  const mailOptions = {
+    from: `"${process.env.FROM_NAME || 'NU Connect Events'}" <${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}>`,
+    to: recipient,
+    subject: subject,
+    html: generateEventReminderTemplate(eventDetails, reminderType),
+    text: `Reminder: ${eventDetails.title} on ${eventDetails.start_date} at ${eventDetails.start_time}. Location: ${eventDetails.venue}`,
+    headers: {
+      'X-Priority': '3',
+      'X-MSMail-Priority': 'Normal',
+      'Importance': 'normal',
+      'X-Mailer': 'NU Connect Event System',
+      'Reply-To': process.env.SUPPORT_EMAIL || process.env.GMAIL_USER,
+      'Return-Path': process.env.FROM_EMAIL || 'noreply@nuconnect.net',
+      'X-Auto-Response-Suppress': 'All',
+      'List-Unsubscribe': `<mailto:${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}?subject=unsubscribe>`,
+      'X-Organization': 'National University - Dasmariñas',
+      'X-System': 'NU Connect',
+      'X-Event-Type': 'reminder',
+      'Precedence': 'bulk',
+      'X-Bulk': 'no'
+    },
+    envelope: {
+      from: process.env.FROM_EMAIL || 'noreply@nuconnect.net',
+      to: recipient
+    },
+    messageId: false,
+    date: new Date()
+  };
+
+  try {
+    const info = await transporter.sendMail(mailOptions);
+    console.log(`✅ Event reminder (${reminderType}) sent to ${recipient} for event "${eventDetails.title}" (ID: ${info.messageId})`);
+    return { 
+      success: true, 
+      messageId: info.messageId,
+      response: info.response,
+      reminderType: reminderType
+    };
+  } catch (error) {
+    console.error(`❌ Event reminder email failed for ${recipient}:`, error.message);
+    
+    if (error.code === 'EAUTH') {
+      console.error('💡 Authentication failed. Check your Gmail App Password.');
+    } else if (error.code === 'ENOTFOUND') {
+      console.error('💡 Network error. Check your internet connection.');
+    } else if (error.responseCode >= 500) {
+      console.error('💡 Gmail server error. Try again later.');
+    }
+    
+    return { 
+      success: false, 
+      error: error.message,
+      recipient: recipient,
+      reminderType: reminderType
+    };
+  }
+}
+
+/**
+ * Generate theme-responsive email template for event reminders
+ * Supports both light and dark mode with media queries
+ */
+function generateEventReminderTemplate(eventDetails, reminderType) {
+  const { title, start_date, start_time, end_time, venue, description, organization_name, event_id } = eventDetails;
+  
+  const reminderMessages = {
+    week_before: {
+      icon: '📅',
+      heading: 'Your Event is Coming Up!',
+      timeframe: '1 week away',
+      message: 'Just a friendly reminder that you\'re registered for this event happening next week.'
+    },
+    day_before: {
+      icon: '⏰',
+      heading: 'Tomorrow\'s Event Reminder',
+      timeframe: '1 day away',
+      message: 'Get ready! Your registered event is happening tomorrow. Don\'t miss it!'
+    },
+    day_of: {
+      icon: '🎯',
+      heading: 'Your Event is Today!',
+      timeframe: 'happening today',
+      message: 'This is it! Your registered event is happening today. See you there!'
+    }
+  };
+
+  const reminder = reminderMessages[reminderType];
+  const formattedDate = new Date(start_date).toLocaleDateString('en-US', { 
+    weekday: 'long', 
+    year: 'numeric', 
+    month: 'long', 
+    day: 'numeric' 
+  });
+
+  return `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light dark">
+  <meta name="supported-color-schemes" content="light dark">
+  <title>Event Reminder - ${title}</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      supported-color-schemes: light dark;
+    }
+    
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      line-height: 1.6;
+      color: #1a1a1a;
+      background-color: #f5f7fa;
+      padding: 20px;
+    }
+    
+    /* Dark mode support */
+    @media (prefers-color-scheme: dark) {
+      body {
+        background-color: #1a1a1a;
+        color: #e0e0e0;
+      }
+      
+      .email-container {
+        background-color: #2d2d2d !important;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5) !important;
+      }
+      
+      .header {
+        background: linear-gradient(135deg, #5a67d8 0%, #6b46c1 100%) !important;
+      }
+      
+      .content p, .event-details p {
+        color: #d0d0d0 !important;
+      }
+      
+      .event-card {
+        background-color: #3a3a3a !important;
+        border: 1px solid #4a4a4a !important;
+      }
+      
+      .event-card h3 {
+        color: #ffffff !important;
+      }
+      
+      .detail-row strong {
+        color: #ffffff !important;
+      }
+      
+      .detail-row {
+        border-bottom: 1px solid #4a4a4a !important;
+      }
+      
+      .cta-button {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
+      }
+      
+      .footer {
+        background-color: #2d2d2d !important;
+        border-top: 1px solid #4a4a4a !important;
+        color: #a0a0a0 !important;
+      }
+      
+      .footer .logo {
+        color: #667eea !important;
+      }
+    }
+    
+    .email-container {
+      max-width: 600px;
+      margin: 0 auto;
+      background-color: #ffffff;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    }
+    
+    .header {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      padding: 40px 30px;
+      text-align: center;
+    }
+    
+    .reminder-icon {
+      font-size: 48px;
+      margin-bottom: 10px;
+    }
+    
+    .header h1 {
+      font-size: 28px;
+      font-weight: 700;
+      margin: 0 0 8px 0;
+      letter-spacing: -0.5px;
+    }
+    
+    .header .timeframe {
+      font-size: 16px;
+      opacity: 0.95;
+      font-weight: 500;
+    }
+    
+    .content {
+      padding: 40px 30px;
+    }
+    
+    .content p {
+      font-size: 16px;
+      color: #4a5568;
+      margin-bottom: 24px;
+      line-height: 1.7;
+    }
+    
+    .event-card {
+      background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 24px;
+      margin: 24px 0;
+    }
+    
+    .event-card h3 {
+      font-size: 22px;
+      color: #1a202c;
+      margin-bottom: 20px;
+      font-weight: 700;
+    }
+    
+    .event-details {
+      margin-top: 16px;
+    }
+    
+    .detail-row {
+      display: flex;
+      padding: 14px 0;
+      border-bottom: 1px solid #e2e8f0;
+      align-items: flex-start;
+    }
+    
+    .detail-row:last-child {
+      border-bottom: none;
+    }
+    
+    .detail-icon {
+      font-size: 20px;
+      min-width: 32px;
+      margin-right: 12px;
+    }
+    
+    .detail-content {
+      flex: 1;
+    }
+    
+    .detail-row strong {
+      display: block;
+      font-weight: 600;
+      color: #2d3748;
+      font-size: 14px;
+      margin-bottom: 4px;
+    }
+    
+    .detail-row p {
+      margin: 0;
+      color: #4a5568;
+      font-size: 15px;
+    }
+    
+    .description-box {
+      background-color: #edf2f7;
+      border-left: 4px solid #667eea;
+      padding: 16px;
+      margin: 20px 0;
+      border-radius: 4px;
+    }
+    
+    @media (prefers-color-scheme: dark) {
+      .description-box {
+        background-color: #3a3a3a !important;
+        border-left-color: #764ba2 !important;
+      }
+      
+      .description-box p {
+        color: #d0d0d0 !important;
+      }
+    }
+    
+    .description-box p {
+      font-size: 14px;
+      color: #4a5568;
+      line-height: 1.6;
+      margin: 0;
+    }
+    
+    .cta-section {
+      text-align: center;
+      margin: 32px 0;
+    }
+    
+    .cta-button {
+      display: inline-block;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: #ffffff !important;
+      text-decoration: none;
+      padding: 16px 40px;
+      border-radius: 8px;
+      font-size: 16px;
+      font-weight: 600;
+      transition: transform 0.2s;
+      box-shadow: 0 4px 6px rgba(102, 126, 234, 0.3);
+    }
+    
+    .cta-button:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 12px rgba(102, 126, 234, 0.4);
+    }
+    
+    .footer {
+      background-color: #f8f9fa;
+      padding: 30px;
+      text-align: center;
+      border-top: 1px solid #e2e8f0;
+    }
+    
+    .footer .logo {
+      font-weight: 700;
+      color: #667eea;
+      font-size: 18px;
+      margin-bottom: 8px;
+    }
+    
+    .footer p {
+      font-size: 14px;
+      color: #6b7280;
+      margin: 4px 0;
+    }
+    
+    .footer .disclaimer {
+      font-size: 12px;
+      color: #9ca3af;
+      margin-top: 16px;
+      font-style: italic;
+    }
+    
+    /* Mobile responsiveness */
+    @media only screen and (max-width: 600px) {
+      body {
+        padding: 10px;
+      }
+      
+      .header {
+        padding: 30px 20px;
+      }
+      
+      .header h1 {
+        font-size: 24px;
+      }
+      
+      .content {
+        padding: 30px 20px;
+      }
+      
+      .event-card {
+        padding: 20px;
+      }
+      
+      .event-card h3 {
+        font-size: 20px;
+      }
+      
+      .cta-button {
+        padding: 14px 30px;
+        font-size: 15px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="email-container">
+    
+    <div class="header">
+      <div class="reminder-icon">${reminder.icon}</div>
+      <h1>${reminder.heading}</h1>
+      <p class="timeframe">${reminder.timeframe}</p>
+    </div>
+    
+    <div class="content">
+      <p>Hello,</p>
+      
+      <p>${reminder.message}</p>
+      
+      <div class="event-card">
+        <h3>${title}</h3>
+        
+        <div class="event-details">
+          <div class="detail-row">
+            <span class="detail-icon">📅</span>
+            <div class="detail-content">
+              <strong>Date</strong>
+              <p>${formattedDate}</p>
+            </div>
+          </div>
+          
+          <div class="detail-row">
+            <span class="detail-icon">🕐</span>
+            <div class="detail-content">
+              <strong>Time</strong>
+              <p>${start_time}${end_time ? ' - ' + end_time : ''}</p>
+            </div>
+          </div>
+          
+          <div class="detail-row">
+            <span class="detail-icon">📍</span>
+            <div class="detail-content">
+              <strong>Location</strong>
+              <p>${venue || 'To be announced'}</p>
+            </div>
+          </div>
+          
+          ${organization_name ? `
+          <div class="detail-row">
+            <span class="detail-icon">🏢</span>
+            <div class="detail-content">
+              <strong>Organized by</strong>
+              <p>${organization_name}</p>
+            </div>
+          </div>
+          ` : ''}
+        </div>
+        
+        ${description ? `
+        <div class="description-box">
+          <p><strong>About this event:</strong><br>${description}</p>
+        </div>
+        ` : ''}
+      </div>
+      
+      <div class="cta-section">
+        <a href="${process.env.REACT_APP_URL || 'https://nuconnect.net'}/events" class="cta-button">
+          View Event Details
+        </a>
+      </div>
+      
+      <p style="font-size: 14px; color: #6b7280; margin-top: 24px;">
+        📌 <strong>Tip:</strong> Add this event to your calendar to ensure you don't miss it!
+      </p>
+      
+      ${reminderType === 'day_of' ? `
+      <p style="font-size: 14px; color: #d97706; background-color: #fef3c7; padding: 12px; border-radius: 6px; border-left: 4px solid #f59e0b;">
+        ⚠️ <strong>Last Reminder:</strong> This is your final reminder. The event is happening today!
+      </p>
+      ` : ''}
+      
+    </div>
+    
+    <div class="footer">
+      <div class="logo">NU Connect</div>
+      <p>&copy; ${new Date().getFullYear()} National University - Dasmariñas</p>
+      <p>Event Management System</p>
+      <p class="disclaimer">
+        You're receiving this because you registered for this event.
+        This is an automated reminder email.
+      </p>
+    </div>
+    
+  </div>
+</body>
+</html>
+  `;
+}
+
 module.exports = {
   sendInvitationEmail,
   sendRejectionEmail,
@@ -1516,5 +2189,6 @@ module.exports = {
   diagnoseEmailDelivery,
   resendInvitationEmail,
   sendStudentInvitationEmail,
+  sendEventReminderEmail,
   printInboxDeliveryTips
 };

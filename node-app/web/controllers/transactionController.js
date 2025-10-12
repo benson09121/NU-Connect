@@ -339,18 +339,23 @@ async function update(req, res) {
     const raw = await transactionModel.updateTransaction({
       transaction_id,
       user_email: req.user.email,
+      payer_name,
+      payee_name,
+      transaction_type_code: req.body.transaction_type_code,
+      payment_type_code: req.body.payment_type_code,
       payment_description,
       amount,
       status,
-      proof_image: proofImagePath ?? null, // null/''/path → proc decides with removeFlag
+      transaction_date: req.body.transaction_date,
+      proof_image: proofImagePath ?? null,
       receipt_no,
       category_code,
-      payer_name,
-      payee_name,
       payer_name_override,
       event_remarks,
-      remove_proof_image: removeFlag,
-      org_version_id: organization_version_id
+      organization_id: chosenOrgId,
+      cycle_number: req.body.cycle_number,
+      org_version_id: organization_version_id,
+      remove_proof_image: removeFlag
     });
 
     const payload = unwrapSPResult(raw);
@@ -693,6 +698,56 @@ async function approveTransaction(req, res) {
   }
 }
 
+async function getTransactionAuditTrail(req, res) {
+  try {
+    const { id } = req.params;
+    
+    if (!id) {
+      return res.status(400).json({ message: 'transaction_id required' });
+    }
+
+    const auditTrail = await transactionModel.getTransactionAuditTrail(id);
+    
+    console.log(`📋 [TRANSACTION-AUDIT] Retrieved ${auditTrail.length} audit entries for transaction #${id}`);
+    
+    res.json({
+      success: true,
+      transaction_id: parseInt(id),
+      audit_count: auditTrail.length,
+      audit_trail: auditTrail
+    });
+  } catch (e) {
+    console.error('[transactions.getAuditTrail]', e);
+    res.status(500).json({ message: e.sqlMessage || e.message });
+  }
+}
+
+async function getAllTransactionAudits(req, res) {
+  try {
+    const limit = parseInt(req.query.limit) || 50;
+    const offset = parseInt(req.query.offset) || 0;
+
+    if (limit > 200) {
+      return res.status(400).json({ message: 'Limit cannot exceed 200' });
+    }
+
+    const audits = await transactionModel.getAllTransactionAudits(limit, offset);
+    
+    console.log(`📋 [TRANSACTION-AUDITS] Retrieved ${audits.length} audit entries (limit: ${limit}, offset: ${offset})`);
+    
+    res.json({
+      success: true,
+      count: audits.length,
+      limit,
+      offset,
+      audits
+    });
+  } catch (e) {
+    console.error('[transactions.getAllAudits]', e);
+    res.status(500).json({ message: e.sqlMessage || e.message });
+  }
+}
+
 module.exports = {
   create,
   update,
@@ -705,5 +760,7 @@ module.exports = {
   getTransactionTypes,
   getTransactionFile,
   getTransactionsByOrganization,
-  approveTransaction
+  approveTransaction,
+  getTransactionAuditTrail,
+  getAllTransactionAudits
 };

@@ -281,6 +281,7 @@ const updateSection = async (req, res) => {
 const archiveSection = async (req, res) => {
   try {
     const sectionId = parseInt(req.params.id);
+    const archivedByEmail = req.user?.email;
 
     // Validation
     if (isNaN(sectionId)) {
@@ -290,11 +291,17 @@ const archiveSection = async (req, res) => {
       });
     }
 
-    const section = await sectionModel.archiveSection(sectionId);
+    if (!archivedByEmail) {
+      return res.status(401).json({
+        success: false,
+        message: 'User email not found in request'
+      });
+    }
+
+    const section = await sectionModel.archiveSection(sectionId, archivedByEmail);
 
     // Broadcast SSE event for real-time updates
-    const email = req.user?.email || 'system';
-    await broadcastUpdate(CHANNELS.SECTIONS, 'ARCHIVE', section, email);
+    await broadcastUpdate(CHANNELS.SECTIONS, 'ARCHIVE', section, archivedByEmail);
 
     res.status(200).json({
       success: true,
@@ -333,6 +340,7 @@ const archiveSection = async (req, res) => {
 const unarchiveSection = async (req, res) => {
   try {
     const sectionId = parseInt(req.params.id);
+    const unarchivedByEmail = req.user?.email;
 
     // Validation
     if (isNaN(sectionId)) {
@@ -342,11 +350,17 @@ const unarchiveSection = async (req, res) => {
       });
     }
 
-    const section = await sectionModel.unarchiveSection(sectionId);
+    if (!unarchivedByEmail) {
+      return res.status(401).json({
+        success: false,
+        message: 'User email not found in request'
+      });
+    }
+
+    const section = await sectionModel.unarchiveSection(sectionId, unarchivedByEmail);
 
     // Broadcast SSE event for real-time updates
-    const email = req.user?.email || 'system';
-    await broadcastUpdate(CHANNELS.SECTIONS, 'UNARCHIVE', section, email);
+    await broadcastUpdate(CHANNELS.SECTIONS, 'UNARCHIVE', section, unarchivedByEmail);
 
     res.status(200).json({
       success: true,
