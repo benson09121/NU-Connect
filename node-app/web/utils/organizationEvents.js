@@ -39,19 +39,12 @@ const ORGANIZATION_EVENT_TYPES = {
  */
 async function publishUserOrganizationEvent(userEmail, eventType, eventData = {}) {
   try {
-    console.log('🔔 [Org Events] Publishing organization event:', {
-      userEmail,
-      eventType,
-      organizationId: eventData.organizationId,
-      organizationName: eventData.organizationName
-    });
-
     // Construct the user-specific channel
     const userChannel = `user_organizations_${userEmail}`;
 
     // Create the event payload
     const eventPayload = {
-      channel: userChannel,          // 🆕 Add channel for frontend routing
+      channel: userChannel,
       type: eventType,
       timestamp: new Date().toISOString(),
       userEmail: userEmail,
@@ -63,31 +56,13 @@ async function publishUserOrganizationEvent(userEmail, eventType, eventData = {}
       }
     };
 
-    console.log('🔍 [Org Events] About to publish to channel:', {
-      channel: userChannel,
-      payload: eventPayload
-    });
-
     // Publish to the user's organization channel
-    const publishResult = publishToChannel(userChannel, eventPayload);
-    
-    console.log('🔍 [Org Events] publishToChannel result:', publishResult);
-
-    console.log('✅ [Org Events] Successfully published organization event:', {
-      channel: userChannel,
-      eventType,
-      timestamp: eventPayload.timestamp
-    });
+    publishToChannel(userChannel, eventPayload);
 
     return true;
 
   } catch (error) {
-    console.error('❌ [Org Events] Failed to publish organization event:', {
-      userEmail,
-      eventType,
-      error: error.message,
-      stack: error.stack
-    });
+    console.error('❌ [Org Events] Failed to publish event:', error.message);
     return false;
   }
 }
@@ -103,13 +78,6 @@ async function publishUserOrganizationEvent(userEmail, eventType, eventData = {}
  */
 async function publishBulkUserOrganizationEvents(userEmails, eventType, eventData = {}) {
   try {
-    console.log('📢 [Org Events] Publishing bulk organization events:', {
-      userCount: userEmails.length,
-      eventType,
-      organizationId: eventData.organizationId,
-      userEmails: userEmails
-    });
-
     const results = {
       successful: 0,
       failed: 0,
@@ -117,17 +85,14 @@ async function publishBulkUserOrganizationEvents(userEmails, eventType, eventDat
     };
 
     // Process each user in parallel for better performance
-    const publishPromises = userEmails.map(async (email, index) => {
+    const publishPromises = userEmails.map(async (email) => {
       try {
-        console.log(`🔍 [Org Events] Processing user ${index + 1}/${userEmails.length}: ${email}`);
         const success = await publishUserOrganizationEvent(email, eventType, eventData);
         if (success) {
           results.successful++;
-          console.log(`✅ [Org Events] Successfully notified: ${email}`);
         } else {
           results.failed++;
           results.errors.push(`Failed to notify ${email}`);
-          console.error(`❌ [Org Events] Failed to notify: ${email}`);
         }
       } catch (error) {
         results.failed++;
@@ -137,15 +102,13 @@ async function publishBulkUserOrganizationEvents(userEmails, eventType, eventDat
 
     await Promise.all(publishPromises);
 
-    console.log('📊 [Org Events] Bulk organization events completed:', results);
+    if (results.successful > 0 || results.failed > 0) {
+      console.log(`📊 Org events: ${results.successful} sent${results.failed > 0 ? `, ${results.failed} failed` : ''}`);
+    }
     return results;
 
   } catch (error) {
-    console.error('❌ [Org Events] Failed bulk organization event publishing:', {
-      userEmails: userEmails.length,
-      eventType,
-      error: error.message
-    });
+    console.error('❌ [Org Events] Bulk publish failed:', error.message);
     
     return {
       successful: 0,
@@ -193,35 +156,10 @@ async function getUpdatedUserOrganizationData(userEmail, organizationId) {
       org.organization_id === parseInt(organizationId)
     );
 
-    if (updatedOrgData) {
-      console.log('✅ [Org Events] Found updated organization data:', {
-        userEmail,
-        organizationId,
-        orgData: {
-          name: updatedOrgData.name,
-          cycle_number: updatedOrgData.cycle_number,
-          organization_version_id: updatedOrgData.current_org_version_id,
-          position: updatedOrgData.position,
-          status: updatedOrgData.status
-        }
-      });
-    } else {
-      console.warn('⚠️ [Org Events] Organization data not found for user:', {
-        userEmail,
-        organizationId,
-        availableOrgs: organizations.map(o => o.organization_id)
-      });
-    }
-
     return updatedOrgData || null;
 
   } catch (error) {
-    console.error('❌ [Org Events] Failed to get updated organization data:', {
-      userEmail,
-      organizationId,
-      error: error.message,
-      stack: error.stack
-    });
+    console.error('❌ [Org Events] Failed to get updated org data:', error.message);
     return null;
   }
 }
@@ -236,11 +174,6 @@ async function getUpdatedUserOrganizationData(userEmail, organizationId) {
  */
 async function refreshUserOrganizations(userEmail, reason = 'manual_refresh') {
   try {
-    console.log('🔄 [Org Events] Refreshing user organizations:', {
-      userEmail,
-      reason
-    });
-
     // Fetch fresh organization data
     const userPermissions = await userModel.getPermissions(userEmail);
     const organizations = userPermissions?.organizations || [];
@@ -261,20 +194,10 @@ async function refreshUserOrganizations(userEmail, reason = 'manual_refresh') {
     const userChannel = `user_organizations_${userEmail}`;
     publishToChannel(userChannel, refreshEvent);
 
-    console.log('✅ [Org Events] User organizations refreshed:', {
-      userEmail,
-      organizationCount: organizations.length,
-      reason
-    });
-
     return true;
 
   } catch (error) {
-    console.error('❌ [Org Events] Failed to refresh user organizations:', {
-      userEmail,
-      reason,
-      error: error.message
-    });
+    console.error('❌ [Org Events] Refresh failed:', error.message);
     return false;
   }
 }
@@ -304,79 +227,54 @@ async function notifyOrganizationApproved(organizationData, memberEmails) {
   };
 
   // � Enhanced approach: Get fresh data for each user individually
-  const memberNotifications = memberEmails.map(async (email, index) => {
+  const memberNotifications = memberEmails.map(async (email) => {
     try {
-      console.log(`🔍 [Org Events] Processing member ${index + 1}/${memberEmails.length}: ${email}`);
-      console.log(`🔍 [Org Events] Expected channel for ${email}: user_organizations_${email}`);
-      
-      // 🔄 Get fresh organization data for this specific user
+      // Get fresh organization data for this specific user
       const freshOrgData = await getUpdatedUserOrganizationData(email, organizationData.organization_id);
       
       if (freshOrgData) {
-        console.log(`✅ [Org Events] Got fresh organization data for ${email}:`, {
-          name: freshOrgData.name,
-          position: freshOrgData.position,
-          cycle_number: freshOrgData.cycle_number,
-          organization_version_id: freshOrgData.current_org_version_id
-        });
-
-        // 🎯 Create event with actual fresh data from database
+        // Create event with actual fresh data from database
         const eventData = {
           organizationId: organizationData.organization_id,
           organizationVersionId: freshOrgData.current_org_version_id,
           organizationName: freshOrgData.name,
-          // 🔄 Use FRESH organization data with actual position
-          organizationData: freshOrgData, // Complete fresh organization object
+          organizationData: freshOrgData,
           metadata: {
             event_description: `Organization "${freshOrgData.name}" has been approved`,
             action_required: false,
             refresh_user_cache: true,
-            user_position: freshOrgData.position // Actual position from DB
+            user_position: freshOrgData.position
           },
           source: 'organization_approval'
         };
 
-        // 🚀 Send individual notification with fresh data
-        console.log(`🚀 [Org Events] About to publish organization_approved event to ${email}:`, {
-          channel: `user_organizations_${email}`,
-          eventType: ORGANIZATION_EVENT_TYPES.ORGANIZATION_APPROVED,
-          hasEventData: !!eventData,
-          eventDataKeys: Object.keys(eventData)
-        });
-
+        // Send individual notification with fresh data
         const success = await publishUserOrganizationEvent(
           email,
           ORGANIZATION_EVENT_TYPES.ORGANIZATION_APPROVED,
           eventData
         );
 
-        console.log(`🔍 [Org Events] Organization approval event result for ${email}:`, success);
-
         if (success) {
           results.successful++;
-          console.log(`✅ [Org Events] Successfully notified ${email} with position: ${freshOrgData.position}`);
           
-          // 🆕 Also send organizations list update
-          console.log(`🚀 [Org Events] About to send ORGANIZATIONS_UPDATED to ${email}`);
+          // Also send organizations list update
           const allFreshOrgs = await userModel.getPermissions(email);
-          const orgUpdateSuccess = await publishUserOrganizationEvent(email, 'ORGANIZATIONS_UPDATED', {
+          await publishUserOrganizationEvent(email, 'ORGANIZATIONS_UPDATED', {
             organizations: allFreshOrgs?.organizations || [],
             updatedOrganization: freshOrgData,
             reason: 'organization_approved'
           });
-          console.log(`🔍 [Org Events] ORGANIZATIONS_UPDATED result for ${email}:`, orgUpdateSuccess);
         } else {
           results.failed++;
           results.errors.push(`Failed to notify ${email}`);
         }
       } else {
-        // User might not be in the organization anymore or data not found
-        console.warn(`⚠️ [Org Events] No fresh organization data found for ${email}`);
         results.failed++;
         results.errors.push(`No organization data found for ${email}`);
       }
     } catch (error) {
-      console.error(`❌ [Org Events] Failed to process member ${email}:`, error);
+      console.error(`❌ [Org Events] Member process error for ${email}:`, error.message);
       results.failed++;
       results.errors.push(`Error processing ${email}: ${error.message}`);
     }
@@ -385,7 +283,9 @@ async function notifyOrganizationApproved(organizationData, memberEmails) {
   // Wait for all member notifications to complete
   await Promise.all(memberNotifications);
 
-  console.log('📊 [Org Events] Organization approval notifications completed:', results);
+  if (results.successful > 0 || results.failed > 0) {
+    console.log(`📊 Org approval: ${results.successful} notified${results.failed > 0 ? `, ${results.failed} failed` : ''}`);
+  }
   return results;
 }
 

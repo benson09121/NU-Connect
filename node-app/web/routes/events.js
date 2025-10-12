@@ -31,6 +31,13 @@ router.post(
   eventController.uploadOrUpdatePostEventRequirement
 );
 
+router.put(
+  '/event-requirements/submissions/:submission_id/mark-viewed',
+  middleware.validateAzureJWT,
+  middleware.hasPermission("VIEW_EVENT"),
+  eventController.markEventRequirementAsViewed
+);
+
 router.get('/events/certificate-template', eventController.getCert);
 router.get('/events/sample-certificate', middleware.validateAzureJWT, middleware.hasPermission("UPDATE_EVALUATION"), eventController.getSampleCertificate);
 

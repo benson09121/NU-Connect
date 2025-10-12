@@ -51,8 +51,8 @@ const addSection = async (sectionName, programId, createdByEmail) => {
   const connection = await pool.getConnection();
   try {
     const [rows] = await connection.execute(
-      'CALL AddSection(?, ?)',
-      [sectionName, programId]
+      'CALL AddSection(?, ?, ?)',
+      [sectionName, programId, createdByEmail]
     );
     return rows[0][0]; // First result set, first row
   } finally {
@@ -64,6 +64,7 @@ const addSection = async (sectionName, programId, createdByEmail) => {
  * Update an existing section
  * @param {number} sectionId - Section ID
  * @param {string} sectionName - New section name (2-100 characters)
+ * @param {number} programId - Program ID
  * @param {string} updatedByEmail - Email of user updating the section
  * @returns {Promise<Object>} Updated section
  */
@@ -71,8 +72,8 @@ const updateSection = async (sectionId, sectionName, programId, updatedByEmail) 
   const connection = await pool.getConnection();
   try {
     const [rows] = await connection.execute(
-      'CALL UpdateSection(?, ?, ?)',
-      [sectionId, sectionName, programId]
+      'CALL UpdateSection(?, ?, ?, ?)',
+      [sectionId, sectionName, programId, updatedByEmail]
     );
     return rows[0][0]; // First result set, first row
   } finally {
@@ -83,15 +84,16 @@ const updateSection = async (sectionId, sectionName, programId, updatedByEmail) 
 /**
  * Archive a section (set is_active to FALSE)
  * @param {number} sectionId - Section ID
+ * @param {string} archivedByEmail - Email of user archiving the section
  * @returns {Promise<Object>} Archived section
  * @throws {Error} If section has assigned students
  */
-const archiveSection = async (sectionId) => {
+const archiveSection = async (sectionId, archivedByEmail) => {
   const connection = await pool.getConnection();
   try {
     const [rows] = await connection.execute(
-      'CALL ArchiveSection(?)',
-      [sectionId]
+      'CALL ArchiveSection(?, ?)',
+      [sectionId, archivedByEmail]
     );
     return rows[0][0]; // First result set, first row
   } finally {
@@ -102,14 +104,15 @@ const archiveSection = async (sectionId) => {
 /**
  * Unarchive a section (set is_active to TRUE)
  * @param {number} sectionId - Section ID
+ * @param {string} unarchivedByEmail - Email of user restoring the section
  * @returns {Promise<Object>} Unarchived section
  */
-const unarchiveSection = async (sectionId) => {
+const unarchiveSection = async (sectionId, unarchivedByEmail) => {
   const connection = await pool.getConnection();
   try {
     const [rows] = await connection.execute(
-      'CALL UnarchiveSection(?)',
-      [sectionId]
+      'CALL UnarchiveSection(?, ?)',
+      [sectionId, unarchivedByEmail]
     );
     return rows[0][0]; // First result set, first row
   } finally {

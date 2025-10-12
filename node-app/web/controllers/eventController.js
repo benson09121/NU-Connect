@@ -847,6 +847,40 @@ async function uploadOrUpdatePostEventRequirement(req, res) {
   }
 }
 
+async function markEventRequirementAsViewed(req, res) {
+  try {
+    const { submission_id } = req.params;
+    const user_email = req.user?.email;
+
+    if (!submission_id) {
+      return res.status(400).json({ message: "submission_id is required." });
+    }
+
+    if (!user_email) {
+      return res.status(401).json({ message: "User not authenticated." });
+    }
+
+    const result = await eventModel.markEventRequirementAsViewed(
+      parseInt(submission_id),
+      user_email
+    );
+
+    if (!result) {
+      return res.status(404).json({ message: "Submission not found or could not be updated." });
+    }
+
+    res.status(200).json({
+      message: "Event requirement marked as viewed successfully.",
+      submission: result
+    });
+  } catch (error) {
+    console.error('[markEventRequirementAsViewed] Error:', error);
+    res.status(500).json({
+      error: error.message || "An error occurred while marking requirement as viewed.",
+    });
+  }
+}
+
 async function createEvent(req, res) {
   try {
     const event = req.body;
@@ -2285,6 +2319,7 @@ module.exports = {
   getEventEvaluationConfig,
   updateEventEvaluationConfig,
   uploadOrUpdatePostEventRequirement,
+  markEventRequirementAsViewed,
   createEvent,
   getaddEventStatus,
   getEventApprovalTimeline,
