@@ -206,7 +206,7 @@ async function createOrganizationApplication(req, res) {
       'image/png': ['.png']
     };
     const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
-    const MAX_LOGO_SIZE = 5 * 1024 * 1024; // 5MB for logos
+    const MAX_LOGO_SIZE = 10 * 1024 * 1024; // 10MB for logos
 
     // Parse request body
     const organization = JSON.parse(req.body.organization);
@@ -610,6 +610,31 @@ async function approveApplication(req, res) {
               
               const notificationResult = await notifyOrganizationApproved(completeOrgData, memberEmails);
               console.log('✅ [RT-DEBUG] Organization approval notifications sent successfully:', notificationResult);
+              
+              // 📧 Send organization approval email
+              try {
+                const emailService = require('../../services/emailService');
+                const presidentOfficer = officers.find(o => o.rank_name && o.rank_name.toLowerCase().includes('president'));
+                const recipientEmail = presidentOfficer ? presidentOfficer.email : memberEmails[0];
+                
+                const emailDetails = {
+                  name: organizationName,
+                  application_id: application_id,
+                  approved_date: new Date().toISOString(),
+                  organization_id: orgId,
+                  cycle_number: result?.other?.cycle_number
+                };
+                
+                const emailResult = await emailService.sendOrganizationApprovalEmail(recipientEmail, emailDetails);
+                if (emailResult.success) {
+                  console.log(`✅ Organization approval email sent to ${recipientEmail}`);
+                } else {
+                  console.warn(`⚠️ Failed to send organization approval email: ${emailResult.error || emailResult.message}`);
+                }
+              } catch (emailError) {
+                console.error('❌ Error sending organization approval email:', emailError.message);
+              }
+              
             } catch (delayedNotificationError) {
               console.error('❌ [Real-time] Failed to send delayed organization approval notifications:', {
                 error: delayedNotificationError.message,
@@ -727,6 +752,39 @@ async function rejectApplication(req, res) {
       data: Array.isArray(updatedTimeline) ? updatedTimeline : [updatedTimeline],
       timestamp: new Date()
     });
+
+    // 📧 Send organization rejection email
+    try {
+      const emailService = require('../../services/emailService');
+      const officers = await organizationsModel.getApplicationOfficers(application_id);
+      
+      if (officers && officers.length > 0) {
+        const presidentOfficer = officers.find(o => o.rank_name && o.rank_name.toLowerCase().includes('president'));
+        const recipientEmail = presidentOfficer ? presidentOfficer.email : officers[0].email;
+        
+        // Get application details for email
+        const applicationDetails = await organizationsModel.getSpecificApplication(null, null, application_id);
+        const orgName = applicationDetails?.[0]?.organization_name || appName;
+        
+        const rejectionDetails = {
+          name: orgName,
+          application_id: application_id,
+          reason: comments || 'Your application requires revisions before it can be approved.',
+          rejector_name: req.user?.name || req.user?.email,
+          rejected_date: new Date().toISOString()
+        };
+        
+        const emailResult = await emailService.sendOrganizationRejectionEmail(recipientEmail, rejectionDetails);
+        if (emailResult.success) {
+          console.log(`✅ Organization rejection email sent to ${recipientEmail}`);
+        } else {
+          console.warn(`⚠️ Failed to send organization rejection email: ${emailResult.error || emailResult.message}`);
+        }
+      }
+    } catch (emailError) {
+      console.error('❌ Error sending organization rejection email:', emailError.message);
+      // Don't fail the request if email fails
+    }
 
     res.json({
       message: 'Application rejected successfully',

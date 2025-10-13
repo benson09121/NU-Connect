@@ -30,11 +30,12 @@ async function createTransaction(data, proofImagePath = null) {
       event_remarks,
       organization_id,
       cycle_number,
-      org_version_id
+      org_version_id,
+      remarks
     } = data;
 
     const [rows] = await conn.query(
-      'CALL CreateTransaction(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);',
+      'CALL CreateTransaction(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);',
       [
         user_email || null,
         payer_name || null,
@@ -53,7 +54,8 @@ async function createTransaction(data, proofImagePath = null) {
         event_remarks || null,
         organization_id || null,
         cycle_number || null,
-        org_version_id || null
+        org_version_id || null,
+        remarks || null
       ]
     );
     return firstRowFromSP(rows);
@@ -85,7 +87,8 @@ async function updateTransaction(params) {
       organization_id = null,            // NEW: Allow changing organization
       cycle_number = null,               // NEW: Allow changing cycle
       org_version_id = null,
-      remove_proof_image = 0
+      remove_proof_image = 0,
+      remarks = null
     } = params;
 
     const removeFlag =
@@ -95,7 +98,7 @@ async function updateTransaction(params) {
       (typeof remove_proof_image === 'string' && remove_proof_image.toLowerCase() === 'true')
         ? 1 : 0;
 
-    const sql = `CALL UpdateTransaction(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+    const sql = `CALL UpdateTransaction(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
     const safeParams = [
       transaction_id || null,
       user_email || null,
@@ -115,7 +118,8 @@ async function updateTransaction(params) {
       organization_id,
       cycle_number,
       org_version_id,
-      removeFlag
+      removeFlag,
+      remarks
     ];
 
     console.log('[transactionModel.updateTransaction] SQL:', sql);

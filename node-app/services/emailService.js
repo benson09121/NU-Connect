@@ -240,72 +240,6 @@ async function sendRejectionEmail(recipient, rejectionReason, canReapply = true)
   }
 }
 
-async function testEmailConfig() {
-  if (!transporter) {
-    return { success: false, message: 'Email not configured' };
-  }
-  
-  try {
-    await transporter.verify();
-    return { success: true, message: 'Email configuration valid' };
-  } catch (error) {
-    return { success: false, message: error.message };
-  }
-}
-
-async function sendTestEmail(recipient) {
-  if (!transporter) {
-    return { success: false, message: 'Email service not configured' };
-  }
-
-  const mailOptions = {
-    from: `"${process.env.FROM_NAME || 'NU Connect Team'}" <${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}>`,
-    to: recipient,
-    subject: 'Test Email - NU Connect',
-    html: `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <h2>Test Email</h2>
-        <p>This is a test email from NU Connect system.</p>
-        <p>If you receive this, the email configuration is working correctly.</p>
-        <p>Sent at: ${new Date().toISOString()}</p>
-      </div>
-    `,
-    text: `Test email from NU Connect system. Sent at: ${new Date().toISOString()}`,
-    // Enhanced headers for test email
-    headers: {
-      'X-Priority': '3',
-      'X-MSMail-Priority': 'Normal',
-      'Importance': 'normal',
-      'X-Mailer': 'NU Connect System - Test',
-      'Reply-To': process.env.SUPPORT_EMAIL || process.env.GMAIL_USER,
-      'Return-Path': process.env.FROM_EMAIL || 'noreply@nuconnect.net',
-      'X-Organization': 'National University - Dasmariñas',
-      'X-System': 'NU Connect Test',
-      'X-Test-Email': 'true'
-    },
-    envelope: {
-      from: process.env.FROM_EMAIL || 'noreply@nuconnect.net',
-      to: recipient
-    },
-    messageId: false,
-    date: new Date()
-  };
-
-  try {
-    const info = await transporter.sendMail(mailOptions);
-    console.log(`✅ Test email sent to ${recipient} (ID: ${info.messageId})`);
-    return { 
-      success: true, 
-      messageId: info.messageId,
-      response: info.response,
-      deliveryInfo: info
-    };
-  } catch (error) {
-    console.error('❌ Test email send failed for', recipient, ':', error.message);
-    return { success: false, error: error.message };
-  }
-}
-
 // Enhanced delivery diagnostic function
 async function diagnoseEmailDelivery(recipient) {
   if (!transporter) {
@@ -330,11 +264,10 @@ async function diagnoseEmailDelivery(recipient) {
     return { success: false, message: 'SMTP connection failed' };
   }
   
-  // Check 3: Email configuration validation (test email removed to prevent spam)
+  // Check 3: Email configuration validation
   console.log('\n3. Email Configuration:');
   console.log('   ✅ SMTP connection verified');
   console.log('   ✅ Email service ready to send');
-  console.log('   � Use "Send Test Email" button to send actual test email');
   
   // Delivery troubleshooting tips
   console.log('\n💡 Email Delivery Best Practices:');
@@ -344,7 +277,6 @@ async function diagnoseEmailDelivery(recipient) {
   console.log('   4. Corporate emails may have stricter filters');
   console.log('   5. Check your Gmail account\'s reputation');
   console.log('   6. Ensure 2FA is enabled on your Gmail account');
-  console.log('   7. Use "Send Test Email" button to test email delivery');
   
   return { 
     success: true, 
@@ -353,7 +285,6 @@ async function diagnoseEmailDelivery(recipient) {
       smtpConnection: 'OK',
       emailConfigured: true,
       readyToSend: true,
-      note: 'Use "Send Test Email" button to send actual test email',
       troubleshootingSteps: [
         'Check spam/junk folder',
         'Whitelist sender domain',
@@ -2181,14 +2112,640 @@ function generateEventReminderTemplate(eventDetails, reminderType) {
   `;
 }
 
+/**
+ * Send organization application approval email
+ * @param {string} recipient - Email of the organization president/applicant
+ * @param {Object} organizationDetails - Organization information
+ * @param {string} organizationDetails.name - Organization name
+ * @param {string} organizationDetails.application_id - Application ID
+ * @param {string} organizationDetails.approved_date - Date approved
+ */
+async function sendOrganizationApprovalEmail(recipient, organizationDetails) {
+  if (!transporter) {
+    console.warn('📧 Email service not configured. Skipping organization approval email.');
+    return { success: false, message: 'Email service not configured' };
+  }
+
+  const { name, application_id, approved_date } = organizationDetails;
+  const subject = `🎉 Organization Approved - ${name}`;
+
+  const mailOptions = {
+    from: `"${process.env.FROM_NAME || 'NU Connect Team'}" <${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}>`,
+    to: recipient,
+    subject: subject,
+    html: generateOrganizationApprovalTemplate(organizationDetails),
+    text: `Congratulations! Your organization application for "${name}" has been approved. Application ID: ${application_id}. Approved on: ${approved_date}`,
+    headers: {
+      'X-Priority': '3',
+      'X-MSMail-Priority': 'Normal',
+      'Importance': 'normal',
+      'X-Mailer': 'NU Connect System',
+      'Reply-To': process.env.SUPPORT_EMAIL || process.env.GMAIL_USER,
+      'Return-Path': process.env.FROM_EMAIL || 'noreply@nuconnect.net',
+      'X-Auto-Response-Suppress': 'All',
+      'List-Unsubscribe': `<mailto:${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}?subject=unsubscribe>`,
+      'X-Organization': 'National University - Dasmariñas',
+      'X-System': 'NU Connect',
+      'Precedence': 'bulk',
+      'X-Bulk': 'no'
+    },
+    envelope: {
+      from: process.env.FROM_EMAIL || 'noreply@nuconnect.net',
+      to: recipient
+    },
+    messageId: false,
+    date: new Date()
+  };
+
+  try {
+    const info = await transporter.sendMail(mailOptions);
+    console.log(`✅ Organization approval email sent to ${recipient} for "${name}" (ID: ${info.messageId})`);
+    return { 
+      success: true, 
+      messageId: info.messageId,
+      response: info.response 
+    };
+  } catch (error) {
+    console.error('❌ Organization approval email failed for', recipient, ':', error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Send organization application rejection email
+ * @param {string} recipient - Email of the organization president/applicant
+ * @param {Object} rejectionDetails - Rejection information
+ * @param {string} rejectionDetails.name - Organization name
+ * @param {string} rejectionDetails.application_id - Application ID
+ * @param {string} rejectionDetails.reason - Rejection reason
+ * @param {string} rejectionDetails.rejector_name - Name of person who rejected
+ */
+async function sendOrganizationRejectionEmail(recipient, rejectionDetails) {
+  if (!transporter) {
+    console.warn('📧 Email service not configured. Skipping organization rejection email.');
+    return { success: false, message: 'Email service not configured' };
+  }
+
+  const { name, application_id, reason, rejector_name } = rejectionDetails;
+  const subject = `Organization Application Update - ${name}`;
+
+  const mailOptions = {
+    from: `"${process.env.FROM_NAME || 'NU Connect Team'}" <${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}>`,
+    to: recipient,
+    subject: subject,
+    html: generateOrganizationRejectionTemplate(rejectionDetails),
+    text: `Your organization application for "${name}" has been reviewed. Application ID: ${application_id}. Reason: ${reason}. You may address the feedback and reapply.`,
+    headers: {
+      'X-Priority': '3',
+      'X-MSMail-Priority': 'Normal',
+      'Importance': 'normal',
+      'X-Mailer': 'NU Connect System',
+      'Reply-To': process.env.SUPPORT_EMAIL || process.env.GMAIL_USER,
+      'Return-Path': process.env.FROM_EMAIL || 'noreply@nuconnect.net',
+      'X-Auto-Response-Suppress': 'All',
+      'List-Unsubscribe': `<mailto:${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}?subject=unsubscribe>`,
+      'X-Organization': 'National University - Dasmariñas',
+      'X-System': 'NU Connect',
+      'Precedence': 'bulk',
+      'X-Bulk': 'no'
+    },
+    envelope: {
+      from: process.env.FROM_EMAIL || 'noreply@nuconnect.net',
+      to: recipient
+    },
+    messageId: false,
+    date: new Date()
+  };
+
+  try {
+    const info = await transporter.sendMail(mailOptions);
+    console.log(`✅ Organization rejection email sent to ${recipient} for "${name}" (ID: ${info.messageId})`);
+    return { 
+      success: true, 
+      messageId: info.messageId,
+      response: info.response 
+    };
+  } catch (error) {
+    console.error('❌ Organization rejection email failed for', recipient, ':', error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Send event proposal approval email
+ * @param {string} recipient - Email of the event organizer
+ * @param {Object} eventDetails - Event information
+ * @param {string} eventDetails.title - Event title
+ * @param {string} eventDetails.event_id - Event ID
+ * @param {string} eventDetails.start_date - Event start date
+ * @param {string} eventDetails.organization_name - Organizing organization
+ */
+async function sendEventApprovalEmail(recipient, eventDetails) {
+  if (!transporter) {
+    console.warn('📧 Email service not configured. Skipping event approval email.');
+    return { success: false, message: 'Email service not configured' };
+  }
+
+  const { title, event_id, start_date, organization_name } = eventDetails;
+  const subject = `🎉 Event Proposal Approved - ${title}`;
+
+  const mailOptions = {
+    from: `"${process.env.FROM_NAME || 'NU Connect Events'}" <${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}>`,
+    to: recipient,
+    subject: subject,
+    html: generateEventApprovalTemplate(eventDetails),
+    text: `Congratulations! Your event proposal "${title}" has been approved. Event ID: ${event_id}. Scheduled for: ${start_date}. Organized by: ${organization_name}`,
+    headers: {
+      'X-Priority': '3',
+      'X-MSMail-Priority': 'Normal',
+      'Importance': 'normal',
+      'X-Mailer': 'NU Connect Event System',
+      'Reply-To': process.env.SUPPORT_EMAIL || process.env.GMAIL_USER,
+      'Return-Path': process.env.FROM_EMAIL || 'noreply@nuconnect.net',
+      'X-Auto-Response-Suppress': 'All',
+      'List-Unsubscribe': `<mailto:${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}?subject=unsubscribe>`,
+      'X-Organization': 'National University - Dasmariñas',
+      'X-System': 'NU Connect',
+      'Precedence': 'bulk',
+      'X-Bulk': 'no'
+    },
+    envelope: {
+      from: process.env.FROM_EMAIL || 'noreply@nuconnect.net',
+      to: recipient
+    },
+    messageId: false,
+    date: new Date()
+  };
+
+  try {
+    const info = await transporter.sendMail(mailOptions);
+    console.log(`✅ Event approval email sent to ${recipient} for "${title}" (ID: ${info.messageId})`);
+    return { 
+      success: true, 
+      messageId: info.messageId,
+      response: info.response 
+    };
+  } catch (error) {
+    console.error('❌ Event approval email failed for', recipient, ':', error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Send event proposal rejection email
+ * @param {string} recipient - Email of the event organizer
+ * @param {Object} rejectionDetails - Rejection information
+ * @param {string} rejectionDetails.title - Event title
+ * @param {string} rejectionDetails.event_id - Event ID
+ * @param {string} rejectionDetails.reason - Rejection reason
+ * @param {string} rejectionDetails.organization_name - Organizing organization
+ */
+async function sendEventRejectionEmail(recipient, rejectionDetails) {
+  if (!transporter) {
+    console.warn('📧 Email service not configured. Skipping event rejection email.');
+    return { success: false, message: 'Email service not configured' };
+  }
+
+  const { title, event_id, reason, organization_name } = rejectionDetails;
+  const subject = `Event Proposal Update - ${title}`;
+
+  const mailOptions = {
+    from: `"${process.env.FROM_NAME || 'NU Connect Events'}" <${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}>`,
+    to: recipient,
+    subject: subject,
+    html: generateEventRejectionTemplate(rejectionDetails),
+    text: `Your event proposal "${title}" has been reviewed. Event ID: ${event_id}. Reason: ${reason}. You may address the feedback and submit a new proposal.`,
+    headers: {
+      'X-Priority': '3',
+      'X-MSMail-Priority': 'Normal',
+      'Importance': 'normal',
+      'X-Mailer': 'NU Connect Event System',
+      'Reply-To': process.env.SUPPORT_EMAIL || process.env.GMAIL_USER,
+      'Return-Path': process.env.FROM_EMAIL || 'noreply@nuconnect.net',
+      'X-Auto-Response-Suppress': 'All',
+      'List-Unsubscribe': `<mailto:${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}?subject=unsubscribe>`,
+      'X-Organization': 'National University - Dasmariñas',
+      'X-System': 'NU Connect',
+      'Precedence': 'bulk',
+      'X-Bulk': 'no'
+    },
+    envelope: {
+      from: process.env.FROM_EMAIL || 'noreply@nuconnect.net',
+      to: recipient
+    },
+    messageId: false,
+    date: new Date()
+  };
+
+  try {
+    const info = await transporter.sendMail(mailOptions);
+    console.log(`✅ Event rejection email sent to ${recipient} for "${title}" (ID: ${info.messageId})`);
+    return { 
+      success: true, 
+      messageId: info.messageId,
+      response: info.response 
+    };
+  } catch (error) {
+    console.error('❌ Event rejection email failed for', recipient, ':', error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Generate organization approval email template
+ */
+function generateOrganizationApprovalTemplate(organizationDetails) {
+  const { name, application_id, approved_date, organization_id, cycle_number } = organizationDetails;
+  const formattedDate = approved_date ? new Date(approved_date).toLocaleDateString('en-US', { 
+    year: 'numeric', 
+    month: 'long', 
+    day: 'numeric' 
+  }) : 'Recently';
+
+  return `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Organization Approved - ${name}</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; line-height: 1.6; color: #333; background-color: #f5f5f5; margin: 0; padding: 20px; }
+    .container { max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1); }
+    .header { background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: white; padding: 40px 30px; text-align: center; }
+    .header h1 { font-size: 28px; margin: 0 0 8px 0; }
+    .content { padding: 40px 30px; }
+    .success-icon { font-size: 64px; text-align: center; margin: 20px 0; }
+    .info-card { background-color: #ecfdf5; border: 1px solid: #a7f3d0; border-left: 4px solid #10b981; border-radius: 8px; padding: 20px; margin: 24px 0; }
+    .info-card h3 { font-size: 18px; color: #065f46; margin: 0 0 12px 0; }
+    .info-card p { margin: 8px 0; font-size: 14px; color: #047857; }
+    .cta-button { display: inline-block; background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: white; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: 600; margin: 20px 0; }
+    .footer { background-color: #f8f9fa; padding: 30px; text-align: center; border-top: 1px solid #e5e7eb; color: #6b7280; font-size: 14px; }
+    .footer .logo { font-weight: 600; color: #10b981; font-size: 16px; margin-bottom: 8px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>🎉 Congratulations!</h1>
+      <p>Your Organization Has Been Approved</p>
+    </div>
+    <div class="content">
+      <div class="success-icon">✅</div>
+      <p>Dear Organization Leader,</p>
+      <p>We are pleased to inform you that your organization application has been <strong>approved</strong>!</p>
+      
+      <div class="info-card">
+        <h3>Organization Details</h3>
+        <p><strong>Organization Name:</strong> ${name}</p>
+        <p><strong>Application ID:</strong> ${application_id}</p>
+        <p><strong>Approval Date:</strong> ${formattedDate}</p>
+        ${organization_id ? `<p><strong>Organization ID:</strong> ${organization_id}</p>` : ''}
+        ${cycle_number ? `<p><strong>Academic Cycle:</strong> ${cycle_number}</p>` : ''}
+      </div>
+      
+      <p>Your organization is now active in the NU Connect system. You can:</p>
+      <ul>
+        <li>✅ Manage organization members and roles</li>
+        <li>✅ Create and submit event proposals</li>
+        <li>✅ Access organization dashboard and analytics</li>
+        <li>✅ Collaborate with other organizations</li>
+        <li>✅ Manage term payments and financial records</li>
+      </ul>
+      
+      <div style="text-align: center; margin: 30px 0;">
+        <a href="${process.env.REACT_APP_URL || 'https://nuconnect.net'}/organizations" class="cta-button">
+          Access Organization Dashboard
+        </a>
+      </div>
+      
+      <p>If you have any questions or need assistance getting started, please don't hesitate to contact our support team.</p>
+      
+      <p>Best regards,<br><strong>The NU Connect Team</strong></p>
+    </div>
+    <div class="footer">
+      <div class="logo">NU Connect</div>
+      <p>&copy; ${new Date().getFullYear()} National University - Dasmariñas</p>
+      <p>Organization Management System</p>
+    </div>
+  </div>
+</body>
+</html>
+  `;
+}
+
+/**
+ * Generate organization rejection email template
+ */
+function generateOrganizationRejectionTemplate(rejectionDetails) {
+  const { name, application_id, reason, rejector_name, rejected_date } = rejectionDetails;
+  const formattedDate = rejected_date ? new Date(rejected_date).toLocaleDateString('en-US', { 
+    year: 'numeric', 
+    month: 'long', 
+    day: 'numeric' 
+  }) : 'Recently';
+
+  return `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Organization Application Update - ${name}</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; line-height: 1.6; color: #333; background-color: #f5f5f5; margin: 0; padding: 20px; }
+    .container { max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1); }
+    .header { background: linear-gradient(135deg, #424ec6 0%, #2c389e 100%); color: white; padding: 40px 30px; text-align: center; }
+    .header h1 { font-size: 24px; margin: 0; }
+    .content { padding: 40px 30px; }
+    .reason-card { background-color: #fef2f2; border: 1px solid #fca5a5; border-left: 4px solid #dc2626; border-radius: 6px; padding: 20px; margin: 24px 0; }
+    .reason-card h3 { font-size: 16px; color: #dc2626; margin: 0 0 8px 0; }
+    .reason-card p { font-size: 15px; color: #7f1d1d; margin: 0; }
+    .reapply-card { background-color: #ecfdf5; border: 1px solid #6ee7b7; border-left: 4px solid #10b981; border-radius: 6px; padding: 20px; margin: 24px 0; }
+    .reapply-card h3 { font-size: 16px; color: #047857; margin: 0 0 8px 0; }
+    .reapply-card p { font-size: 15px; color: #065f46; margin: 0; }
+    .info-card { background-color: #f5f5fa; border: 1px solid #eaeaea; border-radius: 8px; padding: 20px; margin: 24px 0; }
+    .footer { background-color: #f8f9fa; padding: 30px; text-align: center; border-top: 1px solid #e5e7eb; color: #6b7280; font-size: 14px; }
+    .footer .logo { font-weight: 600; color: #424ec6; font-size: 16px; margin-bottom: 8px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>Organization Application Update</h1>
+      <p>${name}</p>
+    </div>
+    <div class="content">
+      <p>Dear Organization Leader,</p>
+      <p>Thank you for your interest in registering <strong>${name}</strong> with NU Connect. We have carefully reviewed your application.</p>
+      
+      <div class="reason-card">
+        <h3>Application Feedback</h3>
+        <p>${reason || 'Your application requires revisions before it can be approved.'}</p>
+        ${rejector_name ? `<p style="margin-top: 12px; font-size: 13px;"><em>Reviewed by: ${rejector_name}</em></p>` : ''}
+        ${rejected_date ? `<p style="font-size: 13px;"><em>Review date: ${formattedDate}</em></p>` : ''}
+      </div>
+      
+      <div class="reapply-card">
+        <h3>You Can Reapply!</h3>
+        <p>Good news! You may submit a new application after addressing the feedback above. Please ensure all requirements are met and any issues mentioned have been resolved before reapplying.</p>
+      </div>
+      
+      <div class="info-card">
+        <h3>Application Details</h3>
+        <p><strong>Organization Name:</strong> ${name}</p>
+        <p><strong>Application ID:</strong> ${application_id}</p>
+        <p><strong>Review Date:</strong> ${formattedDate}</p>
+      </div>
+      
+      <p><strong>Next Steps:</strong></p>
+      <ul>
+        <li>Review the feedback carefully</li>
+        <li>Address all mentioned concerns</li>
+        <li>Gather any missing documentation</li>
+        <li>Submit a new application when ready</li>
+      </ul>
+      
+      <p>If you have questions about this feedback or need clarification on the requirements, please contact our support team.</p>
+      
+      <p>Best regards,<br><strong>The NU Connect Team</strong></p>
+    </div>
+    <div class="footer">
+      <div class="logo">NU Connect</div>
+      <p>&copy; ${new Date().getFullYear()} National University - Dasmariñas</p>
+      <p>Organization Management System</p>
+    </div>
+  </div>
+</body>
+</html>
+  `;
+}
+
+/**
+ * Generate event approval email template
+ */
+function generateEventApprovalTemplate(eventDetails) {
+  const { title, event_id, start_date, start_time, venue, organization_name, description } = eventDetails;
+  const formattedDate = start_date ? new Date(start_date).toLocaleDateString('en-US', { 
+    weekday: 'long',
+    year: 'numeric', 
+    month: 'long', 
+    day: 'numeric' 
+  }) : 'To be scheduled';
+
+  return `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Event Proposal Approved - ${title}</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; line-height: 1.6; color: #333; background-color: #f5f5f5; margin: 0; padding: 20px; }
+    .container { max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1); }
+    .header { background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: white; padding: 40px 30px; text-align: center; }
+    .header h1 { font-size: 28px; margin: 0 0 8px 0; }
+    .content { padding: 40px 30px; }
+    .success-icon { font-size: 64px; text-align: center; margin: 20px 0; }
+    .event-card { background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%); border: 1px solid #e2e8f0; border-radius: 12px; padding: 24px; margin: 24px 0; }
+    .event-card h3 { font-size: 22px; color: #1a202c; margin: 0 0 16px 0; }
+    .detail-row { display: flex; padding: 12px 0; border-bottom: 1px solid #e2e8f0; }
+    .detail-row:last-child { border-bottom: none; }
+    .detail-icon { font-size: 20px; min-width: 32px; margin-right: 12px; }
+    .detail-content { flex: 1; }
+    .detail-content strong { display: block; font-size: 14px; color: #2d3748; margin-bottom: 4px; }
+    .detail-content p { margin: 0; font-size: 15px; color: #4a5568; }
+    .cta-button { display: inline-block; background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: white; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: 600; margin: 20px 0; }
+    .footer { background-color: #f8f9fa; padding: 30px; text-align: center; border-top: 1px solid #e5e7eb; color: #6b7280; font-size: 14px; }
+    .footer .logo { font-weight: 600; color: #10b981; font-size: 16px; margin-bottom: 8px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>🎉 Event Proposal Approved!</h1>
+      <p>Your Event Is Ready to Go</p>
+    </div>
+    <div class="content">
+      <div class="success-icon">✅</div>
+      <p>Dear Event Organizer,</p>
+      <p>Congratulations! Your event proposal has been <strong>approved</strong> and is now scheduled in the NU Connect system.</p>
+      
+      <div class="event-card">
+        <h3>${title}</h3>
+        <div class="detail-row">
+          <span class="detail-icon">📅</span>
+          <div class="detail-content">
+            <strong>Date</strong>
+            <p>${formattedDate}</p>
+          </div>
+        </div>
+        ${start_time ? `
+        <div class="detail-row">
+          <span class="detail-icon">🕐</span>
+          <div class="detail-content">
+            <strong>Time</strong>
+            <p>${start_time}</p>
+          </div>
+        </div>
+        ` : ''}
+        ${venue ? `
+        <div class="detail-row">
+          <span class="detail-icon">📍</span>
+          <div class="detail-content">
+            <strong>Venue</strong>
+            <p>${venue}</p>
+          </div>
+        </div>
+        ` : ''}
+        ${organization_name ? `
+        <div class="detail-row">
+          <span class="detail-icon">🏢</span>
+          <div class="detail-content">
+            <strong>Organized By</strong>
+            <p>${organization_name}</p>
+          </div>
+        </div>
+        ` : ''}
+        <div class="detail-row">
+          <span class="detail-icon">🆔</span>
+          <div class="detail-content">
+            <strong>Event ID</strong>
+            <p>${event_id}</p>
+          </div>
+        </div>
+      </div>
+      
+      <p><strong>What's Next?</strong></p>
+      <ul>
+        <li>✅ Your event is now visible to all NU Connect users</li>
+        <li>✅ Students can register and attend your event</li>
+        <li>✅ Manage attendees through the event dashboard</li>
+        <li>✅ Track registrations and engagement in real-time</li>
+        <li>✅ Submit post-event requirements after completion</li>
+      </ul>
+      
+      <div style="text-align: center; margin: 30px 0;">
+        <a href="${process.env.REACT_APP_URL || 'https://nuconnect.net'}/events/${event_id}" class="cta-button">
+          View Event Dashboard
+        </a>
+      </div>
+      
+      <p>Make sure to promote your event and engage with potential attendees!</p>
+      
+      <p>Best regards,<br><strong>The NU Connect Events Team</strong></p>
+    </div>
+    <div class="footer">
+      <div class="logo">NU Connect</div>
+      <p>&copy; ${new Date().getFullYear()} National University - Dasmariñas</p>
+      <p>Event Management System</p>
+    </div>
+  </div>
+</body>
+</html>
+  `;
+}
+
+/**
+ * Generate event rejection email template
+ */
+function generateEventRejectionTemplate(rejectionDetails) {
+  const { title, event_id, reason, organization_name, rejected_date, rejector_name } = rejectionDetails;
+  const formattedDate = rejected_date ? new Date(rejected_date).toLocaleDateString('en-US', { 
+    year: 'numeric', 
+    month: 'long', 
+    day: 'numeric' 
+  }) : 'Recently';
+
+  return `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Event Proposal Update - ${title}</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; line-height: 1.6; color: #333; background-color: #f5f5f5; margin: 0; padding: 20px; }
+    .container { max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1); }
+    .header { background: linear-gradient(135deg, #424ec6 0%, #2c389e 100%); color: white; padding: 40px 30px; text-align: center; }
+    .header h1 { font-size: 24px; margin: 0; }
+    .content { padding: 40px 30px; }
+    .reason-card { background-color: #fef2f2; border: 1px solid #fca5a5; border-left: 4px solid #dc2626; border-radius: 6px; padding: 20px; margin: 24px 0; }
+    .reason-card h3 { font-size: 16px; color: #dc2626; margin: 0 0 8px 0; }
+    .reason-card p { font-size: 15px; color: #7f1d1d; margin: 0; }
+    .reapply-card { background-color: #ecfdf5; border: 1px solid #6ee7b7; border-left: 4px solid #10b981; border-radius: 6px; padding: 20px; margin: 24px 0; }
+    .reapply-card h3 { font-size: 16px; color: #047857; margin: 0 0 8px 0; }
+    .reapply-card p { font-size: 15px; color: #065f46; margin: 0; }
+    .info-card { background-color: #f5f5fa; border: 1px solid #eaeaea; border-radius: 8px; padding: 20px; margin: 24px 0; }
+    .footer { background-color: #f8f9fa; padding: 30px; text-align: center; border-top: 1px solid #e5e7eb; color: #6b7280; font-size: 14px; }
+    .footer .logo { font-weight: 600; color: #424ec6; font-size: 16px; margin-bottom: 8px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>Event Proposal Update</h1>
+      <p>${title}</p>
+    </div>
+    <div class="content">
+      <p>Dear Event Organizer,</p>
+      <p>Thank you for submitting your event proposal for <strong>${title}</strong>. We have carefully reviewed your submission.</p>
+      
+      <div class="reason-card">
+        <h3>Proposal Feedback</h3>
+        <p>${reason || 'Your event proposal requires revisions before it can be approved.'}</p>
+        ${rejector_name ? `<p style="margin-top: 12px; font-size: 13px;"><em>Reviewed by: ${rejector_name}</em></p>` : ''}
+        ${rejected_date ? `<p style="font-size: 13px;"><em>Review date: ${formattedDate}</em></p>` : ''}
+      </div>
+      
+      <div class="reapply-card">
+        <h3>Submit a New Proposal!</h3>
+        <p>Don't worry! You can submit a new event proposal after addressing the feedback above. Please ensure all requirements are met and any concerns mentioned have been resolved.</p>
+      </div>
+      
+      <div class="info-card">
+        <h3>Event Details</h3>
+        <p><strong>Event Title:</strong> ${title}</p>
+        <p><strong>Event ID:</strong> ${event_id}</p>
+        ${organization_name ? `<p><strong>Organization:</strong> ${organization_name}</p>` : ''}
+        <p><strong>Review Date:</strong> ${formattedDate}</p>
+      </div>
+      
+      <p><strong>Next Steps:</strong></p>
+      <ul>
+        <li>Review the feedback carefully</li>
+        <li>Address all mentioned concerns</li>
+        <li>Ensure all event requirements are complete</li>
+        <li>Check schedule conflicts and venue availability</li>
+        <li>Submit a new event proposal when ready</li>
+      </ul>
+      
+      <p>If you have questions about this feedback or need assistance with your event proposal, please contact our support team.</p>
+      
+      <p>Best regards,<br><strong>The NU Connect Events Team</strong></p>
+    </div>
+    <div class="footer">
+      <div class="logo">NU Connect</div>
+      <p>&copy; ${new Date().getFullYear()} National University - Dasmariñas</p>
+      <p>Event Management System</p>
+    </div>
+  </div>
+</body>
+</html>
+  `;
+}
+
 module.exports = {
   sendInvitationEmail,
   sendRejectionEmail,
-  testEmailConfig,
-  sendTestEmail,
   diagnoseEmailDelivery,
   resendInvitationEmail,
   sendStudentInvitationEmail,
   sendEventReminderEmail,
-  printInboxDeliveryTips
+  printInboxDeliveryTips,
+  // New functions for organization and event approvals/rejections
+  sendOrganizationApprovalEmail,
+  sendOrganizationRejectionEmail,
+  sendEventApprovalEmail,
+  sendEventRejectionEmail
 };

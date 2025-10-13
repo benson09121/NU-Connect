@@ -121,7 +121,7 @@ async function submitOrganizationApplication(req, res) {
                     'image/png', 
                     'application/pdf'
                 ];
-                const maxSize = 5 * 1024 * 1024; // 5MB
+                const maxSize = 10 * 1024 * 1024; // 10MB
                 
                 // Also check file extension as a backup
                 const fileExt = uploadedFile.name.toLowerCase().split('.').pop();
@@ -140,7 +140,7 @@ async function submitOrganizationApplication(req, res) {
                 if (uploadedFile.size > maxSize) {
                     console.log(`[DEBUG] Payment proof file rejected - size too large: ${uploadedFile.size} bytes`);
                     return res.status(400).json({ 
-                        message: 'Payment proof file size must be less than 5MB' 
+                        message: 'Payment proof file size must be less than 10MB' 
                     });
                 }
                 

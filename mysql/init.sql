@@ -837,6 +837,7 @@ CREATE TABLE tbl_transaction (
     transaction_date DATETIME NOT NULL,
     receipt_no VARCHAR(100) NULL,
     proof_image VARCHAR(500) DEFAULT NULL,
+    remarks TEXT NULL COMMENT 'Additional notes about the transaction (e.g., reason for failure, special instructions)',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     archived_at TIMESTAMP NULL,
@@ -975,7 +976,7 @@ ALTER TABLE tbl_transaction
 CREATE TABLE tbl_transaction_audit_trail (
     audit_id BIGINT AUTO_INCREMENT PRIMARY KEY,
     transaction_id INT NOT NULL,
-    action_type ENUM('CREATE', 'UPDATE', 'ARCHIVE', 'COMPLETE', 'CANCEL', 'DELETE') NOT NULL,
+    action_type ENUM('CREATE', 'UPDATE', 'ARCHIVE', 'UNARCHIVE', 'COMPLETE', 'CANCEL', 'DELETE') NOT NULL,
     changed_by VARCHAR(200) NULL,
     changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     old_status ENUM('Pending', 'Completed', 'Failed', 'Cancelled') NULL,
@@ -1227,18 +1228,18 @@ BEGIN
     -- Prevent ANY modifications to completed transactions
     IF OLD.status = 'Completed' THEN
         SIGNAL SQLSTATE '45000'
-            SET MESSAGE_TEXT = 'Cannot modify a transaction that has reached Completed status. Transaction is locked for audit compliance.';
+            SET MESSAGE_TEXT = 'This transaction has been completed and can no longer be modified. Completed transactions are permanently locked to maintain financial record integrity.';
     END IF;
     
     -- Validate status transitions (no reverting from terminal states)
     IF OLD.status = 'Failed' AND NEW.status != 'Failed' THEN
         SIGNAL SQLSTATE '45000'
-            SET MESSAGE_TEXT = 'Cannot change status from Failed to another status';
+            SET MESSAGE_TEXT = 'This transaction has failed and its status cannot be changed. Failed transactions are locked to preserve the audit trail.';
     END IF;
     
     IF OLD.status = 'Cancelled' AND NEW.status != 'Cancelled' THEN
         SIGNAL SQLSTATE '45000'
-            SET MESSAGE_TEXT = 'Cannot change status from Cancelled to another status';
+            SET MESSAGE_TEXT = 'This transaction has been cancelled and its status cannot be changed. Cancelled transactions are locked for record-keeping purposes.';
     END IF;
 END$$
 
@@ -1284,67 +1285,93 @@ BEGIN
     DECLARE v_action_type VARCHAR(20);
     DECLARE v_reason VARCHAR(500);
     DECLARE v_changes JSON;
+    DECLARE v_has_meaningful_change BOOLEAN DEFAULT FALSE;
     
-    -- Determine action type
-    SET v_action_type = CASE
-        WHEN NEW.status = 'Completed' AND OLD.status != 'Completed' THEN 'COMPLETE'
-        WHEN NEW.status = 'Cancelled' AND OLD.status != 'Cancelled' THEN 'CANCEL'
-        WHEN NEW.archived_at IS NOT NULL AND OLD.archived_at IS NULL THEN 'ARCHIVE'
-        ELSE 'UPDATE'
-    END;
-    
-    -- Build detailed changes JSON
-    SET v_changes = JSON_OBJECT(
-        'status_changed', OLD.status != NEW.status,
-        'amount_changed', OLD.amount != NEW.amount,
-        'payment_type_changed', OLD.payment_type_id != NEW.payment_type_id,
-        'category_changed', OLD.category_id != NEW.category_id,
-        'proof_image_changed', OLD.proof_image != NEW.proof_image,
-        'receipt_no_changed', OLD.receipt_no != NEW.receipt_no,
-        'payer_name_changed', OLD.payer_name != NEW.payer_name,
-        'payee_name_changed', OLD.payee_name != NEW.payee_name,
-        'description_changed', OLD.payment_description != NEW.payment_description
+    -- Check if there are ANY meaningful changes (excluding updated_at timestamp)
+    -- This prevents audit entries for simple SELECT queries or non-change updates
+    SET v_has_meaningful_change = (
+        OLD.status != NEW.status OR
+        OLD.amount != NEW.amount OR
+        OLD.payment_type_id != NEW.payment_type_id OR
+        OLD.transaction_type_id != NEW.transaction_type_id OR
+        OLD.category_id != NEW.category_id OR
+        COALESCE(OLD.proof_image, '') != COALESCE(NEW.proof_image, '') OR
+        OLD.receipt_no != NEW.receipt_no OR
+        COALESCE(OLD.payer_name, '') != COALESCE(NEW.payer_name, '') OR
+        COALESCE(OLD.payee_name, '') != COALESCE(NEW.payee_name, '') OR
+        COALESCE(OLD.payment_description, '') != COALESCE(NEW.payment_description, '') OR
+        COALESCE(OLD.transaction_date, '1970-01-01') != COALESCE(NEW.transaction_date, '1970-01-01') OR
+        COALESCE(OLD.org_version_id, 0) != COALESCE(NEW.org_version_id, 0) OR
+        COALESCE(OLD.remarks, '') != COALESCE(NEW.remarks, '') OR
+        (NEW.archived_at IS NOT NULL AND OLD.archived_at IS NULL) OR
+        (NEW.archived_at IS NULL AND OLD.archived_at IS NOT NULL)
     );
     
-    -- Get archive reason if applicable
-    IF NEW.archived_at IS NOT NULL AND OLD.archived_at IS NULL THEN
-        SET v_reason = NEW.archived_reason;
+    -- Only log if there are actual meaningful changes
+    IF v_has_meaningful_change THEN
+        -- Determine action type
+        SET v_action_type = CASE
+            WHEN NEW.status = 'Completed' AND OLD.status != 'Completed' THEN 'COMPLETE'
+            WHEN NEW.status = 'Cancelled' AND OLD.status != 'Cancelled' THEN 'CANCEL'
+            WHEN NEW.archived_at IS NOT NULL AND OLD.archived_at IS NULL THEN 'ARCHIVE'
+            WHEN NEW.archived_at IS NULL AND OLD.archived_at IS NOT NULL THEN 'UNARCHIVE'
+            ELSE 'UPDATE'
+        END;
+        
+        -- Build detailed changes JSON
+        SET v_changes = JSON_OBJECT(
+            'status_changed', OLD.status != NEW.status,
+            'amount_changed', OLD.amount != NEW.amount,
+            'payment_type_changed', OLD.payment_type_id != NEW.payment_type_id,
+            'category_changed', OLD.category_id != NEW.category_id,
+            'proof_image_changed', COALESCE(OLD.proof_image, '') != COALESCE(NEW.proof_image, ''),
+            'receipt_no_changed', OLD.receipt_no != NEW.receipt_no,
+            'payer_name_changed', COALESCE(OLD.payer_name, '') != COALESCE(NEW.payer_name, ''),
+            'payee_name_changed', COALESCE(OLD.payee_name, '') != COALESCE(NEW.payee_name, ''),
+            'description_changed', COALESCE(OLD.payment_description, '') != COALESCE(NEW.payment_description, ''),
+            'remarks_changed', COALESCE(OLD.remarks, '') != COALESCE(NEW.remarks, '')
+        );
+        
+        -- Get archive reason if applicable
+        IF NEW.archived_at IS NOT NULL AND OLD.archived_at IS NULL THEN
+            SET v_reason = NEW.archived_reason;
+        END IF;
+        
+        -- Log to audit trail
+        INSERT INTO tbl_transaction_audit_trail (
+            transaction_id,
+            action_type,
+            changed_by,
+            old_status,
+            new_status,
+            old_amount,
+            new_amount,
+            old_payment_type_id,
+            new_payment_type_id,
+            old_category_id,
+            new_category_id,
+            old_proof_image,
+            new_proof_image,
+            changes_json,
+            reason
+        ) VALUES (
+            NEW.transaction_id,
+            v_action_type,
+            COALESCE(NEW.archived_by, NEW.user_id),
+            OLD.status,
+            NEW.status,
+            OLD.amount,
+            NEW.amount,
+            OLD.payment_type_id,
+            NEW.payment_type_id,
+            OLD.category_id,
+            NEW.category_id,
+            OLD.proof_image,
+            NEW.proof_image,
+            v_changes,
+            v_reason
+        );
     END IF;
-    
-    -- Log to audit trail
-    INSERT INTO tbl_transaction_audit_trail (
-        transaction_id,
-        action_type,
-        changed_by,
-        old_status,
-        new_status,
-        old_amount,
-        new_amount,
-        old_payment_type_id,
-        new_payment_type_id,
-        old_category_id,
-        new_category_id,
-        old_proof_image,
-        new_proof_image,
-        changes_json,
-        reason
-    ) VALUES (
-        NEW.transaction_id,
-        v_action_type,
-        COALESCE(NEW.archived_by, NEW.user_id),
-        OLD.status,
-        NEW.status,
-        OLD.amount,
-        NEW.amount,
-        OLD.payment_type_id,
-        NEW.payment_type_id,
-        OLD.category_id,
-        NEW.category_id,
-        OLD.proof_image,
-        NEW.proof_image,
-        v_changes,
-        v_reason
-    );
 END$$
 
 /* ---- Log transaction deletion (soft or hard delete) ---- */
@@ -14433,7 +14460,8 @@ CREATE DEFINER='admin'@'%' PROCEDURE CreateTransaction(
     IN p_event_remarks VARCHAR(255),
     IN p_organization_id INT,
     IN p_cycle_number INT,
-    IN p_org_version_id INT
+    IN p_org_version_id INT,
+    IN p_remarks TEXT
 )
 BEGIN
     DECLARE v_user_id VARCHAR(200);
@@ -14453,7 +14481,7 @@ BEGIN
     -- Get user ID if email provided
     IF p_user_email IS NOT NULL AND p_user_email <> '' THEN
         SELECT user_id INTO v_user_id FROM tbl_user WHERE email = p_user_email LIMIT 1;
-        IF v_user_id IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='User not found'; END IF;
+        IF v_user_id IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='User account not found'; END IF;
     END IF;
 
     -- Get transaction type ID
@@ -14461,7 +14489,7 @@ BEGIN
     FROM tbl_transaction_type 
     WHERE code = p_transaction_type_code LIMIT 1;
     IF v_transaction_type_id IS NULL THEN 
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Transaction type not found'; 
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Invalid transaction type'; 
     END IF;
 
     -- Get payment type ID
@@ -14469,7 +14497,7 @@ BEGIN
     FROM tbl_payment_type 
     WHERE code = p_payment_type_code LIMIT 1;
     IF v_payment_type_id IS NULL THEN 
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Payment type not found'; 
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Invalid payment method'; 
     END IF;
 
     -- Get category ID if provided
@@ -14478,7 +14506,7 @@ BEGIN
         FROM tbl_financial_category 
         WHERE code = p_category_code AND active = TRUE LIMIT 1;
         IF v_category_id IS NULL THEN 
-            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Financial category not found or inactive'; 
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Invalid or inactive category'; 
         END IF;
 
         -- Ensure type-category pair is allowed
@@ -14488,7 +14516,7 @@ BEGIN
                 WHERE transaction_type_id = v_transaction_type_id
                   AND category_id = v_category_id
             ) THEN
-                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Category not allowed for this transaction type';
+                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Category incompatible with transaction type';
             END IF;
         END IF;
     END IF;
@@ -14515,11 +14543,11 @@ BEGIN
     INSERT INTO tbl_transaction (
         user_id, payer_name, payee_name, payment_description, amount,
         transaction_type_id, payment_type_id, category_id, org_version_id, status, 
-        transaction_date, receipt_no, proof_image
+        transaction_date, receipt_no, proof_image, remarks
     ) VALUES (
         v_user_id, p_payer_name, p_payee_name, p_payment_description, p_amount,
         v_transaction_type_id, v_payment_type_id, v_category_id, p_org_version_id, p_status, 
-        p_transaction_date, v_receipt_no, p_proof_image
+        p_transaction_date, v_receipt_no, p_proof_image, p_remarks
     );
 
     SET v_transaction_id = LAST_INSERT_ID();
@@ -14580,7 +14608,8 @@ CREATE DEFINER='admin'@'%' PROCEDURE UpdateTransaction(
     IN p_organization_id INT,
     IN p_cycle_number INT,
     IN p_org_version_id INT,
-    IN p_remove_proof_image TINYINT
+    IN p_remove_proof_image TINYINT,
+    IN p_remarks TEXT
 )
 BEGIN
     DECLARE v_actor_id VARCHAR(200);
@@ -14598,7 +14627,7 @@ BEGIN
     SELECT user_id, CONCAT(f_name, ' ', l_name) INTO v_actor_id, v_actor_name
       FROM tbl_user WHERE email = p_user_email LIMIT 1;
     IF v_actor_id IS NULL THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Actor user not found';
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='User account not found';
     END IF;
 
     -- Get existing transaction data
@@ -14614,28 +14643,28 @@ BEGIN
     -- ===== AUDIT TRAIL VALIDATION =====
     IF v_current_status = 'Completed' THEN
         SIGNAL SQLSTATE '45000' 
-            SET MESSAGE_TEXT = 'Cannot modify a completed transaction. Transaction is locked for audit compliance.';
+            SET MESSAGE_TEXT = 'Cannot edit completed transaction';
     END IF;
     
     IF v_current_status = 'Failed' THEN
         SIGNAL SQLSTATE '45000' 
-            SET MESSAGE_TEXT = 'Cannot modify a failed transaction. Transaction is locked for audit compliance.';
+            SET MESSAGE_TEXT = 'Cannot edit failed transaction';
     END IF;
     
     IF v_current_status = 'Cancelled' THEN
         SIGNAL SQLSTATE '45000' 
-            SET MESSAGE_TEXT = 'Cannot modify a cancelled transaction. Transaction is locked for audit compliance.';
+            SET MESSAGE_TEXT = 'Cannot edit cancelled transaction';
     END IF;
 
     -- Validate status transitions
     IF p_status IS NOT NULL AND p_status != v_current_status THEN
         IF v_current_status = 'Pending' THEN
             IF p_status NOT IN ('Completed', 'Failed', 'Cancelled', 'Pending') THEN
-                SET v_error_msg = CONCAT('Invalid status transition from Pending to ', p_status);
+                SET v_error_msg = CONCAT('Invalid status change: "', p_status, '" is not a valid status. Pending transactions can only be marked as Completed, Failed, or Cancelled.');
                 SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = v_error_msg;
             END IF;
         ELSE
-            SET v_error_msg = CONCAT('Cannot change status from ', v_current_status, ' to ', p_status);
+            SET v_error_msg = CONCAT('This transaction''s status cannot be changed from ', v_current_status, ' to ', p_status, '. Once a transaction reaches a final status, it cannot be modified.');
             SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = v_error_msg;
         END IF;
     END IF;
@@ -14647,7 +14676,7 @@ BEGIN
         FROM tbl_transaction_type 
         WHERE code = p_transaction_type_code LIMIT 1;
         IF v_transaction_type_id IS NULL THEN 
-            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Transaction type not found'; 
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='The selected transaction type is invalid or no longer available. Please choose a valid transaction type from the list.'; 
         END IF;
     END IF;
 
@@ -14657,7 +14686,7 @@ BEGIN
         FROM tbl_payment_type 
         WHERE code = p_payment_type_code LIMIT 1;
         IF v_payment_type_id IS NULL THEN 
-            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Payment type not found'; 
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='The selected payment method is invalid or no longer available. Please choose a valid payment method from the list.'; 
         END IF;
     END IF;
 
@@ -14668,7 +14697,7 @@ BEGIN
          WHERE code = p_category_code AND active = TRUE
          LIMIT 1;
         IF v_category_id IS NULL THEN
-            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Financial category not found or inactive';
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='The selected financial category is not available or has been deactivated. Please choose an active category from the dropdown.';
         END IF;
 
         -- Validate category with transaction type
@@ -14679,35 +14708,45 @@ BEGIN
                  WHERE transaction_type_id = v_transaction_type_id
                    AND category_id = v_category_id
             ) THEN
-                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Category not allowed for this transaction type';
+                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='This category cannot be used with the selected transaction type. Please choose a compatible category that matches your transaction type.';
             END IF;
         END IF;
     END IF;
 
-    -- Enforce unique receipt number
-    IF p_receipt_no IS NOT NULL AND p_receipt_no <> '' AND p_receipt_no != v_old_receipt_no THEN
-        IF EXISTS (
-            SELECT 1 FROM tbl_transaction
-             WHERE receipt_no = p_receipt_no
-               AND transaction_id <> p_transaction_id
-        ) THEN
-            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Receipt number already exists';
-        END IF;
+    -- ===== FIELD-LEVEL SECURITY: AMOUNT AND RECEIPT_NO ARE NON-EDITABLE =====
+    -- These fields define the core identity and value of a transaction
+    -- Once created, they cannot be changed to maintain financial integrity
+    -- If a mistake is made, the transaction should be marked as 'Failed' and a new one created
+    
+    -- Block any attempt to change amount
+    IF p_amount IS NOT NULL AND p_amount != v_old_amount THEN
+        SIGNAL SQLSTATE '45000' 
+            SET MESSAGE_TEXT = 'The transaction amount cannot be changed after creation. If there was an error, please mark this transaction as Failed and create a new transaction with the correct amount.';
     END IF;
+    
+    -- Block any attempt to change receipt number
+    IF p_receipt_no IS NOT NULL AND p_receipt_no <> '' AND p_receipt_no != v_old_receipt_no THEN
+        SIGNAL SQLSTATE '45000' 
+            SET MESSAGE_TEXT = 'The receipt number cannot be changed after creation. If there was an error, please mark this transaction as Failed and create a new transaction with the correct receipt number.';
+    END IF;
+    -- ===== END FIELD-LEVEL SECURITY =====
 
     -- Update main transaction row
+    -- NOTICE: amount and receipt_no are INTENTIONALLY EXCLUDED from this update
+    -- They are immutable fields that preserve the transaction's core identity
     UPDATE tbl_transaction
        SET payer_name          = COALESCE(NULLIF(p_payer_name,''), payer_name),
            payee_name          = COALESCE(NULLIF(p_payee_name,''), payee_name),
            transaction_type_id = COALESCE(v_transaction_type_id, transaction_type_id),
            payment_type_id     = COALESCE(v_payment_type_id, payment_type_id),
            payment_description = COALESCE(p_payment_description, payment_description),
-           amount              = COALESCE(p_amount, amount),
+           -- amount is EXCLUDED - cannot be changed after creation
            status              = COALESCE(p_status, status),
            transaction_date    = COALESCE(p_transaction_date, transaction_date),
-           receipt_no          = COALESCE(NULLIF(p_receipt_no,''), receipt_no),
+           -- receipt_no is EXCLUDED - cannot be changed after creation
            category_id         = COALESCE(v_category_id, category_id),
            org_version_id      = COALESCE(p_org_version_id, org_version_id),
+           remarks             = COALESCE(p_remarks, remarks),
            proof_image         =
                CASE
                  WHEN p_remove_proof_image = 1 THEN NULL
@@ -14762,11 +14801,11 @@ BEGIN
         CALL CreateNotification(
             'Transaction Completed',
             CONCAT('Your transaction of ₱', FORMAT(COALESCE(p_amount, v_old_amount), 2), ' has been completed successfully. Receipt: ', COALESCE(p_receipt_no, v_old_receipt_no)),
+            CONCAT('/transactions/', p_transaction_id),
             'transaction',
             p_transaction_id,
             v_actor_id,
-            (SELECT user_id FROM tbl_transaction WHERE transaction_id = p_transaction_id),
-            CONCAT('/transactions/', p_transaction_id),
+            JSON_ARRAY((SELECT user_id FROM tbl_transaction WHERE transaction_id = p_transaction_id)),
             'VIEW_DETAIL'
         );
     END IF;
@@ -14776,11 +14815,11 @@ BEGIN
         CALL CreateNotification(
             'Transaction Failed',
             CONCAT('Your transaction of ₱', FORMAT(COALESCE(p_amount, v_old_amount), 2), ' has failed. Please contact support for assistance.'),
+            CONCAT('/transactions/', p_transaction_id),
             'transaction',
             p_transaction_id,
             v_actor_id,
-            (SELECT user_id FROM tbl_transaction WHERE transaction_id = p_transaction_id),
-            CONCAT('/transactions/', p_transaction_id),
+            JSON_ARRAY((SELECT user_id FROM tbl_transaction WHERE transaction_id = p_transaction_id)),
             'VIEW_DETAIL'
         );
     END IF;
@@ -14801,7 +14840,7 @@ BEGIN
     DECLARE v_current_status ENUM('Pending','Completed','Failed','Cancelled');
     
     SELECT user_id INTO v_actor_id FROM tbl_user WHERE email = p_user_email LIMIT 1;
-    IF v_actor_id IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Actor user not found'; END IF;
+    IF v_actor_id IS NULL THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Your user account could not be found. Please log out and log in again to refresh your session.'; END IF;
 
     -- Get current transaction status
     SELECT status INTO v_current_status 
@@ -14810,13 +14849,13 @@ BEGIN
      LIMIT 1;
     
     IF v_current_status IS NULL THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Transaction not found';
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='The transaction you are trying to archive could not be found. It may have already been deleted.';
     END IF;
 
     -- ===== AUDIT TRAIL VALIDATION: Cannot archive completed transactions =====
     IF v_current_status = 'Completed' THEN
         SIGNAL SQLSTATE '45000' 
-            SET MESSAGE_TEXT = 'Cannot archive a completed transaction. Completed transactions are permanent records for audit compliance.';
+            SET MESSAGE_TEXT = 'Completed transactions cannot be archived. Only pending, failed, or cancelled transactions can be moved to the archive. Completed transactions must remain accessible for financial reporting and audit purposes.';
     END IF;
     -- ===== END AUDIT TRAIL VALIDATION =====
 
@@ -14827,7 +14866,7 @@ BEGIN
      WHERE transaction_id = p_transaction_id
        AND archived_at IS NULL;
 
-    IF ROW_COUNT() = 0 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Transaction already archived'; END IF;
+    IF ROW_COUNT() = 0 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='This transaction has already been archived and cannot be archived again.'; END IF;
 
     -- Log the action
     CALL LogAction(

@@ -380,39 +380,6 @@ async function resendInvitationEmail(req, res) {
   }
 }
 
-async function sendTestEmail(req, res) {
-  const { email } = req.body;
-  try {
-    if (!email) {
-      return res
-        .status(400)
-        .json({ success: false, error: 'Email is required.' });
-    }
-
-    const result = await emailService.sendTestEmail(email);
-
-    if (result.success) {
-      res.status(200).json({
-        success: true,
-        message: 'Test email sent successfully.',
-        data: { email, messageId: result.messageId },
-      });
-    } else {
-      res.status(500).json({
-        success: false,
-        error: 'Failed to send test email: ' + result.error,
-      });
-    }
-  } catch (error) {
-    console.error('Failed to send test email:', error);
-    res.status(500).json({
-      success: false,
-      error:
-        error.message || 'An error occurred while sending the test email.',
-    });
-  }
-}
-
 async function diagnoseEmailDelivery(req, res) {
   const { email } = req.body;
   try {
@@ -632,7 +599,6 @@ module.exports = {
   approveUserApplication,
   rejectUserApplication,
   resendInvitationEmail,
-  sendTestEmail,
   diagnoseEmailDelivery,
   getUserActivationStatus,
   getPendingUsers,
