@@ -81,6 +81,12 @@ RUN mkdir -p /app/organizations && \
 RUN mkdir -p /app/applications && \
     chown -R node:node /app/applications
 
+RUN mkdir -p /app/esignatures && \
+    chown -R node:node /app/esignatures
+
+RUN mkdir -p /app/templates && \
+    chown -R node:node /app/templates
+
 WORKDIR /app
 COPY package*.json ./
 
@@ -95,6 +101,47 @@ RUN npx playwright install-deps
 
 # Copy application files
 COPY . .
+
+# 📋 DOCUMENT GENERATION SETUP
+# Copy templates to backup location (won't be overridden by volume mount)
+RUN echo "📋 [BUILD] Setting up document generation templates..." && \
+    mkdir -p /app/templates-backup && \
+    if [ -d /app/templates ] && [ -f /app/templates/*.docx ]; then \
+        echo "✅ [BUILD] Found template files, copying to backup..."; \
+        cp -r /app/templates/* /app/templates-backup/ 2>/dev/null || true; \
+        chown -R node:node /app/templates-backup; \
+        chmod 755 /app/templates-backup; \
+        chmod 644 /app/templates-backup/*.docx 2>/dev/null || true; \
+        ls -lh /app/templates-backup/; \
+    else \
+        echo "⚠️  [BUILD] No template files found in /app/templates/"; \
+    fi
+
+# Copy and setup init script
+COPY scripts/init-templates.sh /app/scripts/init-templates.sh
+RUN chmod +x /app/scripts/init-templates.sh && \
+    chown node:node /app/scripts/init-templates.sh && \
+    echo "✅ [BUILD] Template initialization script ready"
+
+# Set permissions for templates directory and verify template file exists
+RUN if [ -d /app/templates ] && [ -f /app/templates/*.docx ]; then \
+        echo "✅ Found templates folder with DOCX file, setting permissions..."; \
+        chown -R node:node /app/templates; \
+        chmod 755 /app/templates; \
+        chmod 644 /app/templates/*.docx 2>/dev/null || true; \
+        ls -lh /app/templates/; \
+    else \
+        echo "⚠️  No templates folder or DOCX file found, creating empty directory..."; \
+        mkdir -p /app/templates; \
+        chown -R node:node /app/templates; \
+        chmod 755 /app/templates; \
+    fi
+
+# Set permissions for applications directory (for generated documents)
+RUN mkdir -p /app/applications && \
+    chown -R node:node /app/applications && \
+    chmod 755 /app/applications && \
+    echo "✅ Applications directory created for document generation"
 
 # Ensure Facebook Scraper directories exist and copy auth files if present
 RUN mkdir -p /app/.auth /app/storage/request_queues /app/storage/datasets /app/storage/key_value_stores
@@ -119,5 +166,7 @@ RUN if [ -d /app/.auth ] && [ "$(ls -A /app/.auth)" ]; then \
 ENV CRAWLEE_STORAGE_DIR=/app/storage
 
 EXPOSE 3000
-CMD ["npm", "run", "dev"]
+
+# Run init script then start server
+CMD ["/bin/sh", "-c", "/app/scripts/init-templates.sh && npm run dev"]
 

@@ -455,7 +455,7 @@ async function updateApplicationPeriod(req, res) {
   }
 }
 
-async function initiateApprovalProcess(req, res) {
+async function createApprovalChain(req, res) {
   try {
     const { application_id } = req.body;
 
@@ -465,11 +465,11 @@ async function initiateApprovalProcess(req, res) {
       });
     }
 
-    const result = await requirementModel.initiateApprovalProcess(application_id, req.user.email);
+    const result = await requirementModel.createApprovalChain(application_id, req.user.email);
 
     res.status(200).json({
       success: true,
-      message: 'Approval process initiated successfully.',
+      message: 'Approval chain created successfully.',
       data: result
     });
   } catch (error) {
@@ -807,5 +807,5 @@ module.exports = {
   getEventRequirementTemplate,
   addEventRequirement,
   batchUpdateEventRequirements,
-  initiateApprovalProcess
+  createApprovalChain
 };

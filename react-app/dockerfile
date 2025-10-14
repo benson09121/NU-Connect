@@ -45,5 +45,15 @@ RUN mkdir -p /usr/share/nginx/html/organizations && \
     chown -R nginx:nginx /usr/share/nginx/html/organizations && \
     chmod -R 755 /usr/share/nginx/html/organizations
 
+# E-Signatures directory setup
+RUN mkdir -p /usr/share/nginx/html/esignatures && \
+    chown -R nginx:nginx /usr/share/nginx/html/esignatures && \
+    chmod -R 755 /usr/share/nginx/html/esignatures
+
+# Approval signatures directory setup
+RUN mkdir -p /usr/share/nginx/html/approval-signatures && \
+    chown -R nginx:nginx /usr/share/nginx/html/approval-signatures && \
+    chmod -R 755 /usr/share/nginx/html/approval-signatures
+
 # Ensure root directory permissions
 RUN chmod -R 755 /usr/share/nginx/html

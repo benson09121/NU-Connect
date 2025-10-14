@@ -2,6 +2,56 @@ const express = require('express');
 const router = express.Router();
 const organizationsController = require('../../web/controllers/organizationsController');
 const middleware = require('../../middlewares/middleWare');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+
+// =====================================================================
+// MULTER CONFIGURATION FOR APPROVAL CHAIN E-SIGNATURE UPLOADS
+// =====================================================================
+
+// Ensure upload directory exists
+const uploadDir = path.join(__dirname, '../../../uploads/approval-signatures');
+if (!fs.existsSync(uploadDir)) {
+    fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+// Configure multer storage
+const storage = multer.diskStorage({
+    destination: function (req, file, cb) {
+        cb(null, uploadDir);
+    },
+    filename: function (req, file, cb) {
+        // Format: {chain_id}_{user_id}_{timestamp}.ext
+        const userId = req.user.user_id;
+        const chain_id = req.params.chain_id;
+        const timestamp = Date.now();
+        const ext = path.extname(file.originalname);
+        cb(null, `${chain_id}_${userId}_${timestamp}${ext}`);
+    }
+});
+
+// File filter: only images
+const fileFilter = (req, file, cb) => {
+    const allowedTypes = /jpeg|jpg|png|gif/;
+    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = allowedTypes.test(file.mimetype);
+    
+    if (mimetype && extname) {
+        return cb(null, true);
+    } else {
+        cb(new Error('Only image files (PNG, JPG, JPEG, GIF) are allowed for e-signatures'));
+    }
+};
+
+// Multer upload instance
+const approvalSignatureUpload = multer({
+    storage: storage,
+    limits: { 
+        fileSize: 2 * 1024 * 1024 // 2MB max
+    },
+    fileFilter: fileFilter
+});
 
 router.get(
     '/organizations',
@@ -49,7 +99,7 @@ router.post('/update-term-option', middleware.validateAzureJWT, organizationsCon
 
 router.post('/archive-organization', middleware.validateAzureJWT, middleware.hasPermission("ARCHIVE_ORGANIZATION"), organizationsController.archiveOrganization);
 router.post('/unarchive-organization', middleware.validateAzureJWT, middleware.hasPermission("ARCHIVE_ORGANIZATION"), organizationsController.unarchiveOrganization);
-router.get('/getApplication_Approval_Timeline', middleware.validateAzureJWT, organizationsController.GetApprovalTimeline);
+router.get('/getApplication_Approval_Timeline', middleware.validateAzureJWT, organizationsController.getApprovalTimeline);
 
 router.post(
     '/add-executive-member',
@@ -216,7 +266,41 @@ router.post(
     '/initiate-approval',
     middleware.validateAzureJWT,
     middleware.hasPermission("MANAGE_APPLICATIONS"),
-    organizationsController.initiateApprovalProcess
+    organizationsController.createApprovalChain
+);
+
+// E-signature approval endpoints
+router.post(
+    '/approval-signature',
+    middleware.validateAzureJWT,
+    organizationsController.uploadApprovalSignature
+);
+
+// Check if user has e-signature for approval chain
+router.get(
+    '/approval/:chain_id/check-signature',
+    middleware.validateAzureJWT,
+    organizationsController.checkUserSignature
+);
+
+// Upload user e-signature for approval chain (with file upload)
+router.post(
+    '/approval/:chain_id/upload-signature',
+    middleware.validateAzureJWT,
+    approvalSignatureUpload.single('signature'),
+    organizationsController.uploadUserSignatureFile
+);
+
+router.put(
+    '/approval/:chain_id/received',
+    middleware.validateAzureJWT,
+    organizationsController.markApprovalAsReceived
+);
+
+router.put(
+    '/approval/:chain_id/signed',
+    middleware.validateAzureJWT,
+    organizationsController.markApprovalAsSigned
 );
 
 router.get(
@@ -312,5 +396,10 @@ router.get(
     middleware.validateAzureJWT,
     organizationsController.getOrganizationHubData
 );
+
+// 📄 Document Generation Routes
+router.post('/generate-application-form/:applicationId', middleware.validateAzureJWT, organizationsController.generateApplicationFormDocument);
+router.get('/download-application-form/:applicationId', middleware.validateAzureJWT, organizationsController.downloadApplicationFormDocument);
+router.get('/application-form-status/:applicationId', middleware.validateAzureJWT, organizationsController.getApplicationFormStatus);
 
 module.exports = router;

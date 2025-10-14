@@ -61,7 +61,6 @@ async function getOrganizationHubData(req, res) {
     
     // If sessionId is provided, set up subscriptions for all organization channels
     if (sessionId) {
-      console.log(`🟡 [BACKEND-SSE-DEBUG] Setting up organization subscriptions for session: ${sessionId}`);
       subscribeToChannel(sessionId, `orghub_${org_id}_${org_version_id}`);
       subscribeToChannel(sessionId, `organization_officers_${org_id}_${org_version_id}`);
       subscribeToChannel(sessionId, `organization_members_${org_id}_${org_version_id}`);
@@ -71,7 +70,6 @@ async function getOrganizationHubData(req, res) {
       subscribeToChannel(sessionId, `organization_archivedMembers_${org_id}_${org_version_id}`);
       subscribeToChannel(sessionId, `organization_leaveApplications_${org_id}_${org_version_id}`);
       subscribeToChannel(sessionId, `organization_termPayments_${org_id}_${org_version_id}`);
-      console.log(`🟡 [BACKEND-SSE-DEBUG] All organization subscriptions set up for session: ${sessionId}`);
       
       // Publish initial term payments data using hub pattern
       try {
@@ -460,7 +458,7 @@ async function createOrganizationApplication(req, res) {
 
     // Initiate approval process (non-blocking for response)
     try {
-      await organizationsModel.initiateApprovalProcess(appId, user.user_id);
+      await organizationsModel.createApprovalChain(appId, user.email);
     } catch (approvalError) {
       console.error('Failed to initiate approval process:', approvalError);
     }
@@ -511,12 +509,21 @@ async function getSpecificApplication(req, res) {
 
 async function approveApplication(req, res) {
   try {
-    const { approval_id, comments, application_id, organization_id, appName } = req.body;
+    const { chain_id, comments, application_id, organization_id, appName } = req.body;
+    const userEmail = req.user?.email; // Use EMAIL (approver_user_id is email format)
+    
+    console.log('🔐 [E-SIG] Approving application:', { chain_id, application_id, userEmail, has_comments: !!comments });
+    
+    if (!userEmail) {
+      return res.status(401).json({ error: 'User not authenticated' });
+    }
+    
     const approvalRow = await organizationsModel.approveApplication(
-      approval_id,
+      chain_id,
       comments,
       organization_id,
-      application_id
+      application_id,
+      userEmail  // Pass user EMAIL for e-signature workflow
     );
     const result = approvalRow[0]?.result;
 
@@ -711,9 +718,9 @@ async function approveApplication(req, res) {
 
 async function rejectApplication(req, res) {
   try {
-    const { approval_id, comments, application_id, appName } = req.body;
+    const { chain_id, comments, application_id, appName } = req.body;
     const approvalRow = await organizationsModel.rejectApplication(
-      approval_id,
+      chain_id,
       comments,
       application_id
     );
@@ -1890,7 +1897,7 @@ async function unarchiveOrganizationMember(req, res) {
   }
 }
 
-async function GetApprovalTimeline(req, res) {
+async function getApprovalTimeline(req, res) {
   try {
     const { sessionId, org_name, app_id } = req.query;
     
@@ -1900,7 +1907,7 @@ async function GetApprovalTimeline(req, res) {
       });
     }
 
-    const result = await organizationsModel.GetApprovalTimeline(org_name, app_id);
+    const result = await organizationsModel.getApprovalChain(app_id);
     
     // Ensure consistent data structure
     let timelineData = [];
@@ -1911,15 +1918,6 @@ async function GetApprovalTimeline(req, res) {
     } else if (result && typeof result === 'object') {
       timelineData = [result];
     }
-
-    console.log('GetApprovalTimeline result:', {
-      org_name,
-      app_id,
-      resultType: typeof result,
-      isArray: Array.isArray(result),
-      timelineLength: timelineData.length,
-      timeline: timelineData
-    });
 
     if (sessionId) {
       subscribeToChannel(sessionId, `application_approval_timeline_${org_name}_${app_id}`);
@@ -1983,14 +1981,235 @@ async function updateApplicationPeriod(req, res) {
   }
 }
 
-async function initiateApprovalProcess(req, res) {
+async function createApprovalChain(req, res) {
   try {
     const { application_id } = req.body;
     if (!application_id) return res.status(400).json({ error: "application_id is required." });
-    const result = await organizationsModel.initiateApprovalProcess(application_id, req.user.email);
-    res.status(200).json({ success: true, message: "Approval process initiated successfully.", data: result });
+    const result = await organizationsModel.createApprovalChain(application_id, req.user.email);
+    res.status(200).json({ success: true, message: "Approval chain created successfully.", data: result });
   } catch (error) {
-    res.status(500).json({ success: false, error: error.message || "An error occurred while initiating the approval process." });
+    res.status(500).json({ success: false, error: error.message || "An error occurred while creating the approval chain." });
+  }
+}
+
+// New e-signature approval chain controllers
+async function uploadApprovalSignature(req, res) {
+  try {
+    const { chain_id, signature_path } = req.body;
+    if (!chain_id || !signature_path) {
+      return res.status(400).json({ error: "chain_id and signature_path are required." });
+    }
+    
+    const result = await organizationsModel.uploadApprovalSignature(chain_id, signature_path);
+    res.status(200).json({ 
+      success: true, 
+      message: "Signature uploaded successfully.", 
+      data: result 
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      success: false, 
+      error: error.message || "An error occurred while uploading the signature." 
+    });
+  }
+}
+
+async function markApprovalAsReceived(req, res) {
+  try {
+    const { chain_id } = req.params;
+    const { notes } = req.body;
+    const userEmail = req.user?.email; // Use EMAIL (approver_user_id is email format)
+    
+    console.log('🔐 [RECEIVE+SIGN] Request:', { 
+      chain_id, 
+      userEmail,
+      has_notes: !!notes
+    });
+    
+    if (!chain_id) {
+      return res.status(400).json({ error: "chain_id is required." });
+    }
+    
+    if (!userEmail) {
+      console.error('❌ [RECEIVE+SIGN] No user email in JWT!', req.user);
+      return res.status(401).json({ error: "User not authenticated." });
+    }
+    
+    const result = await organizationsModel.markApprovalAsReceived(chain_id, userEmail, notes);
+    
+    console.log('✅ [RECEIVE+SIGN] Success:', result);
+    
+    res.status(200).json({ 
+      success: true, 
+      message: "Approval received and signed successfully with e-signature.", 
+      data: result 
+    });
+  } catch (error) {
+    console.error('❌ [RECEIVE+SIGN] Error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message || "An error occurred while receiving and signing approval." 
+    });
+  }
+}
+
+// Check if user has uploaded e-signature
+async function checkUserESignature(req, res) {
+  try {
+    const userEmail = req.user?.email;
+    
+    if (!userEmail) {
+      return res.status(401).json({ 
+        success: false, 
+        error: "User not authenticated." 
+      });
+    }
+    
+    console.log('🔍 [CHECK-ESIG] Checking e-signature for:', userEmail);
+    
+    const hasSignature = await organizationsModel.checkUserHasESignature(userEmail);
+    
+    console.log('🔍 [CHECK-ESIG] Result:', { userEmail, hasSignature });
+    
+    res.status(200).json({ 
+      success: true, 
+      hasSignature,
+      message: hasSignature 
+        ? 'User has uploaded e-signature' 
+        : 'User needs to upload e-signature first'
+    });
+  } catch (error) {
+    console.error('❌ [CHECK-ESIG] Error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message || "An error occurred while checking e-signature." 
+    });
+  }
+}
+
+async function markApprovalAsSigned(req, res) {
+  try {
+    const { chain_id } = req.params;
+    const { signature_path, notes } = req.body;
+    const user_email = req.user.email;
+    
+    if (!chain_id || !signature_path) {
+      return res.status(400).json({ error: "chain_id and signature_path are required." });
+    }
+    
+    const result = await organizationsModel.markApprovalAsSigned(
+      chain_id, 
+      user_email, 
+      signature_path, 
+      notes
+    );
+    res.status(200).json({ 
+      success: true, 
+      message: "Approval marked as signed.", 
+      data: result 
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      success: false, 
+      error: error.message || "An error occurred while marking approval as signed." 
+    });
+  }
+}
+
+// Check if user has e-signature for approval chain
+async function checkUserSignature(req, res) {
+  try {
+    const { chain_id } = req.params;
+    const user_email = req.user.email;
+    
+    if (!chain_id) {
+      return res.status(400).json({ 
+        success: false, 
+        error: "chain_id is required." 
+      });
+    }
+    
+    const result = await organizationsModel.checkUserSignature(chain_id, user_email);
+    res.status(200).json({ 
+      success: true, 
+      data: result 
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      success: false, 
+      error: error.message || "An error occurred while checking signature status." 
+    });
+  }
+}
+
+// Upload user e-signature with file handling
+async function uploadUserSignatureFile(req, res) {
+  try {
+    const { chain_id } = req.params;
+    const user_email = req.user.email;
+    
+    if (!chain_id) {
+      return res.status(400).json({ 
+        success: false, 
+        error: "chain_id is required." 
+      });
+    }
+    
+    // Check if file was uploaded
+    if (!req.file) {
+      return res.status(400).json({ 
+        success: false, 
+        error: "E-signature file is required." 
+      });
+    }
+    
+    // Validate file type (allow common image formats)
+    const allowedMimeTypes = ['image/png', 'image/jpeg', 'image/jpg', 'image/gif'];
+    if (!allowedMimeTypes.includes(req.file.mimetype)) {
+      return res.status(400).json({ 
+        success: false, 
+        error: "Invalid file type. Please upload a PNG, JPG, or GIF image." 
+      });
+    }
+    
+    // Validate file size (max 2MB)
+    const maxSize = 2 * 1024 * 1024; // 2MB
+    if (req.file.size > maxSize) {
+      return res.status(400).json({ 
+        success: false, 
+        error: "File size exceeds 2MB limit." 
+      });
+    }
+    
+    // The file path is stored by multer in req.file.path
+    const signature_path = req.file.filename; // Just store the filename
+    
+    const result = await organizationsModel.uploadUserSignature(
+      chain_id, 
+      user_email, 
+      signature_path
+    );
+    
+    res.status(200).json({ 
+      success: true, 
+      message: "E-signature uploaded successfully.", 
+      data: result 
+    });
+  } catch (error) {
+    // Clean up uploaded file if database operation fails
+    if (req.file && req.file.path) {
+      const fs = require('fs').promises;
+      try {
+        await fs.unlink(req.file.path);
+      } catch (unlinkError) {
+        console.error('Error deleting file:', unlinkError);
+      }
+    }
+    
+    res.status(500).json({ 
+      success: false, 
+      error: error.message || "An error occurred while uploading e-signature." 
+    });
   }
 }
 
@@ -2624,7 +2843,7 @@ async function getCurrentOrganizationVersion(req, res) {
 // ===========================
 
 // Update organization term option setting
-const updateOrganizationTermOption = async (req, res) => {
+async function updateOrganizationTermOption(req, res) {
   try {
     let { organization_id, organization_version_id, organizationVersionId, term_option } = req.body;
 
@@ -2823,6 +3042,167 @@ async function getUserOrganizations(req, res) {
   }
 }
 
+/**
+ * Generate application form document (DEBUG ENDPOINT)
+ * @route POST /api/web/generate-application-form/:applicationId
+ * @query {string} format - 'pdf' or 'docx' (default: 'docx')
+ */
+async function generateApplicationFormDocument(req, res) {
+  try {
+    const { applicationId } = req.params;
+    const { format = 'docx' } = req.query; // Get format from query parameter
+    const userEmail = req.user?.email;
+    
+    console.log('📄 [DOC-GEN-API] Generate request:', { applicationId, format, userEmail });
+    
+    // Validate format
+    if (!['pdf', 'docx'].includes(format.toLowerCase())) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid format. Use "pdf" or "docx"'
+      });
+    }
+    
+    // Generate document
+    const documentGenerationService = require('../services/documentGenerationService');
+    const filePath = await documentGenerationService.generateApplicationForm(parseInt(applicationId), format.toLowerCase());
+    
+    // Return file path
+    const relativePath = filePath.replace('/app', '');
+    const fileExtension = format.toLowerCase();
+    
+    res.status(200).json({
+      success: true,
+      message: `Application form generated successfully as ${fileExtension.toUpperCase()}`,
+      file_path: relativePath,
+      format: fileExtension,
+      download_url: `/api/web/download-application-form/${applicationId}?format=${fileExtension}`
+    });
+    
+  } catch (error) {
+    console.error('❌ [DOC-GEN-API] Error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to generate application form',
+      message: error.message
+    });
+  }
+}
+
+/**
+ * Download application form document
+ * @route GET /api/web/download-application-form/:applicationId
+ * @query {string} format - 'pdf' or 'docx' (default: latest available)
+ */
+async function downloadApplicationFormDocument(req, res) {
+  try {
+    const { applicationId } = req.params;
+    const { format } = req.query; // Optional: 'pdf' or 'docx'
+    const fs = require('fs');
+    const path = require('path');
+    
+    console.log('📄 [DOC-DOWNLOAD] Download request:', { applicationId, format });
+    
+    // Find the most recent generated document
+    const documentsDir = path.join('/app/applications', applicationId, 'documents');
+    
+    if (!fs.existsSync(documentsDir)) {
+      return res.status(404).json({
+        success: false,
+        error: 'No application form found'
+      });
+    }
+    
+    let files = fs.readdirSync(documentsDir)
+      .filter(f => f.startsWith('Application-Form-'));
+    
+    // Filter by format if specified
+    if (format) {
+      const ext = format.toLowerCase();
+      if (!['pdf', 'docx'].includes(ext)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid format. Use "pdf" or "docx"'
+        });
+      }
+      files = files.filter(f => f.endsWith(`.${ext}`));
+    }
+    
+    // Sort by newest first
+    files = files.sort().reverse();
+    
+    if (files.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: format ? `No ${format.toUpperCase()} application form found` : 'No application form found'
+      });
+    }
+    
+    const latestFile = files[0];
+    const filePath = path.join(documentsDir, latestFile);
+    const fileExtension = path.extname(latestFile).toLowerCase();
+    
+    console.log('📄 [DOC-DOWNLOAD] Serving file:', filePath);
+    
+    // Use nginx X-Accel-Redirect for efficient file serving
+    const nginxPath = `/protected-applications/${applicationId}/documents/${latestFile}`;
+    
+    // Set headers for download based on file type
+    const contentType = fileExtension === '.pdf' 
+      ? 'application/pdf' 
+      : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', `attachment; filename="${latestFile}"`);
+    res.setHeader('X-Accel-Redirect', nginxPath);
+    res.end();
+    
+  } catch (error) {
+    console.error('❌ [DOC-DOWNLOAD] Error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to download application form',
+      message: error.message
+    });
+  }
+}
+
+/**
+ * Get document generation status for an application
+ * @route GET /api/web/application-form-status/:applicationId
+ */
+async function getApplicationFormStatus(req, res) {
+  try {
+    const { applicationId } = req.params;
+    
+    console.log('📄 [DOC-STATUS-API] Status request for application:', applicationId);
+    
+    const documentGenerationService = require('../services/documentGenerationService');
+    const status = await documentGenerationService.getDocumentStatus(parseInt(applicationId));
+    
+    if (!status) {
+      return res.status(404).json({
+        success: false,
+        error: 'Application not found'
+      });
+    }
+    
+    res.status(200).json({
+      success: true,
+      application_id: parseInt(applicationId),
+      ...status
+    });
+    
+  } catch (error) {
+    console.error('❌ [DOC-STATUS-API] Error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get document status',
+      message: error.message
+    });
+  }
+}
+
 module.exports = {
   getOrganizations,
   createOrganizationApplication,
@@ -2858,7 +3238,7 @@ module.exports = {
   addOrganizationMember,
   editOrganizationMember,
   archiveOrganizationMember,
-  GetApprovalTimeline,
+  getApprovalTimeline,
   getOrganizationOfficers,
   getOrganizationMembers,
   getOrganizationHubData,
@@ -2867,7 +3247,13 @@ module.exports = {
   // Enhanced functions
   addApplicationPeriod,
   updateApplicationPeriod,
-  initiateApprovalProcess,
+  createApprovalChain,
+  uploadApprovalSignature,
+  markApprovalAsReceived,
+  markApprovalAsSigned,
+  checkUserSignature,
+  checkUserESignature,
+  uploadUserSignatureFile,
   getOrganizationLogoApplication,
   getApprovedOrganizationLogos,
   checkOrgRenewalStatus,
@@ -2903,5 +3289,10 @@ module.exports = {
   updateOrganizationTermOption,
   
   // 🆕 Real-time organization updates
-  getUserOrganizations
+  getUserOrganizations,
+  
+  // 📄 Document Generation
+  generateApplicationFormDocument,
+  downloadApplicationFormDocument,
+  getApplicationFormStatus
 };

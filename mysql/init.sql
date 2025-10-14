@@ -12,7 +12,7 @@ SET GLOBAL event_scheduler = ON;
 
 DROP DATABASE IF EXISTS db_nuconnect;
 
-CREATE DATABASE db_nuconnect;
+CREATE DATABASE db_nuconnect CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE db_nuconnect;
 CREATE TABLE tbl_role(
     role_id INT AUTO_INCREMENT PRIMARY KEY,
@@ -31,7 +31,7 @@ CREATE TABLE tbl_college(
     archived_at TIMESTAMP NULL,
     archived_by VARCHAR(200) NULL,
     archived_reason VARCHAR(255) NULL
-);
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE tbl_program(
     program_id INT PRIMARY KEY AUTO_INCREMENT,
@@ -45,7 +45,7 @@ CREATE TABLE tbl_program(
     archived_reason VARCHAR(255) NULL,
     CONSTRAINT fk_program_college
         FOREIGN KEY (college_id) REFERENCES tbl_college(college_id) ON DELETE CASCADE
-);
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Section Management System
 -- Sections organize students by program and year level
@@ -89,7 +89,7 @@ CREATE TABLE tbl_user(
     FOREIGN KEY (program_id) REFERENCES tbl_program(program_id),
     FOREIGN KEY (section_id) REFERENCES tbl_section(section_id) ON DELETE SET NULL ON UPDATE CASCADE,
     FOREIGN KEY (archived_by) REFERENCES tbl_user(user_id) ON UPDATE CASCADE
-);
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE INDEX idx_user_section ON tbl_user(section_id);
 
@@ -300,7 +300,7 @@ CREATE TABLE tbl_organization_members (
     FOREIGN KEY (payment_start_term_id) REFERENCES tbl_academic_term(term_id) ON DELETE SET NULL
 );
 
-CREATE TABLE tbl_application_period (
+CREATE TABLE tbl_period (
     period_id INT AUTO_INCREMENT PRIMARY KEY,
     start_date DATE NOT NULL,
     end_date DATE NOT NULL,
@@ -320,16 +320,30 @@ CREATE TABLE tbl_application (
     org_version_id INT NULL,
     submitted_org_name VARCHAR(255) NULL,
     submitted_org_logo VARCHAR(500) NULL,
+    description TEXT NULL, -- Organization description
+    category ENUM('Co-Curricular Organization', 'Extra Curricular Organization') NULL,
+    base_program_id INT NULL, -- Program/College
+    student_id VARCHAR(200) NULL, -- Submitter student ID
+    submitter_contact_no VARCHAR(20) NULL, -- Submitter contact number
     application_type ENUM('new', 'renewal') NOT NULL,
     period_id INT NOT NULL,
     applicant_user_id VARCHAR(200) NOT NULL,
     status ENUM('Pending', 'Approved', 'Rejected') DEFAULT 'Pending', -- use capitalized values everywhere
+    -- Document generation tracking columns
+    docx_path VARCHAR(500) NULL COMMENT 'Path to generated DOCX file',
+    pdf_path VARCHAR(500) NULL COMMENT 'Path to generated PDF file',
+    docx_generated_at TIMESTAMP NULL COMMENT 'Timestamp when DOCX was generated',
+    pdf_generated_at TIMESTAMP NULL COMMENT 'Timestamp when PDF was generated',
+    document_generation_status ENUM('pending', 'processing', 'completed', 'failed') DEFAULT 'pending' COMMENT 'Status of document generation process',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (organization_id, cycle_number) REFERENCES tbl_renewal_cycle(organization_id, cycle_number) ON DELETE SET NULL ,
     FOREIGN KEY (org_version_id) REFERENCES tbl_organization_version(org_version_id) ON DELETE SET NULL,
-    FOREIGN KEY (period_id) REFERENCES tbl_application_period(period_id),
-    FOREIGN KEY (applicant_user_id) REFERENCES tbl_user(user_id)
+    FOREIGN KEY (period_id) REFERENCES tbl_period(period_id),
+    FOREIGN KEY (base_program_id) REFERENCES tbl_program(program_id) ON DELETE SET NULL,
+    FOREIGN KEY (student_id) REFERENCES tbl_user(user_id) ON DELETE SET NULL,
+    FOREIGN KEY (applicant_user_id) REFERENCES tbl_user(user_id),
+    KEY idx_document_status (document_generation_status)
 );
 
 CREATE TABLE tbl_application_executives (
@@ -702,7 +716,7 @@ CREATE TABLE tbl_approval_process(
     step INT NOT NULL,
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (application_id) REFERENCES tbl_application(application_id) ON DELETE CASCADE,
-    FOREIGN KEY (period_id) REFERENCES tbl_application_period(period_id) ON DELETE CASCADE,
+    FOREIGN KEY (period_id) REFERENCES tbl_period(period_id) ON DELETE CASCADE,
     -- FOREIGN KEY (organization_id) REFERENCES tbl_organization(organization_id) ON DELETE CASCADE, -- REMOVED
     FOREIGN KEY (approver_id) REFERENCES tbl_user(user_id) ON UPDATE CASCADE,
     FOREIGN KEY (approval_role_id) REFERENCES tbl_role(role_id) ON DELETE CASCADE
@@ -4531,7 +4545,7 @@ BEGIN
     -- Get creator email for logging
     SELECT email INTO v_creator_email FROM tbl_user WHERE user_id = p_created_by LIMIT 1;
     
-    INSERT INTO tbl_application_period (
+    INSERT INTO tbl_period (
         start_date, 
         end_date, 
         start_time, 
@@ -4587,7 +4601,7 @@ BEGIN
         end_date,
         start_time,
         end_time
-    FROM tbl_application_period WHERE period_id = v_period_id;
+    FROM tbl_period WHERE period_id = v_period_id;
 END$$
 DELIMITER ;
 
@@ -4605,7 +4619,7 @@ BEGIN
          end_date,
          start_time,
          end_time
-  FROM tbl_application_period
+  FROM tbl_period
   WHERE is_active = 1
   ORDER BY created_at DESC
   LIMIT 1;
@@ -4629,12 +4643,12 @@ BEGIN
 
     -- Get old values for comparison
     SELECT start_date, end_date INTO v_old_start_date, v_old_end_date
-    FROM tbl_application_period WHERE period_id = p_period_id;
+    FROM tbl_period WHERE period_id = p_period_id;
 
     -- Get updater email for logging
     SELECT email INTO v_updater_email FROM tbl_user WHERE user_id = p_updated_by LIMIT 1;
 
-    UPDATE tbl_application_period
+    UPDATE tbl_period
     SET start_date = p_start_date,
         end_date = p_end_date,
         start_time = p_start_time,
@@ -4680,226 +4694,7 @@ BEGIN
         end_date,
         start_time,
         end_time
-    FROM tbl_application_period WHERE period_id = p_period_id;
-END$$
-DELIMITER ;
-
-DELIMITER $$
-CREATE DEFINER='admin'@'%' PROCEDURE InitiateApprovalProcess(
-    IN p_application_id INT,
-    IN p_initiated_by VARCHAR(200)
-)
-BEGIN
-    -- All DECLARE statements must come first in MySQL stored procedures
-    DECLARE v_period_id INT;
-    DECLARE v_application_type ENUM('new', 'renewal');
-    DECLARE v_role_id INT;
-    DECLARE v_hierarchy_order INT;
-    DECLARE v_approver_id VARCHAR(200);
-    DECLARE v_done BOOLEAN DEFAULT FALSE;
-    DECLARE v_first_step BOOLEAN DEFAULT TRUE;
-    DECLARE v_initiator_email VARCHAR(100);
-    DECLARE v_last_approval_id INT;
-    DECLARE v_last_approver_email VARCHAR(100);
-    DECLARE v_submitted_org_name VARCHAR(255);
-    DECLARE v_url VARCHAR(512);
-    DECLARE v_org_category ENUM('Co-Curricular Organization','Extra Curricular Organization') DEFAULT 'Co-Curricular Organization';
-    
-    -- Cursor declaration with ALL roles (filtering happens in the loop)
-    DECLARE role_cursor CURSOR FOR
-        SELECT role_id, hierarchy_order
-        FROM tbl_role
-        WHERE is_approver = TRUE
-          AND hierarchy_order IS NOT NULL
-        ORDER BY hierarchy_order;
-    DECLARE CONTINUE HANDLER FOR NOT FOUND SET v_done = TRUE;
-
-    -- Get period, application type, and organization category FIRST
-    SELECT a.period_id, a.application_type, a.submitted_org_name, 
-           COALESCE(ov.category, 'Co-Curricular Organization') as category
-    INTO v_period_id, v_application_type, v_submitted_org_name, v_org_category
-    FROM tbl_application a
-    LEFT JOIN tbl_organization_version ov ON a.org_version_id = ov.org_version_id
-    WHERE a.application_id = p_application_id
-    LIMIT 1;
-
-    SET v_url = CONCAT('/organizations/app-details/', p_application_id, '/', COALESCE(v_submitted_org_name, ''));
-
-    -- Get initiator email for optional logging
-    SELECT email INTO v_initiator_email FROM tbl_user WHERE user_id = p_initiated_by LIMIT 1;
-
-    OPEN role_cursor;
-
-    approval_loop: LOOP
-        FETCH role_cursor INTO v_role_id, v_hierarchy_order;
-        IF v_done THEN
-            LEAVE approval_loop;
-        END IF;
-
-        -- Skip Program Chair (hierarchy_order = 2) and Dean (hierarchy_order = 3) 
-        -- for Extra Curricular organizations
-        IF v_org_category = 'Extra Curricular Organization' 
-           AND v_hierarchy_order IN (2, 3) THEN
-            ITERATE approval_loop; -- Skip this iteration and continue with next role
-        END IF;
-
-        -- For the first step (adviser role), handle differently based on application type
-        IF v_first_step THEN
-            -- For NEW applications: Use the actual adviser who submitted the application (p_initiated_by)
-            -- For RENEWAL applications: Use the specific adviser of the organization
-            IF v_application_type = 'new' THEN
-                SET v_approver_id = p_initiated_by; -- Use the adviser who submitted
-            ELSE
-                -- For renewal, use the specific adviser of the organization being renewed
-                SET v_approver_id = (
-                    SELECT o.adviser_id
-                    FROM tbl_application a
-                    JOIN tbl_organization o ON a.organization_id = o.organization_id
-                    WHERE a.application_id = p_application_id
-                      AND o.adviser_id IS NOT NULL
-                      AND EXISTS (
-                          SELECT 1 FROM tbl_user u 
-                          WHERE u.user_id = o.adviser_id 
-                            AND u.role_id = v_role_id 
-                            AND u.status = 'Active'
-                      )
-                    LIMIT 1
-                );
-            END IF;
-        ELSE
-            -- For subsequent steps, use the standard role-based selection
-            -- Special handling for SDAO: Select by rank (Rank 2/3 first, then Rank 1)
-            IF v_role_id = (SELECT role_id FROM tbl_role WHERE role_name = 'SDAO') THEN
-                -- Check if a Rank 2 or 3 SDAO has already been assigned
-                IF NOT EXISTS (
-                    SELECT 1 FROM tbl_approval_process ap
-                    JOIN tbl_sdao_approver sa ON ap.approver_id = sa.user_id
-                    WHERE ap.application_id = p_application_id
-                      AND ap.period_id = v_period_id
-                      AND ap.approval_role_id = v_role_id
-                      AND sa.sdao_rank IN (2, 3)
-                ) THEN
-                    -- Assign Rank 2 or 3 SDAO (first approval level)
-                    SET v_approver_id = (
-                        SELECT u.user_id
-                        FROM tbl_user u
-                        JOIN tbl_sdao_approver sa ON u.user_id = sa.user_id
-                        WHERE u.role_id = v_role_id
-                          AND u.status = 'Active'
-                          AND sa.sdao_rank IN (2, 3)
-                        ORDER BY sa.sdao_rank ASC  -- Prefer Rank 2 over Rank 3
-                        LIMIT 1
-                    );
-                ELSE
-                    -- Assign Rank 1 SDAO (final approval level)
-                    SET v_approver_id = (
-                        SELECT u.user_id
-                        FROM tbl_user u
-                        JOIN tbl_sdao_approver sa ON u.user_id = sa.user_id
-                        WHERE u.role_id = v_role_id
-                          AND u.status = 'Active'
-                          AND sa.sdao_rank = 1
-                        LIMIT 1
-                    );
-                END IF;
-            ELSE
-                -- Standard role-based selection for non-SDAO roles
-                SET v_approver_id = (
-                    SELECT user_id
-                    FROM tbl_user
-                    WHERE role_id = v_role_id
-                      AND status = 'Active'
-                    LIMIT 1
-                );
-            END IF;
-        END IF;
-
-        IF v_approver_id IS NOT NULL THEN
-            IF NOT EXISTS (
-                SELECT 1 FROM tbl_approval_process ap
-                WHERE ap.application_id = p_application_id
-                  AND ap.period_id = v_period_id
-                  AND ap.approval_role_id = v_role_id
-            ) THEN
-                IF v_first_step THEN
-                    -- For NEW applications: Auto-approve the adviser who submitted
-                    -- For RENEWAL applications: Set as pending for adviser to approve
-                    INSERT INTO tbl_approval_process (
-                        application_id,
-                        period_id,
-                        approver_id,
-                        approval_role_id,
-                        application_type,
-                        status,
-                        step
-                    ) VALUES (
-                        p_application_id,
-                        v_period_id,
-                        v_approver_id,
-                        v_role_id,
-                        v_application_type,
-                        CASE WHEN v_application_type = 'new' THEN 'Approved' ELSE 'Pending' END,
-                        v_hierarchy_order
-                    );
-                    SET v_first_step = FALSE;
-                ELSE
-                    INSERT INTO tbl_approval_process (
-                        application_id,
-                        period_id,
-                        approver_id,
-                        approval_role_id,
-                        application_type,
-                        status,
-                        step
-                    ) VALUES (
-                        p_application_id,
-                        v_period_id,
-                        v_approver_id,
-                        v_role_id,
-                        v_application_type,
-                        'Pending',
-                        v_hierarchy_order
-                    );
-                END IF;
-            END IF;
-        END IF;
-    END LOOP approval_loop;
-
-    CLOSE role_cursor;
-
-    INSERT INTO tbl_application_approval (application_id, approval_id)
-    SELECT p_application_id, ap.approval_id
-    FROM tbl_approval_process ap
-    LEFT JOIN tbl_application_approval aa
-      ON aa.application_id = p_application_id
-     AND aa.approval_id = ap.approval_id
-    WHERE ap.application_id = p_application_id
-      AND ap.period_id = v_period_id
-      AND aa.approval_id IS NULL;
-
-    SELECT approval_id, approver_id
-    INTO v_last_approval_id, v_approver_id
-    FROM tbl_approval_process
-    WHERE application_id = p_application_id
-      AND period_id = v_period_id
-      AND status = 'Pending'
-    ORDER BY step ASC
-    LIMIT 1;
-
-    IF EXISTS (
-        SELECT 1 FROM tbl_approval_process 
-        WHERE application_id = p_application_id
-          AND period_id = v_period_id
-          AND approver_id IS NOT NULL
-    ) THEN
-        UPDATE tbl_application 
-        SET status = 'Pending'
-        WHERE application_id = p_application_id;
-    ELSE
-        UPDATE tbl_application 
-        SET status = 'Rejected'
-        WHERE application_id = p_application_id;
-    END IF;
+    FROM tbl_period WHERE period_id = p_period_id;
 END$$
 DELIMITER ;
 
@@ -4986,73 +4781,9 @@ BEGIN
         SET v_application_type = 'new';
     END IF;
 
-    -- Create organization version
-    INSERT INTO tbl_organization_version (
-        organization_id,
-        name,
-        logo_path,
-        description,
-        base_program_id,
-        membership_fee_type,
-        membership_fee_amount,
-        is_recruiting,
-        is_open_to_all_courses,
-        category,
-        created_by
-    ) VALUES (
-        v_organization_id,
-        v_org_name,
-        JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.organization_logo')),
-        JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.organization_description')),
-        v_program_id,
-        v_fee_type,
-        v_fee_amount,
-        TRUE,
-        FALSE,
-        JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.category')),
-        p_user_id
-    );
-    SET v_org_version_id = LAST_INSERT_ID();
-
-    -- Insert multiple program associations into tbl_organization_version_course
-    SET @dept_field = CASE 
-        WHEN JSON_LENGTH(p_organization, '$.department') > 0 THEN '$.department'
-        WHEN JSON_LENGTH(p_organization, '$.programs') > 0 THEN '$.programs'
-        ELSE '$.department'
-    END;
-    
-    SET v_dept_count = COALESCE(JSON_LENGTH(p_organization, @dept_field), 0);
-    SET i = 0;
-    
-    WHILE i < v_dept_count DO
-        SET @program = JSON_EXTRACT(p_organization, CONCAT(@dept_field, '[', i, ']'));
-        
-        -- Handle both program_id (numeric) and abbreviation (string) formats
-        IF JSON_TYPE(@program) = 'OBJECT' THEN
-            SET @program_id = CAST(JSON_UNQUOTE(JSON_EXTRACT(@program, '$.program_id')) AS UNSIGNED);
-        ELSE
-            SET @program_abbr = JSON_UNQUOTE(@program);
-            SELECT program_id INTO @program_id 
-            FROM tbl_program 
-            WHERE LOWER(abbreviation) = LOWER(@program_abbr)
-            LIMIT 1;
-        END IF;
-        
-        IF @program_id IS NOT NULL THEN
-            INSERT IGNORE INTO tbl_organization_version_course (
-                org_version_id,
-                program_id
-            ) VALUES (
-                v_org_version_id,
-                @program_id
-            );
-        END IF;
-        SET i = i + 1;
-    END WHILE;
-
     -- Find active application period
     SELECT period_id INTO v_period_id
-    FROM tbl_application_period
+    FROM tbl_period
     WHERE is_active = TRUE
     ORDER BY created_at DESC
     LIMIT 1;
@@ -5060,12 +4791,43 @@ BEGIN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'No active application period';
     END IF;
 
-    -- Create application
+    -- Create organization_version to store all submitted data
+    INSERT INTO tbl_organization_version (
+        organization_id,
+        base_program_id,
+        name,
+        logo_path,
+        description,
+        category,
+        membership_fee_type,
+        membership_fee_amount,
+        created_by,
+        status
+    ) VALUES (
+        v_organization_id,
+        v_program_id,
+        v_org_name,
+        JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.organization_logo')),
+        JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.organization_description')),
+        JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.category')),
+        v_fee_type,
+        v_fee_amount,
+        p_user_id,
+        'Pending'
+    );
+    SET v_org_version_id = LAST_INSERT_ID();
+
+    -- Create application with org_version_id
     INSERT INTO tbl_application (
         organization_id,
         org_version_id,
         submitted_org_name,
         submitted_org_logo,
+        description,
+        category,
+        base_program_id,
+        student_id,
+        submitter_contact_no,
         application_type,
         period_id,
         applicant_user_id,
@@ -5075,6 +4837,11 @@ BEGIN
         v_org_version_id,
         v_org_name,
         JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.organization_logo')),
+        JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.organization_description')),
+        JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.category')),
+        v_program_id,
+        p_user_id,
+        JSON_UNQUOTE(JSON_EXTRACT(p_organization, '$.submitter_contact_no')),
         v_application_type,
         v_period_id,
         p_user_id,
@@ -5144,7 +4911,7 @@ BEGIN
             proposed_rank_id
         ) VALUES (
             v_application_id,
-            v_org_version_id,
+            v_org_version_id,  -- Now we have org_version_id
             v_generated_uuid,  -- Will be existing user_id or new UUID
             v_exec_full_name,
             v_exec_email,
@@ -5178,7 +4945,7 @@ BEGIN
             v_req_id,
             v_organization_id,
             v_cycle_number,
-            v_org_version_id,
+            v_org_version_id,  -- Now we have org_version_id
             v_file_path,
             p_user_id,
             'Pending',
@@ -5187,6 +4954,32 @@ BEGIN
         );
         SET i = i + 1;
     END WHILE;
+
+    -- Insert program/department associations into tbl_organization_version_course
+    -- The department array contains program abbreviations (e.g., ["bsit-mwa", "bscs"])
+    SET i = 0;
+    WHILE i < v_dept_count DO
+        SET @dept_abbrev = JSON_UNQUOTE(JSON_EXTRACT(p_organization, CONCAT('$.department[', i, ']')));
+        
+        -- Look up program_id from abbreviation
+        SET @program_id_lookup = NULL;
+        SELECT program_id INTO @program_id_lookup
+        FROM tbl_program
+        WHERE LOWER(abbreviation) = LOWER(@dept_abbrev)
+        LIMIT 1;
+        
+        -- Only insert if program was found
+        IF @program_id_lookup IS NOT NULL THEN
+            INSERT INTO tbl_organization_version_course (org_version_id, program_id)
+            VALUES (v_org_version_id, @program_id_lookup);
+        END IF;
+        
+        SET i = i + 1;
+    END WHILE;
+
+    -- Create approval chain for the application
+    CALL sp_CreateApprovalChain(v_application_id, p_user_id);
+
     COMMIT;
 
     -- Return results
@@ -5302,7 +5095,7 @@ BEGIN
 
     -- Find active application period
     SELECT period_id INTO v_period_id
-    FROM tbl_application_period
+    FROM tbl_period
     WHERE is_active = TRUE
     ORDER BY created_at DESC
     LIMIT 1;
@@ -5389,6 +5182,9 @@ BEGIN
         );
         SET i = i + 1;
     END WHILE;
+
+    -- Create approval chain for the resubmitted application
+    CALL sp_CreateApprovalChain(v_application_id, p_user_id);
 
     COMMIT;
     
@@ -5996,29 +5792,32 @@ CREATE DEFINER='admin'@'%' PROCEDURE GetApprovalTimeline(
 )
 BEGIN
             SELECT 
-                ap.approval_id as id,
-                ap.step,
+                oac.chain_id as id,
+                oac.approval_order as step,
                 CASE 
                     WHEN r.role_name = 'SDAO' AND sa.sdao_rank IS NOT NULL 
                     THEN CONCAT('SDAO (Rank ', sa.sdao_rank, ')')
                     ELSE r.role_name
                 END as role_name,
-                ap.status,
+                oac.status,
                 u.email,
                 u.f_name,
                 u.l_name,
                 u.user_id,
-                ap.comment,
-                ap.timestamp
-            FROM tbl_approval_process ap
+                oac.remarks,
+                oac.approved_at as timestamp,
+                oac.received_at,
+                oac.signed_at,
+                oac.signature_path
+            FROM tbl_organization_approval_chain oac
             JOIN tbl_role r 
-                ON ap.approval_role_id = r.role_id
+                ON oac.approver_role_id = r.role_id
             LEFT JOIN tbl_user u 
-                ON ap.approver_id = u.user_id
+                ON oac.approver_user_id = u.user_id
             LEFT JOIN tbl_sdao_approver sa
                 ON u.user_id = sa.user_id
-            WHERE ap.application_id = p_application_id
-            ORDER BY ap.step;
+            WHERE oac.application_id = p_application_id
+            ORDER BY oac.approval_order;
 END $$
 DELIMITER ;
 
@@ -6068,23 +5867,24 @@ BEGIN
 
     START TRANSACTION;
 
-    -- 1) Fetch current step for this approval row
-    SELECT step INTO v_step
-    FROM tbl_approval_process
-    WHERE approval_id = p_approval_id
+    -- 1) Fetch current approval_order for this chain row
+    SELECT approval_order INTO v_step
+    FROM tbl_organization_approval_chain
+    WHERE chain_id = p_approval_id
     LIMIT 1;
 
-    -- 2) Determine last step number for the application's approval process
-    SELECT MAX(step) INTO v_last_step
-    FROM tbl_approval_process
+    -- 2) Determine last approval_order number for the application's approval chain
+    SELECT MAX(approval_order) INTO v_last_step
+    FROM tbl_organization_approval_chain
     WHERE application_id = p_application_id;
 
-    -- 3) Mark this approval row as approved and save comment/timestamp
-    UPDATE tbl_approval_process
-    SET status = 'Approved',
-        comment = p_comment,
-        timestamp = CURRENT_TIMESTAMP
-    WHERE approval_id = p_approval_id;
+    -- 3) Mark this chain row as approved and save comment/timestamp
+    -- NOTE: sp_ApproveApplicationStep already sets status = 'Approved' for final approvers
+    -- Only update if not already approved (for legacy direct calls to this procedure)
+    UPDATE tbl_organization_approval_chain
+    SET status = IF(status != 'Approved', 'Approved', status),
+        remarks = IF(remarks IS NULL OR remarks = '', p_comment, remarks)
+    WHERE chain_id = p_approval_id;
 
     -- 4) If this is the final approval step, perform promotion & organization wiring
     IF v_step = v_last_step THEN
@@ -6293,7 +6093,7 @@ BEGIN
         UPDATE tbl_organization_version 
         SET status = 'Archived',
             archived_at = CURRENT_TIMESTAMP,
-            archived_by = (SELECT approver_id FROM tbl_approval_process WHERE approval_id = p_approval_id),
+            archived_by = (SELECT approver_user_id FROM tbl_organization_approval_chain WHERE chain_id = p_approval_id),
             archived_reason = 'Superseded by approved application'
         WHERE organization_id = v_new_org_id 
           AND org_version_id != v_org_version_id;  -- Don't archive the current version
@@ -6614,19 +6414,19 @@ BEGIN
     -- Return results
     SELECT JSON_OBJECT(
         'application', JSON_OBJECT(
-            'id', ap.approval_id,
-            'step', ap.step,
+            'id', oac.chain_id,
+            'step', oac.approval_order,
             'role_name', r.role_name,
-            'status', ap.status,
+            'status', oac.status,
             'email', u.email,
             'f_name', u.f_name,
             'l_name', u.l_name,
             'user_id', u.user_id,
-            'comment', ap.comment,
-            'timestamp', ap.timestamp
+            'comment', oac.remarks,
+            'timestamp', COALESCE(oac.approved_at, oac.signed_at, oac.received_at, oac.endorsed_at)
         ),
         'organization',
-            CASE WHEN ap.step = v_last_step THEN
+            CASE WHEN oac.approval_order = v_last_step THEN
                 JSON_OBJECT(
                     'id', v_new_org_id,
                     'name', v_org_name,
@@ -6650,13 +6450,14 @@ BEGIN
             'organization_logo', v_org_logo
         )
     ) AS result
-    FROM tbl_approval_process ap
-    JOIN tbl_role r ON ap.approval_role_id = r.role_id
-    LEFT JOIN tbl_user u ON ap.approver_id = u.user_id
-    WHERE ap.approval_id = p_approval_id
+    FROM tbl_organization_approval_chain oac
+    JOIN tbl_role r ON oac.approver_role_id = r.role_id
+    LEFT JOIN tbl_user u ON oac.approver_user_id = u.user_id
+    WHERE oac.chain_id = p_approval_id
     LIMIT 1;
 END $$
 DELIMITER ;
+
 
 DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE RejectApplication(
@@ -6667,11 +6468,11 @@ CREATE DEFINER='admin'@'%' PROCEDURE RejectApplication(
 BEGIN
     START TRANSACTION;
 
-    UPDATE tbl_approval_process
+    UPDATE tbl_organization_approval_chain
     SET status = 'Rejected',
-        comment = p_comment,
-        timestamp = CURRENT_TIMESTAMP
-    WHERE approval_id = p_approval_id;
+        remarks = p_comment,
+        approved_at = CURRENT_TIMESTAMP
+    WHERE chain_id = p_approval_id;
 
     UPDATE tbl_application
     SET status = 'rejected',
@@ -6684,20 +6485,20 @@ BEGIN
     -- CALL NotifyApplicationApprovalChange(p_approval_id, p_application_id);
 
     SELECT 
-        ap.approval_id as id,
-        ap.step,
+        oac.chain_id as id,
+        oac.approval_order as step,
         r.role_name,
-        ap.status,
+        oac.status,
         u.email,
         u.f_name,
         u.l_name,
         u.user_id,
-        ap.comment,
-        ap.timestamp
-    FROM tbl_approval_process ap
-    JOIN tbl_role r ON ap.approval_role_id = r.role_id
-    LEFT JOIN tbl_user u ON ap.approver_id = u.user_id
-    WHERE ap.approval_id = p_approval_id;
+        oac.remarks,
+        oac.approved_at as timestamp
+    FROM tbl_organization_approval_chain oac
+    JOIN tbl_role r ON oac.approver_role_id = r.role_id
+    LEFT JOIN tbl_user u ON oac.approver_user_id = u.user_id
+    WHERE oac.chain_id = p_approval_id;
 END $$
 DELIMITER ;
 
@@ -8846,7 +8647,7 @@ DELIMITER $$
 CREATE DEFINER='admin'@'%' PROCEDURE GetActiveApplicationPeriodSimple()
 BEGIN
     SELECT *
-    FROM tbl_application_period
+    FROM tbl_period
     WHERE is_active = 1
     ORDER BY created_at DESC
     LIMIT 1;
@@ -9025,7 +8826,7 @@ BEGIN
     /* ===== Locate the currently active period ===== */
     SELECT period_id, start_date, end_date, start_time, end_time
       INTO v_period_id, v_start_date, v_end_date, v_start_time, v_end_time
-      FROM tbl_application_period
+      FROM tbl_period
      WHERE is_active = 1
      ORDER BY created_at DESC
      LIMIT 1;
@@ -9047,7 +8848,7 @@ BEGIN
     START TRANSACTION;
 
       /* Mark the active period as inactive */
-      UPDATE tbl_application_period
+      UPDATE tbl_period
          SET is_active = 0
        WHERE period_id = v_period_id;
 
@@ -9181,7 +8982,7 @@ BEGIN
             LEFT JOIN tbl_user u ON a.applicant_user_id = u.user_id
             WHERE a.period_id = ap.period_id
         ) AS applications
-    FROM tbl_application_period ap
+    FROM tbl_period ap
     ORDER BY ap.start_date DESC, ap.period_id DESC;
 END$$
 DELIMITER ;
@@ -13379,22 +13180,21 @@ BEGIN
     END IF;
 
     /* approver / step context */
-    SELECT approver_id, step, status
+    SELECT approver_user_id, approval_order, status
       INTO v_approver_id, v_step, v_step_status
-    FROM tbl_approval_process
-    WHERE approval_id = p_approval_id
+    FROM tbl_organization_approval_chain
+    WHERE chain_id = p_approval_id
     LIMIT 1;
 
     /* Step metrics */
     SELECT COUNT(*) INTO v_total_steps
-    FROM tbl_application_approval
+    FROM tbl_organization_approval_chain
     WHERE application_id = p_application_id;
 
     SELECT COUNT(*) INTO v_completed_steps
-    FROM tbl_application_approval aa
-    JOIN tbl_approval_process ap ON aa.approval_id = ap.approval_id
-    WHERE aa.application_id = p_application_id
-      AND ap.status = 'Approved';
+    FROM tbl_organization_approval_chain
+    WHERE application_id = p_application_id
+      AND status = 'Approved';
 
     SET v_remaining_steps = GREATEST(0, v_total_steps - v_completed_steps);
 
@@ -13415,9 +13215,9 @@ BEGIN
         )
         UNION
         SELECT u.email
-        FROM tbl_approval_process ap
-        JOIN tbl_user u ON ap.approver_id = u.user_id
-        WHERE ap.application_id = p_application_id
+        FROM tbl_organization_approval_chain oac
+        JOIN tbl_user u ON oac.approver_user_id = u.user_id
+        WHERE oac.application_id = p_application_id
     ) AS recipients;
 
     /* Build human-friendly notification title/message */
@@ -14390,7 +14190,7 @@ BEGIN
                CONCAT(ap.start_date, ' ', ap.start_time),
                CONCAT(ap.end_date, ' ', ap.end_time)
         INTO v_active_period_id, v_active_start, v_active_end
-        FROM tbl_application_period ap
+        FROM tbl_period ap
         WHERE ap.is_active = 1
           AND NOW() BETWEEN CONCAT(ap.start_date, ' ', ap.start_time)
                        AND CONCAT(ap.end_date, ' ', ap.end_time)
@@ -19906,7 +19706,7 @@ CREATE INDEX idx_committee_members_user ON tbl_committee_members(user_id);
 CREATE INDEX idx_rc_org_version ON tbl_renewal_cycle (org_version_id);
 
 CREATE INDEX idx_active_end_datetime 
-ON tbl_application_period(is_active, end_date, end_time);
+ON tbl_period(is_active, end_date, end_time);
 
 CREATE INDEX idx_conversation_global ON tbl_ai_conversation(owner_id, is_global, updated_at DESC);
 CREATE INDEX idx_message_created ON tbl_ai_message(conversation_id, created_at ASC);
@@ -20110,24 +19910,30 @@ INSERT INTO tbl_user (user_id, f_name, l_name, email, program_id, section_id, ro
 ('adviser1@nu-dasma.edu.ph', 'Maria', 'Santos', 'adviser1@nu-dasma.edu.ph', 11, NULL, 2),
 ('adviser2@nu-dasma.edu.ph', 'Juan', 'Dela Cruz', 'adviser2@nu-dasma.edu.ph', 11, NULL, 2),
 -- Advisers for BSIT (program_id = 13)
-('CyTLmjW4Edhvk2WvWFDNuWLYjW0WJETBPbY2HWk-ZqE', ' Loraine', 'Miraballes', 'miraballesl@students.nu-dasma.edu.ph', 13, NULL, 2),
+('CyTLmjW4Edhvk2WvWFDNuWLYjW0WJETBPbY2HWk-ZqE', ' Loraine', 'Miraballes', 'miraballesl@students.nu-dasma.edu.ph', 13, NULL, 3),
 ('adviser3@nu-dasma.edu.ph', 'Roberto', 'Garcia', 'adviser3@nu-dasma.edu.ph', 13, NULL, 2),
 -- Students with BSIT program (program_id = 13) and sections
 ('dumalagim@students.nu-dasma.edu.ph', 'Iver', 'Dumalag', 'dumalagim@students.nu-dasma.edu.ph', 13, (SELECT section_id FROM tbl_section WHERE section_name = 'INF251' AND program_id = 13), 1),
-('LBmQ-WzvRhVmb55Ucidrc14aL39ae9Ei-7xfbOrPeEA', ' Samantha Joy', 'Madrunio', 'madruniosm@students.nu-dasma.edu.ph', 13, (SELECT section_id FROM tbl_section WHERE section_name = 'INF252' AND program_id = 13), 1),
-('NqBfAZcMXHZF5g9ztwkQ1ykPgtNmZwYRcIPKKK40ROc', ' Alister Dylan Emmanuel', 'Realo', 'realoam@students.nu-dasma.edu.ph', 13, (SELECT section_id FROM tbl_section WHERE section_name = 'INF241' AND program_id = 13), 1),
+('LBmQ-WzvRhVmb55Ucidrc14aL39ae9Ei-7xfbOrPeEA', ' Samantha Joy', 'Madrunio', 'madruniosm@students.nu-dasma.edu.ph', 13, NULL, 2),
+('NqBfAZcMXHZF5g9ztwkQ1ykPgtNmZwYRcIPKKK40ROc', ' Alister Dylan Emmanuel', 'Realo', 'arisgc@students.nu-dasma.edu.ph', NULL, NULL, 4),
 -- Students with Computer Science program (program_id = 11) and sections
-('CY4e1GmCXysMRn8VYudhqDy7CDJ8xVidGO1v8RnRj1E', ' Shamiah M', 'Mendoza', 'mendozasm@students.nu-dasma.edu.ph', 11, (SELECT section_id FROM tbl_section WHERE section_name = 'COM251' AND program_id = 11), 1);
+('CY4e1GmCXysMRn8VYudhqDy7CDJ8xVidGO1v8RnRj1E', ' Shamiah M', 'Mendoza', 'mendozasm@students.nu-dasma.edu.ph', 13, NULL, 5);
 
--- Migrate existing SDAO users to tbl_sdao_approver with rank 1 (default)
--- Assigns rank 1 to all users with SDAO role (role_id = 4)
-INSERT INTO tbl_sdao_approver (user_id, sdao_rank)
-SELECT user_id, 1
-FROM tbl_user
-WHERE role_id = (SELECT role_id FROM tbl_role WHERE role_name = 'SDAO')
-  AND user_id != 'sys-system'  -- Exclude system user
-ORDER BY created_at ASC
-LIMIT 1;  -- Only migrate the first SDAO user to rank 1
+-- Migrate existing SDAO users to tbl_sdao_approver with ranks
+-- First, clear any existing SDAO approver entries to avoid conflicts
+DELETE FROM tbl_sdao_approver WHERE user_id IN (
+    SELECT user_id FROM tbl_user 
+    WHERE role_id = (SELECT role_id FROM tbl_role WHERE role_name = 'SDAO')
+    AND user_id != 'sys-system'
+);
+
+-- Assigns rank 1 to Benson Javier and rank 2 to Alister Realo
+-- Clear existing SDAO approvers first to prevent duplicates
+DELETE FROM tbl_sdao_approver;
+
+INSERT INTO tbl_sdao_approver (user_id, sdao_rank) VALUES
+('6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0', 1),  -- Benson Javier as Rank 1
+('NqBfAZcMXHZF5g9ztwkQ1ykPgtNmZwYRcIPKKK40ROc', 2);  -- Alister Realo as Rank 2
 
 
 -- INSERT INTO tbl_application_requirement (requirement_name, is_applicable_to, file_path, created_by) VALUES
@@ -21349,7 +21155,7 @@ FROM tbl_event AS e WHERE e.organization_id = org1
 ORDER BY e.event_id LIMIT 2;
 
 /* 16) Application period */
-INSERT INTO tbl_application_period (start_date, end_date, start_time, end_time, is_active, created_by, created_at, updated_at)
+INSERT INTO tbl_period (start_date, end_date, start_time, end_time, is_active, created_by, created_at, updated_at)
 VALUES ('2025-06-01','2025-09-30','08:00:00','17:00:00', TRUE, @sdao, NOW(), NOW());
 SET app_period_id = LAST_INSERT_ID();
 
@@ -21825,3 +21631,1373 @@ END $$
 DELIMITER ;
 CALL populate_all_demo();
 DROP PROCEDURE populate_all_demo;
+
+-- =====================================================================
+-- E-SIGNATURE AND APPROVAL CHAIN SYSTEM
+-- Added: 2025-10-10
+-- Phase 1 & 2: Tables and Stored Procedures
+-- =====================================================================
+
+-- ---------------------------------------------------------------------
+-- Table: tbl_user_esignature
+-- Purpose: Store user e-signature images for approval signing
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS tbl_user_esignature (
+    user_id VARCHAR(200) NOT NULL,
+    signature_path VARCHAR(255) NOT NULL COMMENT 'Relative path: uploads/esignatures/{user_id}_signature.png',
+    uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id),
+    CONSTRAINT fk_esignature_user FOREIGN KEY (user_id) 
+        REFERENCES tbl_user(user_id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+COMMENT='Stores user e-signature images for approval workflow';
+
+CREATE INDEX idx_esignature_updated ON tbl_user_esignature(updated_at);
+
+-- ---------------------------------------------------------------------
+-- Table: tbl_college_dean
+-- Purpose: Map Dean users to colleges (one active Dean per college)
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS tbl_college_dean (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    college_id INT NOT NULL,
+    dean_user_id VARCHAR(200) NOT NULL,
+    assigned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_active BOOLEAN DEFAULT TRUE COMMENT 'Only one active Dean per college',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_college_dean_college FOREIGN KEY (college_id) 
+        REFERENCES tbl_college(college_id) ON DELETE CASCADE,
+    CONSTRAINT fk_college_dean_user FOREIGN KEY (dean_user_id) 
+        REFERENCES tbl_user(user_id) ON DELETE CASCADE,
+    UNIQUE KEY uk_active_college_dean (college_id, is_active) 
+        COMMENT 'Ensures only one active Dean per college'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+COMMENT='Maps Dean users to colleges for auto-selection in approval chain';
+
+CREATE INDEX idx_college_dean_active ON tbl_college_dean(college_id, is_active);
+CREATE INDEX idx_college_dean_user ON tbl_college_dean(dean_user_id);
+
+-- Populate Dean assignments for colleges
+-- Assign Shamiah M Mendoza as Dean of SECA (School of Engineering, Computing and Architecture)
+INSERT INTO tbl_college_dean (college_id, dean_user_id, is_active) VALUES
+(3, 'CY4e1GmCXysMRn8VYudhqDy7CDJ8xVidGO1v8RnRj1E', TRUE);  -- Shamiah M Mendoza as Dean of SECA
+
+-- ---------------------------------------------------------------------
+-- Table: tbl_org_faculty_approvers
+-- Purpose: Store faculty selections for extra-curricular orgs
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS tbl_org_faculty_approvers (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    org_version_id INT NOT NULL COMMENT 'Links to organization application version',
+    faculty_user_id_1 VARCHAR(200) NOT NULL COMMENT 'First selected faculty approver',
+    faculty_user_id_2 VARCHAR(200) NOT NULL COMMENT 'Second selected faculty approver',
+    selected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    selected_by VARCHAR(200) NOT NULL COMMENT 'User who selected faculty (usually adviser)',
+    CONSTRAINT fk_faculty_org_version FOREIGN KEY (org_version_id) 
+        REFERENCES tbl_organization_version(org_version_id) ON DELETE CASCADE,
+    CONSTRAINT fk_faculty_1_user FOREIGN KEY (faculty_user_id_1) 
+        REFERENCES tbl_user(user_id) ON DELETE CASCADE,
+    CONSTRAINT fk_faculty_2_user FOREIGN KEY (faculty_user_id_2) 
+        REFERENCES tbl_user(user_id) ON DELETE CASCADE,
+    CONSTRAINT fk_faculty_selected_by FOREIGN KEY (selected_by) 
+        REFERENCES tbl_user(user_id) ON DELETE CASCADE,
+    UNIQUE KEY uk_org_faculty (org_version_id) 
+        COMMENT 'One faculty selection per organization version'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+COMMENT='Stores 2 faculty approver selections for extra-curricular organizations';
+
+CREATE INDEX idx_faculty_org ON tbl_org_faculty_approvers(org_version_id);
+CREATE INDEX idx_faculty_1 ON tbl_org_faculty_approvers(faculty_user_id_1);
+CREATE INDEX idx_faculty_2 ON tbl_org_faculty_approvers(faculty_user_id_2);
+
+-- ---------------------------------------------------------------------
+-- Table: tbl_organization_approval_chain
+-- Purpose: Complete approval chain with e-signature tracking
+-- Workflow: Pending → Received → Signed
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS tbl_organization_approval_chain (
+    chain_id INT AUTO_INCREMENT PRIMARY KEY,
+    application_id INT NOT NULL COMMENT 'FIXED: Link to application (not org_version_id which does not exist yet)',
+    period_id INT NULL COMMENT 'ADDED: Period/term ID for the application (FK to tbl_period)',
+    approver_user_id VARCHAR(200) NOT NULL COMMENT 'User who must approve this step',
+    approver_role_id INT NOT NULL COMMENT 'Role of approver (for context)',
+    approval_order INT NOT NULL COMMENT 'Sequence: 1=Adviser/Faculty1, 2=ProgramChair/Faculty2, 3=Dean, 4=SDAO_R2, etc.',
+    is_final_approval BOOLEAN DEFAULT FALSE COMMENT 'TRUE for SDAO Rank 2 (final) and Academic Director - use APPROVE instead of RECEIVE',
+    uses_endorsed BOOLEAN DEFAULT FALSE COMMENT 'TRUE for Dean, Program Chair, and Extra-Curricular Faculty - use ENDORSE instead of RECEIVE',
+    status ENUM('Pending', 'Endorsed', 'Received', 'Signed', 'Approved', 'Rejected') DEFAULT 'Pending' COMMENT 'Pending → Endorsed (Dean/ProgramChair/Faculty) OR Received (others) OR Approved (final) OR Rejected',
+    signature_path VARCHAR(255) NULL COMMENT 'Copy of e-signature used for this approval',
+    endorsed_at TIMESTAMP NULL COMMENT 'When approver clicked "Endorse"',
+    received_at TIMESTAMP NULL COMMENT 'When approver clicked "Receive"',
+    signed_at TIMESTAMP NULL COMMENT 'When approver clicked "Sign"',
+    approved_at TIMESTAMP NULL COMMENT 'When final approver clicked "Approve"',
+    remarks TEXT NULL COMMENT 'ADDED: Remarks from final approvers only (required for is_final_approval=TRUE)',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_approval_application FOREIGN KEY (application_id) 
+        REFERENCES tbl_application(application_id) ON DELETE CASCADE,
+    CONSTRAINT fk_approval_period FOREIGN KEY (period_id) 
+        REFERENCES tbl_period(period_id) ON DELETE SET NULL,
+    CONSTRAINT fk_approval_user FOREIGN KEY (approver_user_id) 
+        REFERENCES tbl_user(user_id) ON DELETE CASCADE,
+    CONSTRAINT fk_approval_role FOREIGN KEY (approver_role_id) 
+        REFERENCES tbl_role(role_id) ON DELETE CASCADE,
+    UNIQUE KEY uk_org_approval_order (application_id, approval_order) 
+        COMMENT 'Each order number appears once per application'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+COMMENT='Sequential approval chain: Pending → Received (non-final) OR Approved (final). Final approvers: SDAO Rank 2 (5th) & Academic Director (6th). FIXED: Uses application_id (not org_version_id)';
+
+CREATE INDEX idx_approval_application ON tbl_organization_approval_chain(application_id);
+CREATE INDEX idx_approval_period ON tbl_organization_approval_chain(period_id);
+CREATE INDEX idx_approval_user ON tbl_organization_approval_chain(approver_user_id);
+CREATE INDEX idx_approval_status ON tbl_organization_approval_chain(status);
+CREATE INDEX idx_approval_order ON tbl_organization_approval_chain(application_id, approval_order);
+
+-- ---------------------------------------------------------------------
+-- ALTER: tbl_organization_version
+-- Add adviser_contact_no field (required for applications)
+-- ---------------------------------------------------------------------
+ALTER TABLE tbl_organization_version 
+ADD COLUMN adviser_contact_no VARCHAR(20) NULL 
+    COMMENT 'Adviser contact number (required during application)' 
+    AFTER base_program_id;
+
+-- ---------------------------------------------------------------------
+-- ALTER: tbl_organization_members
+-- Add section_id for executive members (required for officers)
+-- ---------------------------------------------------------------------
+ALTER TABLE tbl_organization_members 
+ADD COLUMN section_id INT NULL 
+    COMMENT 'Section assignment for executive members (officers)' 
+    AFTER user_id;
+
+ALTER TABLE tbl_organization_members 
+ADD CONSTRAINT fk_member_section FOREIGN KEY (section_id) 
+    REFERENCES tbl_section(section_id) ON DELETE SET NULL;
+
+CREATE INDEX idx_member_section ON tbl_organization_members(section_id);
+
+-- =====================================================================
+-- E-SIGNATURE STORED PROCEDURES
+-- Added: 2025-10-10
+-- Phase 2: Complete set of 13 stored procedures
+-- =====================================================================
+DELIMITER //
+
+-- =====================================================================
+-- SECTION 1: E-SIGNATURE MANAGEMENT (3 SPs)
+-- =====================================================================
+
+-- ---------------------------------------------------------------------
+-- SP: sp_UploadESignature
+-- Purpose: Insert or update user's e-signature
+-- Returns: Success message with signature_path
+-- ---------------------------------------------------------------------
+DROP PROCEDURE IF EXISTS sp_UploadESignature//
+CREATE PROCEDURE sp_UploadESignature(
+    IN p_user_email VARCHAR(200),
+    IN p_signature_path VARCHAR(255)
+)
+BEGIN
+    DECLARE v_user_id VARCHAR(200);
+    DECLARE v_old_signature VARCHAR(255);
+    
+    -- Get user_id from email
+    SELECT user_id INTO v_user_id
+    FROM tbl_user
+    WHERE email = p_user_email
+    LIMIT 1;
+    
+    IF v_user_id IS NULL THEN
+        SELECT 
+            'error' as status,
+            NULL as signature_path,
+            NULL as old_signature_path,
+            'User not found' as message;
+    ELSE
+        -- Get old signature path if exists (for cleanup)
+        SELECT signature_path INTO v_old_signature
+        FROM tbl_user_esignature
+        WHERE user_id = v_user_id;
+        
+        -- Insert or update signature
+        INSERT INTO tbl_user_esignature (user_id, signature_path, uploaded_at, updated_at)
+        VALUES (v_user_id, p_signature_path, NOW(), NOW())
+        ON DUPLICATE KEY UPDATE 
+            signature_path = p_signature_path,
+            updated_at = NOW();
+        
+        -- Return result
+        SELECT 
+            'success' as status,
+            p_signature_path as signature_path,
+            v_old_signature as old_signature_path,
+            'E-signature uploaded successfully' as message;
+    END IF;
+END//
+
+-- ---------------------------------------------------------------------
+-- SP: sp_GetUserESignature
+-- Purpose: Fetch user's current e-signature
+-- Returns: Signature details or NULL if not exists
+-- ---------------------------------------------------------------------
+DROP PROCEDURE IF EXISTS sp_GetUserESignature//
+CREATE PROCEDURE sp_GetUserESignature(
+    IN p_user_email VARCHAR(200)
+)
+BEGIN
+    DECLARE v_user_id VARCHAR(200);
+    
+    -- Get user_id from email
+    SELECT user_id INTO v_user_id
+    FROM tbl_user
+    WHERE email = p_user_email
+    LIMIT 1;
+    
+    IF v_user_id IS NOT NULL THEN
+        SELECT 
+            user_id,
+            signature_path,
+            uploaded_at,
+            updated_at
+        FROM tbl_user_esignature
+        WHERE user_id = v_user_id;
+    END IF;
+END//
+
+-- ---------------------------------------------------------------------
+-- SP: sp_DeleteUserESignature
+-- Purpose: Remove user's e-signature from database
+-- Returns: Old signature path for file cleanup
+-- ---------------------------------------------------------------------
+DROP PROCEDURE IF EXISTS sp_DeleteUserESignature//
+CREATE PROCEDURE sp_DeleteUserESignature(
+    IN p_user_email VARCHAR(200)
+)
+BEGIN
+    DECLARE v_user_id VARCHAR(200);
+    DECLARE v_signature_path VARCHAR(255);
+    
+    -- Get user_id from email
+    SELECT user_id INTO v_user_id
+    FROM tbl_user
+    WHERE email = p_user_email
+    LIMIT 1;
+    
+    IF v_user_id IS NOT NULL THEN
+        -- Get signature path before deletion
+        SELECT signature_path INTO v_signature_path
+        FROM tbl_user_esignature
+        WHERE user_id = v_user_id;
+        
+        -- Delete signature record
+        DELETE FROM tbl_user_esignature
+        WHERE user_id = v_user_id;
+        
+        -- Return result
+        SELECT 
+            'success' as status,
+            v_signature_path as deleted_signature_path,
+            'E-signature deleted successfully' as message;
+    ELSE
+        SELECT 
+            'error' as status,
+            NULL as deleted_signature_path,
+            'User not found' as message;
+    END IF;
+END//
+
+-- =====================================================================
+-- SECTION 2: APPROVER LOOKUP (4 SPs)
+-- =====================================================================
+
+-- ---------------------------------------------------------------------
+-- SP: sp_GetFacultyByProgram
+-- Purpose: Fetch active Faculty users for program (extra-curricular)
+-- Returns: List of faculty with user details
+-- ---------------------------------------------------------------------
+DROP PROCEDURE IF EXISTS sp_GetFacultyByProgram//
+CREATE PROCEDURE sp_GetFacultyByProgram(
+    IN p_program_id INT
+)
+BEGIN
+    SELECT 
+        u.user_id,
+        u.email,
+        u.first_name,
+        u.last_name,
+        CONCAT(u.first_name, ' ', u.last_name) as full_name,
+        u.program_id,
+        p.program_name,
+        p.abbreviation as program_abbrev,
+        p.college_id,
+        c.college_name,
+        r.role_name
+    FROM tbl_user u
+    JOIN tbl_role r ON u.role_id = r.role_id
+    LEFT JOIN tbl_program p ON u.program_id = p.program_id
+    LEFT JOIN tbl_college c ON p.college_id = c.college_id
+    WHERE r.role_id = 7 -- Faculty role
+        AND u.status = 'Active'
+        AND (u.program_id = p_program_id OR u.program_id IS NULL) -- Program-specific or general faculty
+    ORDER BY u.last_name, u.first_name;
+END//
+
+-- ---------------------------------------------------------------------
+-- SP: sp_GetProgramChairByProgram
+-- Purpose: Fetch Program Chair for a given program
+-- Returns: Program Chair user details
+-- ---------------------------------------------------------------------
+DROP PROCEDURE IF EXISTS sp_GetProgramChairByProgram//
+CREATE PROCEDURE sp_GetProgramChairByProgram(
+    IN p_program_id INT
+)
+BEGIN
+    SELECT 
+        u.user_id,
+        u.email,
+        u.first_name,
+        u.last_name,
+        CONCAT(u.first_name, ' ', u.last_name) as full_name,
+        u.program_id,
+        p.program_name,
+        r.role_id,
+        r.role_name
+    FROM tbl_user u
+    JOIN tbl_role r ON u.role_id = r.role_id
+    JOIN tbl_program p ON u.program_id = p.program_id
+    WHERE u.program_id = p_program_id
+        AND (r.role_name LIKE '%Chair%' OR r.role_name LIKE '%Coordinator%')
+        AND u.status = 'Active'
+    LIMIT 1;
+END//
+
+-- ---------------------------------------------------------------------
+-- SP: sp_GetDeanByCollege
+-- Purpose: Fetch active Dean for a college using tbl_college_dean
+-- Returns: Dean user details
+-- ---------------------------------------------------------------------
+DROP PROCEDURE IF EXISTS sp_GetDeanByCollege//
+CREATE PROCEDURE sp_GetDeanByCollege(
+    IN p_college_id INT
+)
+BEGIN
+    SELECT 
+        u.user_id,
+        u.email,
+        u.first_name,
+        u.last_name,
+        CONCAT(u.first_name, ' ', u.last_name) as full_name,
+        c.college_id,
+        c.college_name,
+        c.abbreviation as college_abbrev,
+        r.role_id,
+        r.role_name,
+        cd.assigned_at
+    FROM tbl_college_dean cd
+    JOIN tbl_user u ON cd.dean_user_id = u.user_id
+    JOIN tbl_college c ON cd.college_id = c.college_id
+    JOIN tbl_role r ON u.role_id = r.role_id
+    WHERE cd.college_id = p_college_id
+        AND cd.is_active = TRUE
+        AND u.status = 'Active'
+    LIMIT 1;
+END//
+
+-- ---------------------------------------------------------------------
+-- SP: sp_GetCollegeByProgram
+-- Purpose: Get college_id for a program
+-- Returns: College details
+-- ---------------------------------------------------------------------
+DROP PROCEDURE IF EXISTS sp_GetCollegeByProgram//
+CREATE PROCEDURE sp_GetCollegeByProgram(
+    IN p_program_id INT
+)
+BEGIN
+    SELECT 
+        c.college_id,
+        c.college_name,
+        c.abbreviation as college_abbrev,
+        p.program_id,
+        p.program_name,
+        p.abbreviation as program_abbrev
+    FROM tbl_program p
+    JOIN tbl_college c ON p.college_id = c.college_id
+    WHERE p.program_id = p_program_id;
+END//
+
+-- =====================================================================
+-- SECTION 3: APPROVAL CHAIN MANAGEMENT (5 SPs)
+-- =====================================================================
+
+-- ---------------------------------------------------------------------
+-- SP: sp_CreateApprovalChain
+-- Purpose: Build complete approval chain for organization application
+-- Logic:
+--   Co-Curricular: Adviser â†’ Program Chair â†’ Dean â†’ SDAO R2 â†’ R1 â†’ R2 â†’ AD
+--   Extra-Curricular: Adviser â†’ Faculty1 â†’ Faculty2 â†’ SDAO R2 â†’ R1 â†’ R2 â†’ AD
+-- Returns: Success status with chain_count
+-- ---------------------------------------------------------------------
+DROP PROCEDURE IF EXISTS sp_CreateApprovalChain//
+CREATE PROCEDURE sp_CreateApprovalChain(
+    IN p_application_id INT,
+    IN p_initiated_by VARCHAR(200)
+)
+BEGIN
+    DECLARE v_period_id INT;
+    DECLARE v_category VARCHAR(50);
+    DECLARE v_base_program_id INT;
+    DECLARE v_college_id INT;
+    DECLARE v_program_chair_id VARCHAR(200);
+    DECLARE v_dean_id VARCHAR(200);
+    DECLARE v_sdao_rank2_id VARCHAR(200);
+    DECLARE v_sdao_rank1_id VARCHAR(200);
+    DECLARE v_academic_director_id VARCHAR(200);
+    DECLARE v_approval_order INT DEFAULT 0;
+    DECLARE v_program_chair_role_id INT;
+    DECLARE v_dean_role_id INT;
+    DECLARE v_sdao_role_id INT;
+    DECLARE v_academic_director_role_id INT;
+    DECLARE v_faculty_role_id INT DEFAULT 7;
+    DECLARE v_applicant_user_id VARCHAR(200);
+    DECLARE v_organization_id INT;
+    
+    -- Get application details from tbl_application and linked org_version
+    SELECT a.period_id, ov.category, ov.base_program_id, a.applicant_user_id
+    INTO v_period_id, v_category, v_base_program_id, v_applicant_user_id
+    FROM tbl_application a
+    JOIN tbl_organization_version ov ON a.org_version_id = ov.org_version_id
+    WHERE a.application_id = p_application_id
+    LIMIT 1;
+    
+    -- Get college_id from program
+    SELECT college_id INTO v_college_id
+    FROM tbl_program
+    WHERE program_id = v_base_program_id;
+    
+    -- Get role IDs
+    SELECT role_id INTO v_program_chair_role_id FROM tbl_role WHERE role_name LIKE '%Chair%' LIMIT 1;
+    SELECT role_id INTO v_dean_role_id FROM tbl_role WHERE role_name LIKE '%Dean%' LIMIT 1;
+    SELECT role_id INTO v_sdao_role_id FROM tbl_role WHERE role_name LIKE '%SDAO%' LIMIT 1;
+    SELECT role_id INTO v_academic_director_role_id FROM tbl_role WHERE role_name LIKE '%Academic Director%' OR role_name LIKE '%Director%' LIMIT 1;
+    
+    -- Auto-select approvers
+    SELECT user_id INTO v_program_chair_id 
+    FROM tbl_user u
+    JOIN tbl_role r ON u.role_id = r.role_id
+    WHERE u.program_id = v_base_program_id
+        AND (r.role_name LIKE '%Chair%' OR r.role_name LIKE '%Coordinator%')
+        AND u.status = 'Active'
+    LIMIT 1;
+    
+    SELECT dean_user_id INTO v_dean_id
+    FROM tbl_college_dean
+    WHERE college_id = v_college_id AND is_active = TRUE
+    LIMIT 1;
+    
+    SELECT u.user_id INTO v_sdao_rank2_id
+    FROM tbl_user u
+    JOIN tbl_role r ON u.role_id = r.role_id
+    JOIN tbl_sdao_approver sa ON u.user_id = sa.user_id
+    WHERE r.role_name LIKE '%SDAO%'
+        AND sa.sdao_rank = 2
+        AND u.status = 'Active'
+    LIMIT 1;
+    
+    SELECT u.user_id INTO v_sdao_rank1_id
+    FROM tbl_user u
+    JOIN tbl_role r ON u.role_id = r.role_id
+    JOIN tbl_sdao_approver sa ON u.user_id = sa.user_id
+    WHERE r.role_name LIKE '%SDAO%'
+        AND sa.sdao_rank = 1
+        AND u.status = 'Active'
+    LIMIT 1;
+    
+    SELECT user_id INTO v_academic_director_id
+    FROM tbl_user u
+    JOIN tbl_role r ON u.role_id = r.role_id
+    WHERE (r.role_name LIKE '%Academic Director%' OR r.role_name LIKE '%Director%')
+        AND u.status = 'Active'
+    LIMIT 1;
+    
+    -- Clear existing chain (if any)
+    DELETE FROM tbl_organization_approval_chain WHERE application_id = p_application_id;
+    
+    -- Build approval chain based on category
+    IF v_category LIKE '%Co-Curricular%' THEN
+        -- Co-Curricular Chain: Program Chair → Dean → SDAO Rank 2 → SDAO Rank 1 → SDAO Rank 2 (Final) → Academic Director
+        -- NOTE: Adviser is NOT included in approval process
+        SET v_approval_order = 0;
+        
+        IF v_program_chair_id IS NOT NULL THEN
+            SET v_approval_order = v_approval_order + 1;
+            INSERT INTO tbl_organization_approval_chain 
+                (application_id, period_id, approver_user_id, approver_role_id, approval_order, uses_endorsed, status)
+            VALUES 
+                (p_application_id, v_period_id, v_program_chair_id, v_program_chair_role_id, v_approval_order, TRUE, 'Pending');
+        END IF;
+        
+        IF v_dean_id IS NOT NULL THEN
+            SET v_approval_order = v_approval_order + 1;
+            INSERT INTO tbl_organization_approval_chain 
+                (application_id, period_id, approver_user_id, approver_role_id, approval_order, uses_endorsed, status)
+            VALUES 
+                (p_application_id, v_period_id, v_dean_id, v_dean_role_id, v_approval_order, TRUE, 'Pending');
+        END IF;
+        
+    ELSE
+        -- Extra-Curricular Chain: (Faculty will be added via submitFacultySelection) → SDAO → Director
+        -- NOTE: Adviser is NOT included in approval process
+        -- Initial chain is empty, faculty selection will add first approvers
+        SET v_approval_order = 0;
+        
+        IF v_dean_id IS NOT NULL THEN
+            SET v_approval_order = v_approval_order + 1;
+            INSERT INTO tbl_organization_approval_chain 
+                (application_id, period_id, approver_user_id, approver_role_id, approval_order, uses_endorsed, status)
+            VALUES 
+                (p_application_id, v_period_id, v_dean_id, v_dean_role_id, v_approval_order, TRUE, 'Pending');
+        END IF;
+    END IF;
+    
+    -- Common approvers for both categories (SDAO â†’ Academic Director)
+    IF v_sdao_rank2_id IS NOT NULL THEN
+        SET v_approval_order = v_approval_order + 1;
+        INSERT INTO tbl_organization_approval_chain 
+            (application_id, period_id, approver_user_id, approver_role_id, approval_order, status)
+        VALUES 
+            (p_application_id, v_period_id, v_sdao_rank2_id, v_sdao_role_id, v_approval_order, 'Pending');
+    END IF;
+    
+    IF v_sdao_rank1_id IS NOT NULL THEN
+        SET v_approval_order = v_approval_order + 1;
+        INSERT INTO tbl_organization_approval_chain 
+            (application_id, period_id, approver_user_id, approver_role_id, approval_order, status)
+        VALUES 
+            (p_application_id, v_period_id, v_sdao_rank1_id, v_sdao_role_id, v_approval_order, 'Pending');
+    END IF;
+    
+    -- SDAO Rank 2 Final (same as first SDAO) - MARKED AS FINAL APPROVAL
+    IF v_sdao_rank2_id IS NOT NULL THEN
+        SET v_approval_order = v_approval_order + 1;
+        INSERT INTO tbl_organization_approval_chain 
+            (application_id, period_id, approver_user_id, approver_role_id, approval_order, is_final_approval, status)
+        VALUES 
+            (p_application_id, v_period_id, v_sdao_rank2_id, v_sdao_role_id, v_approval_order, TRUE, 'Pending');
+    END IF;
+    
+    -- Academic Director - MARKED AS FINAL APPROVAL
+    IF v_academic_director_id IS NOT NULL THEN
+        SET v_approval_order = v_approval_order + 1;
+        INSERT INTO tbl_organization_approval_chain 
+            (application_id, period_id, approver_user_id, approver_role_id, approval_order, is_final_approval, status)
+        VALUES 
+            (p_application_id, v_period_id, v_academic_director_id, v_academic_director_role_id, v_approval_order, TRUE, 'Pending');
+    END IF;
+    
+    -- No return result - this is an internal procedure
+    -- The calling procedure will return its own result
+END//
+
+-- ---------------------------------------------------------------------
+-- SP: sp_MarkApprovalReceived
+-- Purpose: Update approval step when approver receives notification
+-- Returns: Success status
+-- ---------------------------------------------------------------------
+DROP PROCEDURE IF EXISTS sp_MarkApprovalReceived//
+CREATE PROCEDURE sp_MarkApprovalReceived(
+    IN p_chain_id INT,
+    IN p_user_id VARCHAR(200)
+)
+BEGIN
+    DECLARE v_current_status VARCHAR(20);
+    DECLARE v_user_signature VARCHAR(255);
+    
+    -- Check if user has e-signature uploaded
+    SELECT signature_path INTO v_user_signature
+    FROM tbl_user_esignature
+    WHERE user_id = p_user_id;
+    
+    IF v_user_signature IS NULL THEN
+        SELECT 
+            'error' as status,
+            'You must upload your e-signature before you can receive approvals. Please go to your profile and upload your e-signature.' as message,
+            p_chain_id as chain_id;
+    ELSE
+        -- Check current status
+        SELECT status INTO v_current_status
+        FROM tbl_organization_approval_chain
+        WHERE chain_id = p_chain_id AND approver_user_id = p_user_id;
+        
+        -- Only update if currently Pending
+        IF v_current_status = 'Pending' THEN
+            UPDATE tbl_organization_approval_chain
+            SET status = 'Received',
+                received_at = NOW()
+            WHERE chain_id = p_chain_id AND approver_user_id = p_user_id;
+            
+            SELECT 
+                'success' as status,
+                'Approval marked as received' as message,
+                p_chain_id as chain_id;
+        ELSE
+            SELECT 
+                'error' as status,
+                CONCAT('Cannot receive - current status is ', v_current_status) as message,
+                p_chain_id as chain_id;
+        END IF;
+    END IF;
+END//
+
+-- ---------------------------------------------------------------------
+-- SP: sp_ReceiveAndSignApproval
+-- Purpose: Combined action - Mark as Received and apply e-signature in ONE step
+-- Validations:
+--   1. User has e-signature uploaded
+--   2. Current status is 'Pending'
+--   3. User is the assigned approver
+-- Returns: Success/error with message
+-- ---------------------------------------------------------------------
+DROP PROCEDURE IF EXISTS sp_ReceiveAndSignApproval//
+CREATE PROCEDURE sp_ReceiveAndSignApproval(
+    IN p_chain_id INT,
+    IN p_user_email VARCHAR(200),
+    IN p_notes TEXT
+)
+BEGIN
+    DECLARE v_user_id VARCHAR(200);
+    DECLARE v_user_signature VARCHAR(255);
+    DECLARE v_current_status VARCHAR(20);
+    DECLARE v_approval_order INT;
+    DECLARE v_application_id INT;
+    DECLARE v_approver_id VARCHAR(200);
+    DECLARE v_approval_signature_path VARCHAR(255);
+    DECLARE v_uses_endorsed BOOLEAN;
+    DECLARE v_new_status VARCHAR(20);
+    
+    -- Get user_id from email
+    SELECT user_id INTO v_user_id
+    FROM tbl_user
+    WHERE email = p_user_email
+    LIMIT 1;
+    
+    IF v_user_id IS NULL THEN
+        SELECT 
+            'error' as status,
+            'User not found' as message;
+    ELSE
+        -- Check if user has e-signature
+        SELECT signature_path INTO v_user_signature
+        FROM tbl_user_esignature
+        WHERE user_id = v_user_id;
+        
+        IF v_user_signature IS NULL THEN
+            SELECT 
+                'error' as status,
+                'Please upload your e-signature first. Go to your profile to upload.' as message;
+        ELSE
+            -- Get current approval details (FIXED: use application_id not org_version_id)
+            SELECT status, approval_order, application_id, approver_user_id, uses_endorsed
+            INTO v_current_status, v_approval_order, v_application_id, v_approver_id, v_uses_endorsed
+            FROM tbl_organization_approval_chain
+            WHERE chain_id = p_chain_id;
+            
+            -- Check if any step in this application's approval chain is already rejected
+            IF EXISTS (
+                SELECT 1 FROM tbl_organization_approval_chain
+                WHERE application_id = v_application_id
+                AND status = 'Rejected'
+            ) THEN
+                SELECT 
+                    'error' as status,
+                    'This application has been rejected and cannot be approved further. Please contact the applicant to resubmit.' as message;
+                SELECT 
+                    'error' as status,
+                    'This application has been rejected and cannot be approved further. Please contact the applicant to resubmit.' as message;
+            -- Determine status based on uses_endorsed flag
+            ELSE
+                SET v_new_status = IF(v_uses_endorsed = TRUE, 'Endorsed', 'Received');
+                
+                -- Validate user is the assigned approver
+                -- Validate user is the assigned approver
+                IF v_approver_id != v_user_id THEN
+                SELECT 
+                    'error' as status,
+                    'You are not authorized to receive this approval' as message;
+            -- Check if current step is Pending
+            ELSEIF v_current_status IS NULL THEN
+                SELECT 
+                    'error' as status,
+                    'Approval chain step not found' as message;
+            ELSEIF v_current_status != 'Pending' THEN
+                SELECT 
+                    'error' as status,
+                    CONCAT('Cannot receive - current status is ', v_current_status) as message;
+            ELSE
+                -- Just use the user's signature filename directly (no copying needed)
+                -- Extract just the filename from the path
+                SET v_approval_signature_path = SUBSTRING_INDEX(v_user_signature, '/', -1);
+                
+                -- Update approval chain: Mark as Endorsed OR Received based on uses_endorsed flag
+                IF v_uses_endorsed = TRUE THEN
+                    UPDATE tbl_organization_approval_chain
+                    SET status = 'Endorsed',
+                        endorsed_at = NOW(),
+                        signature_path = v_approval_signature_path,
+                        remarks = p_notes
+                    WHERE chain_id = p_chain_id AND approver_user_id = v_user_id;
+                ELSE
+                    UPDATE tbl_organization_approval_chain
+                    SET status = 'Received',
+                        received_at = NOW(),
+                        signature_path = v_approval_signature_path,
+                        remarks = p_notes
+                    WHERE chain_id = p_chain_id AND approver_user_id = v_user_id;
+                END IF;
+                
+                SELECT 
+                    'success' as status,
+                    CONCAT('Approval ', v_new_status, ' and e-signature applied successfully') as message,
+                    p_chain_id as chain_id,
+                    v_approval_signature_path as signature_filename,
+                    v_new_status as action_type;
+            END IF;
+            END IF;
+        END IF;
+    END IF;
+END//
+
+-- ---------------------------------------------------------------------
+-- SP: sp_SignApprovalStep
+-- Purpose: Process e-signature approval with validations
+-- Validations:
+--   1. User has e-signature uploaded
+--   2. Previous steps are all signed (sequential enforcement)
+--   3. Current step status is 'Received'
+-- Returns: Success/error with message
+-- ---------------------------------------------------------------------
+DROP PROCEDURE IF EXISTS sp_SignApprovalStep//
+CREATE PROCEDURE sp_SignApprovalStep(
+    IN p_chain_id INT,
+    IN p_user_id VARCHAR(200),
+    IN p_notes TEXT
+)
+BEGIN
+    DECLARE v_user_signature VARCHAR(255);
+    DECLARE v_current_status VARCHAR(20);
+    DECLARE v_approval_order INT;
+    DECLARE v_application_id INT;
+    DECLARE v_previous_unsigned INT;
+    DECLARE v_approval_signature_path VARCHAR(255);
+    
+    -- Check if user has e-signature
+    SELECT signature_path INTO v_user_signature
+    FROM tbl_user_esignature
+    WHERE user_id = p_user_id;
+    
+    IF v_user_signature IS NULL THEN
+        SELECT 
+            'error' as status,
+            'Please upload your e-signature first' as message;
+    ELSE
+        -- Get current approval details (FIXED: use application_id not org_version_id)
+        SELECT status, approval_order, application_id, approver_user_id
+        INTO v_current_status, v_approval_order, v_application_id, @check_user_id
+        FROM tbl_organization_approval_chain
+        WHERE chain_id = p_chain_id;
+        
+        -- Validate that the requesting user is the assigned approver
+        IF @check_user_id != p_user_id THEN
+            SELECT 
+                'error' as status,
+                'You are not authorized to sign this approval step' as message;
+        -- Check if current step status allows signing (Pending, Endorsed, or Received)
+        ELSEIF v_current_status IS NULL THEN
+            SELECT 
+                'error' as status,
+                'Approval chain step not found' as message;
+        ELSEIF v_current_status NOT IN ('Pending', 'Endorsed', 'Received') THEN
+            SELECT 
+                'error' as status,
+                CONCAT('Cannot sign - current status is ', v_current_status) as message;
+        ELSE
+            -- Check if previous steps are all signed (FIXED: use application_id not org_version_id)
+            SELECT COUNT(*) INTO v_previous_unsigned
+            FROM tbl_organization_approval_chain
+            WHERE application_id = v_application_id
+                AND approval_order < v_approval_order
+                AND status != 'Signed';
+            
+            IF v_previous_unsigned > 0 THEN
+                SELECT 
+                    'error' as status,
+                    'Cannot sign - previous approval steps must be signed first' as message;
+            ELSE
+                -- Create approval signature path (FIXED: use application_id not org_version_id)
+                SET v_approval_signature_path = CONCAT('app', v_application_id, '_chain', p_chain_id, '_', REPLACE(REPLACE(p_user_id, '@', '_at_'), '.', '_'), '.png');
+                
+                -- Update approval chain
+                UPDATE tbl_organization_approval_chain
+                SET status = 'Signed',
+                    signed_at = NOW(),
+                    signature_path = v_approval_signature_path,
+                    remarks = p_notes
+                WHERE chain_id = p_chain_id AND approver_user_id = p_user_id;
+                
+                SELECT 
+                    'success' as status,
+                    'Approval signed successfully' as message,
+                    p_chain_id as chain_id,
+                    v_user_signature as user_signature_path,
+                    v_approval_signature_path as approval_signature_path,
+                    'Copy user signature to approval signature path' as action_required;
+            END IF;
+        END IF;
+    END IF;
+END//
+
+-- ---------------------------------------------------------------------
+-- SP: sp_ApproveApprovalStep
+-- Purpose: Process FINAL APPROVAL for approvers with is_final_approval=TRUE
+-- Validations:
+--   1. User has e-signature uploaded
+--   2. User is a final approver (is_final_approval = TRUE)
+--   3. Previous steps are complete
+--   4. Current step status is 'Pending'
+-- Action: Sets status to 'Approved' (NOT 'Received')
+-- Returns: Success/error with message
+-- ---------------------------------------------------------------------
+DROP PROCEDURE IF EXISTS sp_ApproveApprovalStep//
+CREATE PROCEDURE sp_ApproveApprovalStep(
+    IN p_chain_id INT,
+    IN p_user_id VARCHAR(200),
+    IN p_notes TEXT
+)
+BEGIN
+    DECLARE v_user_signature VARCHAR(255);
+    DECLARE v_current_status VARCHAR(20);
+    DECLARE v_approval_order INT;
+    DECLARE v_application_id INT;
+    DECLARE v_is_final BOOLEAN;
+    DECLARE v_previous_incomplete INT;
+    DECLARE v_approval_signature_path VARCHAR(255);
+    DECLARE v_approver_role_name VARCHAR(100);
+    
+    -- Check if user has e-signature
+    SELECT signature_path INTO v_user_signature
+    FROM tbl_user_esignature
+    WHERE user_id = p_user_id;
+    
+    IF v_user_signature IS NULL THEN
+        SELECT 
+            'error' as status,
+            'Please upload your e-signature first' as message;
+    ELSE
+        -- Get current approval details (FIXED: use application_id not org_version_id)
+        SELECT status, approval_order, application_id, is_final_approval
+        INTO v_current_status, v_approval_order, v_application_id, v_is_final
+        FROM tbl_organization_approval_chain
+        WHERE chain_id = p_chain_id AND approver_user_id = p_user_id;
+        
+        -- Validate this is a final approval step
+        IF v_is_final != TRUE THEN
+            SELECT 
+                'error' as status,
+                'This approval step requires RECEIVE action, not APPROVE. Only final approvers can use APPROVE.' as message;
+        ELSEIF v_current_status != 'Pending' THEN
+            SELECT 
+                'error' as status,
+                CONCAT('Cannot approve - current status is ', v_current_status) as message;
+        ELSE
+            -- Check if previous steps are complete (FIXED: use application_id not org_version_id)
+            SELECT COUNT(*) INTO v_previous_incomplete
+            FROM tbl_organization_approval_chain
+            WHERE application_id = v_application_id
+                AND approval_order < v_approval_order
+                AND status = 'Pending';
+            
+            IF v_previous_incomplete > 0 THEN
+                SELECT 
+                    'error' as status,
+                    'Cannot approve - previous approval steps must be completed first' as message;
+            ELSE
+                -- Create approval signature path (FIXED: use application_id not org_version_id)
+                SET v_approval_signature_path = CONCAT('app', v_application_id, '_chain', p_chain_id, '_', REPLACE(REPLACE(p_user_id, '@', '_at_'), '.', '_'), '.png');
+                
+                -- Update approval chain to APPROVED status
+                UPDATE tbl_organization_approval_chain
+                SET status = 'Approved',
+                    approved_at = NOW(),
+                    signature_path = v_approval_signature_path,
+                    remarks = p_notes
+                WHERE chain_id = p_chain_id AND approver_user_id = p_user_id;
+                
+                -- Get approver role
+                SELECT r.role_name INTO v_approver_role_name
+                FROM tbl_organization_approval_chain ac
+                JOIN tbl_role r ON ac.approver_role_id = r.role_id
+                WHERE ac.chain_id = p_chain_id;
+                
+                -- If this is Academic Director (last approver), mark application as approved
+                IF v_approver_role_name LIKE '%Academic Director%' OR v_approver_role_name LIKE '%Director%' THEN
+                    UPDATE tbl_organization_version
+                    SET approval_status = 'Approved'
+                    WHERE org_version_id = v_org_version_id;
+                END IF;
+                
+                -- Unlock next approver (if exists)
+                UPDATE tbl_organization_approval_chain
+                SET status = 'Pending'
+                WHERE org_version_id = v_org_version_id
+                    AND approval_order = v_approval_order + 1
+                    AND status = 'Locked';
+                
+                SELECT 
+                    'success' as status,
+                    'Application approved successfully!' as message,
+                    p_chain_id as chain_id,
+                    v_user_signature as user_signature_path,
+                    v_approval_signature_path as approval_signature_path,
+                    v_approver_role_name as approver_role,
+                    'Copy user signature to approval signature path' as action_required;
+            END IF;
+        END IF;
+    END IF;
+END//
+
+-- ---------------------------------------------------------------------
+-- SP: sp_SubmitFacultySelection (NEW)
+-- Purpose: Create approval chain for extra-curricular applications
+-- Parameters: application_id, period_id, faculty1_id, faculty2_id
+-- Creates: 6 approval chain records (2 faculty + 4 administrators)
+-- ---------------------------------------------------------------------
+DROP PROCEDURE IF EXISTS sp_SubmitFacultySelection//
+CREATE PROCEDURE sp_SubmitFacultySelection(
+    IN p_application_id INT,
+    IN p_period_id INT,
+    IN p_faculty1_id VARCHAR(200),
+    IN p_faculty2_id VARCHAR(200)
+)
+BEGIN
+    DECLARE v_sdao_rank2_id VARCHAR(200);
+    DECLARE v_sdao_rank1_id VARCHAR(200);
+    DECLARE v_academic_director_id VARCHAR(200);
+    DECLARE v_sdao_rank2_role_id INT;
+    DECLARE v_sdao_rank1_role_id INT;
+    DECLARE v_academic_director_role_id INT;
+    DECLARE v_faculty_role_id INT;
+    
+    -- Get faculty role_id
+    SELECT role_id INTO v_faculty_role_id 
+    FROM tbl_role 
+    WHERE role_name = 'Faculty' LIMIT 1;
+    
+    -- Get SDAO Rank 2 user
+    SELECT u.user_id, u.role_id 
+    INTO v_sdao_rank2_id, v_sdao_rank2_role_id
+    FROM tbl_user u
+    JOIN tbl_role r ON u.role_id = r.role_id
+    WHERE r.role_name = 'SDAO' 
+      AND u.rank_level = 2
+    LIMIT 1;
+    
+    -- Get SDAO Rank 1 user
+    SELECT u.user_id, u.role_id 
+    INTO v_sdao_rank1_id, v_sdao_rank1_role_id
+    FROM tbl_user u
+    JOIN tbl_role r ON u.role_id = r.role_id
+    WHERE r.role_name = 'SDAO' 
+      AND u.rank_level = 1
+    LIMIT 1;
+    
+    -- Get Academic Director
+    SELECT u.user_id, u.role_id 
+    INTO v_academic_director_id, v_academic_director_role_id
+    FROM tbl_user u
+    JOIN tbl_role r ON u.role_id = r.role_id
+    WHERE r.role_name = 'Academic Director'
+    LIMIT 1;
+    
+    -- Insert 6 approval chain records
+    INSERT INTO tbl_organization_approval_chain 
+        (application_id, period_id, approver_user_id, approver_role_id, approval_order, uses_endorsed, is_final_approval, status, remarks) 
+    VALUES
+        -- Faculty 1 (order 1) - starts as 'Received' - ENDORSER
+        (p_application_id, p_period_id, p_faculty1_id, v_faculty_role_id, 1, TRUE, FALSE, 'Received', NULL),
+        
+        -- Faculty 2 (order 2) - starts as 'Pending' - ENDORSER
+        (p_application_id, p_period_id, p_faculty2_id, v_faculty_role_id, 2, TRUE, FALSE, 'Pending', NULL),
+        
+        -- SDAO Rank 2 (order 3) - first time, not final - RECEIVER
+        (p_application_id, p_period_id, v_sdao_rank2_id, v_sdao_rank2_role_id, 3, FALSE, FALSE, 'Pending', NULL),
+        
+        -- SDAO Rank 1 (order 4) - RECEIVER
+        (p_application_id, p_period_id, v_sdao_rank1_id, v_sdao_rank1_role_id, 4, FALSE, FALSE, 'Pending', NULL),
+        
+        -- SDAO Rank 2 (order 5) - FINAL APPROVAL #1 - RECEIVER
+        (p_application_id, p_period_id, v_sdao_rank2_id, v_sdao_rank2_role_id, 5, FALSE, TRUE, 'Pending', NULL),
+        
+        -- Academic Director (order 6) - FINAL APPROVAL #2 - RECEIVER
+        (p_application_id, p_period_id, v_academic_director_id, v_academic_director_role_id, 6, FALSE, TRUE, 'Pending', NULL);
+    
+    SELECT 'Faculty selection submitted successfully' as message;
+END//
+
+-- ---------------------------------------------------------------------
+-- SP: sp_ApproveApplicationStep (NEW)
+-- Purpose: Approve an approval chain step (Sign or Approve)
+-- Parameters: chain_id, remarks (optional, only for final approvers)
+-- Logic:
+--   - Non-final approvers: status → 'Signed', no remarks
+--   - Final approvers: status → 'Approved', save remarks
+--   - Unlock next approver in chain
+--   - If all final approvers done: application_tbl.status → 'Approved'
+-- ---------------------------------------------------------------------
+
+DROP PROCEDURE IF EXISTS sp_ApproveApplicationStep//
+CREATE PROCEDURE sp_ApproveApplicationStep(
+    IN p_chain_id INT,
+    IN p_remarks TEXT
+)
+BEGIN
+    DECLARE v_application_id INT;
+    DECLARE v_is_final BOOLEAN;
+    DECLARE v_approval_order INT;
+    DECLARE v_next_order INT;
+    DECLARE v_remaining_final INT;
+    DECLARE v_org_id INT DEFAULT NULL;
+    DECLARE v_org_version_id INT DEFAULT NULL;
+    DECLARE v_org_name VARCHAR(255) DEFAULT NULL;
+    DECLARE v_org_logo VARCHAR(500) DEFAULT NULL;
+    
+    -- Get approval chain details
+    SELECT application_id, is_final_approval, approval_order
+    INTO v_application_id, v_is_final, v_approval_order
+    FROM tbl_organization_approval_chain
+    WHERE chain_id = p_chain_id;
+    
+    -- Update current approval step
+    IF v_is_final = TRUE THEN
+
+        UPDATE tbl_organization_approval_chain 
+        SET status = 'Approved', 
+            approved_at = NOW(),
+            remarks = p_remarks
+        WHERE chain_id = p_chain_id;
+        
+        -- Check if ALL final approvers are done
+        SELECT COUNT(*) INTO v_remaining_final
+        FROM tbl_organization_approval_chain 
+        WHERE application_id = v_application_id 
+          AND is_final_approval = TRUE 
+          AND status != 'Approved';
+        
+        -- If ALL final approvers done, approve application
+        IF v_remaining_final = 0 THEN
+            UPDATE tbl_application 
+            SET status = 'Approved'
+            WHERE application_id = v_application_id;
+            
+            -- Call ApproveApplication to create the organization
+            -- This will:
+            -- 1. Create tbl_organization entry
+            -- 2. Create tbl_organization_version
+            -- 3. Create executives and members
+            -- 4. Create renewal cycle
+            -- 5. Distribute executives to their respective tables
+            CALL ApproveApplication(    
+                (SELECT chain_id FROM tbl_organization_approval_chain 
+                 WHERE application_id = v_application_id 
+                 AND is_final_approval = TRUE 
+                 ORDER BY approval_order DESC LIMIT 1),
+                p_remarks,  -- Pass remarks as comment parameter
+                NULL,  -- p_organization_id (will be determined by procedure)
+                v_application_id
+            );
+            
+            -- Get organization details for backend post-processing
+            SELECT o.organization_id, o.current_org_version_id, o.name, o.logo
+            INTO v_org_id, v_org_version_id, v_org_name, v_org_logo
+            FROM tbl_application a
+            JOIN tbl_organization o ON a.organization_id = o.organization_id
+            WHERE a.application_id = v_application_id
+            LIMIT 1;
+            
+            -- Return success with organization data for backend processing
+            SELECT 
+                'Application fully approved - organization created successfully' as message,
+                TRUE as organization_created,
+                v_org_id as organization_id,
+                v_org_version_id as org_version_id,
+                v_org_name as organization_name,
+                v_org_logo as organization_logo,
+                v_application_id as application_id;
+        ELSE
+            SELECT 
+                'Final approval recorded - waiting for other final approver(s)' as message,
+                FALSE as organization_created,
+                NULL as organization_id,
+                NULL as org_version_id,
+                NULL as organization_name,
+                NULL as organization_logo,
+                v_application_id as application_id;
+        END IF;
+    ELSE
+    
+        UPDATE tbl_organization_approval_chain 
+        SET status = 'Signed', 
+            signed_at = NOW()
+        WHERE chain_id = p_chain_id;
+        
+        -- Do NOT unlock next approver automatically
+        -- They will proceed when they click their own action button
+        -- (Endorse, Mark as Received, or Mark as Approved)
+        
+        SELECT 
+            'Approval signed successfully' as message,
+            FALSE as organization_created,
+            NULL as organization_id,
+            NULL as org_version_id,
+            NULL as organization_name,
+            NULL as organization_logo,
+            v_application_id as application_id;
+    END IF;
+END//
+
+-- ---------------------------------------------------------------------
+-- SP: sp_GetApprovalChain (UPDATED)
+-- Purpose: Get full approval chain for an application
+-- Parameters: application_id (changed from org_version_id)
+-- Returns: All approval chain records with user details
+-- ---------------------------------------------------------------------
+DROP PROCEDURE IF EXISTS sp_GetApprovalChain//
+CREATE PROCEDURE sp_GetApprovalChain(
+    IN p_application_id INT
+)
+BEGIN
+    SELECT 
+        ac.chain_id,
+        ac.application_id,
+        ac.period_id,
+        ac.approver_user_id,
+        ac.approver_role_id,
+        ac.approval_order,
+        ac.is_final_approval,
+        ac.uses_endorsed,
+        ac.status,
+        ac.remarks,
+        ac.signature_path,
+        ac.received_at,
+        ac.endorsed_at,
+        ac.signed_at,
+        ac.approved_at,
+        ac.created_at,
+        u.f_name,
+        u.l_name,
+        CONCAT(u.f_name, ' ', u.l_name) as approver_name,
+        u.email as approver_email,
+        r.role_name as approver_role,
+        CASE 
+            WHEN ues.signature_path IS NOT NULL THEN TRUE
+            ELSE FALSE
+        END as has_signature,
+        CASE 
+            WHEN ac.status = 'Pending' THEN 'Waiting for previous approver'
+            WHEN ac.status = 'Endorsed' THEN 'Endorsed by approver'
+            WHEN ac.status = 'Received' THEN 'Ready to approve'
+            WHEN ac.status = 'Signed' THEN 'Signed (non-final)'
+            WHEN ac.status = 'Approved' THEN 'Approved (FINAL)'
+            ELSE ac.status
+        END as status_description
+    FROM tbl_organization_approval_chain ac
+    JOIN tbl_user u ON ac.approver_user_id = u.user_id
+    JOIN tbl_role r ON ac.approver_role_id = r.role_id
+    LEFT JOIN tbl_user_esignature ues ON u.user_id = ues.user_id
+    WHERE ac.application_id = p_application_id
+    ORDER BY ac.approval_order ASC;
+END//
+
+-- ---------------------------------------------------------------------
+-- SP: sp_ValidateApprovalChain (UPDATED)
+-- Purpose: Check if approval chain is complete
+-- Parameters: application_id (changed from org_version_id)
+-- ---------------------------------------------------------------------
+DROP PROCEDURE IF EXISTS sp_ValidateApprovalChain//
+CREATE PROCEDURE sp_ValidateApprovalChain(
+    IN p_application_id INT
+)
+BEGIN
+    DECLARE v_total_steps INT;
+    DECLARE v_approved_final_steps INT;
+    DECLARE v_total_final_steps INT;
+    DECLARE v_is_complete BOOLEAN;
+    
+    -- Count total approval steps
+    SELECT COUNT(*) INTO v_total_steps
+    FROM tbl_organization_approval_chain
+    WHERE application_id = p_application_id;
+    
+    -- Count total final approval steps
+    SELECT COUNT(*) INTO v_total_final_steps
+    FROM tbl_organization_approval_chain
+    WHERE application_id = p_application_id 
+      AND is_final_approval = TRUE;
+    
+    -- Count approved final steps
+    SELECT COUNT(*) INTO v_approved_final_steps
+    FROM tbl_organization_approval_chain
+    WHERE application_id = p_application_id 
+      AND is_final_approval = TRUE 
+      AND status = 'Approved';
+    
+    -- Approval chain is complete when ALL final approvers have approved
+    SET v_is_complete = (v_approved_final_steps = v_total_final_steps);
+    
+    SELECT 
+        v_is_complete as is_complete,
+        v_total_steps as total_steps,
+        v_total_final_steps as total_final_steps,
+        v_approved_final_steps as approved_final_steps,
+        (v_total_final_steps - v_approved_final_steps) as remaining_final_approvals;
+END//
+
+-- ---------------------------------------------------------------------
+-- SP: sp_GetMyPendingApprovals
+-- Purpose: Fetch all pending approvals for a user
+-- Returns: List of approvals where user is next approver
+-- ---------------------------------------------------------------------
+DROP PROCEDURE IF EXISTS sp_GetMyPendingApprovals//
+CREATE PROCEDURE sp_GetMyPendingApprovals(
+    IN p_user_id VARCHAR(200)
+)
+BEGIN
+    SELECT 
+        ac.chain_id,
+        ac.org_version_id,
+        ac.approval_order,
+        ac.status,
+        ac.created_at,
+        ov.name as org_name,
+        ov.category,
+        ov.base_program_id,
+        p.program_name,
+        p.abbreviation as program_abbrev,
+        -- Check if previous step is signed
+        (SELECT COUNT(*) 
+         FROM tbl_organization_approval_chain ac2
+         WHERE ac2.org_version_id = ac.org_version_id
+           AND ac2.approval_order < ac.approval_order
+           AND ac2.status != 'Signed'
+        ) as previous_unsigned_count,
+        -- Check if user has e-signature
+        (SELECT COUNT(*) FROM tbl_user_esignature WHERE user_id = p_user_id) as has_signature
+    FROM tbl_organization_approval_chain ac
+    JOIN tbl_organization_version ov ON ac.org_version_id = ov.org_version_id
+    LEFT JOIN tbl_program p ON ov.base_program_id = p.program_id
+    WHERE ac.approver_user_id = p_user_id
+        AND ac.status IN ('Pending', 'Received')
+    ORDER BY ac.created_at DESC, ac.approval_order ASC;
+END//
+
+DELIMITER ;
+
+-- =====================================================================
+-- VERIFICATION QUERIES
+-- =====================================================================
+
+-- List all stored procedures created
+SELECT 
+    ROUTINE_NAME,
+    ROUTINE_TYPE,
+    DTD_IDENTIFIER as RETURN_TYPE,
+    CREATED,
+    LAST_ALTERED
+FROM information_schema.ROUTINES
+WHERE ROUTINE_SCHEMA = DATABASE()
+    AND ROUTINE_NAME LIKE 'sp_%Signature%'
+       OR ROUTINE_NAME LIKE 'sp_%Approval%'
+       OR ROUTINE_NAME LIKE 'sp_%Faculty%'
+       OR ROUTINE_NAME LIKE 'sp_%Dean%'
+       OR ROUTINE_NAME LIKE 'sp_%College%'
+ORDER BY ROUTINE_NAME;
+
+-- =====================================================================
+-- USAGE EXAMPLES
+-- =====================================================================
+
+/*
+-- Example 1: Upload e-signature
+CALL sp_UploadESignature('user123', 'uploads/esignatures/user123_signature.png');
+
+-- Example 2: Get user's e-signature
+CALL sp_GetUserESignature('user123');
+
+-- Example 3: Get faculty for program
+CALL sp_GetFacultyByProgram(11); -- Computer Science
+
+-- Example 4: Get Dean by college
+CALL sp_GetDeanByCollege(3); -- SECA
+
+-- Example 5: Create Co-Curricular approval chain
+CALL sp_CreateApprovalChain(
+    1,                      -- org_version_id
+    'Co-Curricular',        -- category
+    11,                     -- base_program_id (CS)
+    'adviser_user_id',      -- adviser
+    NULL,                   -- faculty_1 (not used for co-curricular)
+    NULL,                   -- faculty_2 (not used for co-curricular)
+    NULL                    -- selected_by (not used for co-curricular)
+);
+
+-- Example 6: Create Extra-Curricular approval chain
+CALL sp_CreateApprovalChain(
+    2,                      -- org_version_id
+    'Extra-Curricular',     -- category
+    11,                     -- base_program_id (CS)
+    'adviser_user_id',      -- adviser
+    'faculty_cs_001',       -- faculty_1
+    'faculty_cs_002',       -- faculty_2
+    'student_user_id'       -- selected_by
+);
+
+-- Example 7: Mark approval as received
+CALL sp_MarkApprovalReceived(1, 'program_chair_user_id');
+
+-- Example 8: Sign approval step
+CALL sp_SignApprovalStep(1, 'program_chair_user_id', 'Approved - looks good');
+
+-- Example 9: Get approval chain
+CALL sp_GetApprovalChain(1);
+
+-- Example 10: Validate if chain is complete
+CALL sp_ValidateApprovalChain(1);
+
+-- Example 11: Get my pending approvals
+CALL sp_GetMyPendingApprovals('dean_user_id');
+*/
+
+-- =====================================================================
+-- STORED PROCEDURES SUMMARY
+-- =====================================================================
+-- Total: 12 Stored Procedures
+-- 
+-- E-Signature Management (3):
+--   1. sp_UploadESignature - Insert/update user signature
+--   2. sp_GetUserESignature - Fetch user signature
+--   3. sp_DeleteUserESignature - Remove user signature
+-- 
+-- Approver Lookup (4):
+--   4. sp_GetFacultyByProgram - Get faculty for program
+--   5. sp_GetProgramChairByProgram - Get program chair
+--   6. sp_GetDeanByCollege - Get dean for college
+--   7. sp_GetCollegeByProgram - Get college from program
+-- 
+-- Approval Chain Management (5):
+--   8. sp_CreateApprovalChain - Build approval workflow
+--   9. sp_MarkApprovalReceived - Mark step as received
+--  10. sp_SignApprovalStep - Process e-signature (with validations)
+--  11. sp_GetApprovalChain - Fetch complete chain
+--  12. sp_ValidateApprovalChain - Check if complete
+--  13. sp_GetMyPendingApprovals - Get user's pending approvals
+-- =====================================================================
