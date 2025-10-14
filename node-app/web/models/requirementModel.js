@@ -279,7 +279,7 @@ async function updateApplicationPeriod(startDate, endDate, startTime, endTime, p
     }
 }
 
-async function initiateApprovalProcess(applicationId, initiatedByEmail) {
+async function createApprovalChain(applicationId, initiatedByEmail) {
     const connection = await pool.getConnection();
     try {
         // Get user_id from email
@@ -289,13 +289,14 @@ async function initiateApprovalProcess(applicationId, initiatedByEmail) {
         }
         const initiatedBy = userRows[0].user_id;
 
-        const [rows] = await connection.query('CALL InitiateApprovalProcess(?, ?)', [
+        // Use NEW approval chain procedure with e-signature support
+        const [rows] = await connection.query('CALL sp_CreateApprovalChain(?, ?)', [
             applicationId,
             initiatedBy
         ]);
         return rows[0];
     } catch (error) {
-        console.error('Error initiating approval process:', error);
+        console.error('Error creating approval chain:', error);
         throw error;
     } finally {
         connection.release();
@@ -351,6 +352,6 @@ module.exports = {
     getSpecificEventRequirement,
     updateEventRequirement,
     archiveEventRequirement,
-    initiateApprovalProcess,
+    createApprovalChain,
     getRequirementByFilePath,
 };

@@ -31,31 +31,116 @@ async function getSpecificApplication(user_id, organization_name, app_id) {
     }
 }
 
-async function approveApplication(approval_id, comments, organization_id, application_id) {
+async function approveApplication(chain_id, comments, organization_id, application_id, user_email) {
     const connection = await pool.getConnection();
     try {
+        console.log('🔐 [E-SIG] Starting approval with e-signature:', { chain_id, user_email, has_comments: !!comments });
         
-        // returns approval row
-        const [rows] = await connection.query(
-            'CALL ApproveApplication(?, ?, ?, ?);',
-            [approval_id, comments, organization_id, application_id]
+        // STEP 1: Check if this is a final approver or intermediate approver
+        const [chainInfo] = await connection.query(
+            'SELECT is_final_approval, approval_order FROM tbl_organization_approval_chain WHERE chain_id = ?',
+            [chain_id]
         );
-        return rows[0];
+        
+        const isFinalApprover = chainInfo[0]?.is_final_approval;
+        const approvalOrder = chainInfo[0]?.approval_order;
+        
+        console.log('🔐 [E-SIG] Approval details:', { 
+            chain_id, 
+            is_final_approval: isFinalApprover, 
+            approval_order: approvalOrder 
+        });
+        
+        // STEP 2: Call appropriate stored procedure based on approver type
+        // NOTE: user_email is used because approver_user_id stores email addresses
+        let spResult;
+        if (isFinalApprover) {
+            // Final approver uses sp_ApproveApprovalStep
+            console.log('🔐 [E-SIG] Calling sp_ApproveApprovalStep (final approver)');
+            const [approveResult] = await connection.query(
+                'CALL sp_ApproveApprovalStep(?, ?, ?);',
+                [chain_id, user_email, comments || '']
+            );
+            spResult = approveResult[0]?.[0];
+        } else {
+            // Intermediate approver uses sp_SignApprovalStep
+            console.log('🔐 [E-SIG] Calling sp_SignApprovalStep (intermediate approver)');
+            const [signResult] = await connection.query(
+                'CALL sp_SignApprovalStep(?, ?, ?);',
+                [chain_id, user_email, comments || '']
+            );
+            spResult = signResult[0]?.[0];
+        }
+        
+        console.log('🔐 [E-SIG] Stored procedure result:', spResult);
+        
+        if (!spResult || spResult.status === 'error') {
+            throw new Error(spResult?.message || 'Failed to process approval with e-signature');
+        }
+        
+        // STEP 3: Copy signature file if paths provided
+        if (spResult.user_signature_path && spResult.approval_signature_path) {
+            const fs = require('fs').promises;
+            const path = require('path');
+            
+            const sourcePath = path.join(__dirname, '../../../', spResult.user_signature_path);
+            const destPath = path.join(__dirname, '../../../', spResult.approval_signature_path);
+            
+            try {
+                // Ensure destination directory exists
+                const destDir = path.dirname(destPath);
+                await fs.mkdir(destDir, { recursive: true });
+                
+                // Copy signature file
+                await fs.copyFile(sourcePath, destPath);
+                console.log(`✅ [E-SIG] Copied signature: ${spResult.user_signature_path} → ${spResult.approval_signature_path}`);
+            } catch (fileError) {
+                console.error('❌ [E-SIG] Failed to copy signature file:', fileError);
+                // Don't throw - signature_path is already saved in database
+            }
+        }
+        
+        // STEP 4: Get updated approval chain info for return value
+        const [updatedChain] = await connection.query(
+            `SELECT 
+                ac.approval_order as current_step,
+                (SELECT MAX(approval_order) FROM tbl_organization_approval_chain WHERE application_id = ?) as total_steps,
+                ac.status
+            FROM tbl_organization_approval_chain ac
+            WHERE ac.chain_id = ?`,
+            [application_id, chain_id]
+        );
+        
+        const stepInfo = updatedChain[0];
+        
+        // STEP 5: Return result in expected format (for backward compatibility)
+        return [[{
+            result: {
+                application: {
+                    step: stepInfo.current_step || approvalOrder || 0
+                },
+                other: {
+                    last_step: stepInfo.total_steps || 0
+                },
+                status: stepInfo.status
+            }
+        }]];
+        
     } catch (error) {
-        console.error('Error approving application:', error);
+        console.error('❌ [E-SIG] Error approving application with e-signature:', error);
         throw error;
     } finally {
         connection.release();
     }
 }
 
-async function rejectApplication(approval_id, comments, application_id) {
+async function rejectApplication(chain_id, comments, application_id) {
     const connection = await pool.getConnection();
     try {
-        // proc signature: (p_application_id, p_approval_id, p_organization_id, p_comment)
+        // proc signature: (p_application_id, p_chain_id, p_comment)
         const [rows] = await connection.query(
             'CALL RejectApplication(?, ?, ?);',
-            [application_id, approval_id,comments]
+            [application_id, chain_id, comments]
         );
         return rows[0];
     } catch (error) {
@@ -648,6 +733,243 @@ async function GetApprovalTimeline(org_name, app_id) {
         connection.release();
     }
 }
+
+// NEW: Get approval chain with proper field names for frontend
+async function getApprovalChain(application_id) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query(
+            'CALL sp_GetApprovalChain(?);',
+            [application_id]
+        );
+        return rows[0];
+    } catch (error) {
+        console.error('Error fetching approval chain:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+// New e-signature approval chain functions
+async function getApprovalChainById(chain_id) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query(
+            'SELECT * FROM tbl_organization_approval_chain WHERE chain_id = ?',
+            [chain_id]
+        );
+        return rows[0];
+    } catch (error) {
+        console.error('Error fetching approval chain by ID:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function markApprovalAsReceived(chain_id, user_email, notes = '') {
+    const connection = await pool.getConnection();
+    try {
+        console.log('🔐 [RECEIVE+SIGN] Marking as received with e-signature:', { chain_id, user_email });
+        
+        // STEP 1: Call NEW sp_ReceiveAndSignApproval to receive AND apply signature in one action
+        // This changes status from 'Pending' → 'Received' AND applies signature_path
+        // NOTE: Stored procedure will look up user_id from email internally
+        const [receiveResult] = await connection.query(
+            'CALL sp_ReceiveAndSignApproval(?, ?, ?)',
+            [chain_id, user_email, notes || '']
+        );
+        
+        const spResult = receiveResult[0]?.[0];
+        console.log('🔐 [RECEIVE+SIGN] Stored procedure result:', spResult);
+        
+        if (!spResult || spResult.status === 'error') {
+            throw new Error(spResult?.message || 'Failed to receive approval with e-signature');
+        }
+        
+        // STEP 2: Copy signature file if filenames provided
+        // Construct full paths from filenames stored in database
+        if (spResult.user_signature_filename && spResult.approval_signature_filename) {
+            const fs = require('fs').promises;
+            const path = require('path');
+            
+            // Construct full paths from filenames
+            // Source: /app/esignatures/{filename}
+            // Dest: /app/approval-signatures/{filename}
+            const sourcePath = path.join('/app/esignatures', spResult.user_signature_filename);
+            const destPath = path.join('/app/approval-signatures', spResult.approval_signature_filename);
+            
+            try {
+                // Ensure destination directory exists
+                const destDir = path.dirname(destPath);
+                await fs.mkdir(destDir, { recursive: true });
+                
+                // Copy signature file
+                await fs.copyFile(sourcePath, destPath);
+                console.log(`✅ [RECEIVE+SIGN] Copied signature from esignatures to approval-signatures`);
+                console.log(`   Source: ${spResult.user_signature_filename}`);
+                console.log(`   Dest: ${spResult.approval_signature_filename}`);
+            } catch (fileError) {
+                console.error('❌ [RECEIVE+SIGN] Failed to copy signature file:', fileError);
+                // Don't throw - signature_path is already saved in database
+            }
+        }
+        
+        // STEP 3: Return success result
+        return [{
+            status: 'success',
+            message: 'Approval received with e-signature successfully',
+            chain_id: chain_id,
+            signature_path: spResult.approval_signature_filename
+        }];
+        
+    } catch (error) {
+        console.error('❌ [RECEIVE+SIGN] Error:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function checkUserHasESignature(user_email) {
+    const connection = await pool.getConnection();
+    try {
+        // Get user_id from email first
+        const [userResult] = await connection.query(
+            'SELECT user_id FROM tbl_user WHERE email = ? LIMIT 1',
+            [user_email]
+        );
+        
+        if (userResult.length === 0) {
+            return false;
+        }
+        
+        const userId = userResult[0].user_id;
+        
+        const [result] = await connection.query(
+            'SELECT signature_path FROM tbl_user_esignature WHERE user_id = ?',
+            [userId]
+        );
+        
+        return result.length > 0 && result[0].signature_path !== null;
+    } catch (error) {
+        console.error('❌ [CHECK-ESIG] Database error:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function markApprovalAsSigned(chain_id, user_email, signature_path, notes = null) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query(
+            'CALL sp_SignApprovalStep(?, ?, ?)',
+            [chain_id, user_email, notes]
+        );
+        
+        // Update signature_path separately since sp_SignApprovalStep doesn't handle file path
+        await connection.query(
+            'UPDATE tbl_organization_approval_chain SET signature_path = ? WHERE chain_id = ?',
+            [signature_path, chain_id]
+        );
+        
+        return rows[0];
+    } catch (error) {
+        console.error('Error marking approval as signed:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function uploadApprovalSignature(chain_id, signature_path) {
+    const connection = await pool.getConnection();
+    try {
+        const [result] = await connection.query(
+            'UPDATE tbl_organization_approval_chain SET signature_path = ? WHERE chain_id = ?',
+            [signature_path, chain_id]
+        );
+        return result;
+    } catch (error) {
+        console.error('Error uploading approval signature:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+// Check if user has e-signature for a specific approval chain
+async function checkUserSignature(chain_id, user_email) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query(
+            `SELECT 
+                chain_id, 
+                approver_user_id, 
+                signature_path,
+                status
+            FROM tbl_organization_approval_chain oac
+            JOIN tbl_user u ON oac.approver_user_id = u.user_id
+            WHERE oac.chain_id = ? AND u.email = ?`,
+            [chain_id, user_email]
+        );
+        
+        if (rows.length === 0) {
+            throw new Error('Approval chain not found or user not authorized');
+        }
+        
+        return {
+            hasSignature: !!rows[0].signature_path,
+            signature_path: rows[0].signature_path,
+            status: rows[0].status
+        };
+    } catch (error) {
+        console.error('Error checking user signature:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+// Upload user e-signature to approval chain
+async function uploadUserSignature(chain_id, user_email, signature_path) {
+    const connection = await pool.getConnection();
+    try {
+        // First verify the user is the approver for this chain
+        const [chainRows] = await connection.query(
+            `SELECT oac.chain_id, oac.approver_user_id
+            FROM tbl_organization_approval_chain oac
+            JOIN tbl_user u ON oac.approver_user_id = u.user_id
+            WHERE oac.chain_id = ? AND u.email = ?`,
+            [chain_id, user_email]
+        );
+        
+        if (chainRows.length === 0) {
+            throw new Error('Approval chain not found or user not authorized');
+        }
+        
+        // Update the signature path
+        const [result] = await connection.query(
+            'UPDATE tbl_organization_approval_chain SET signature_path = ?, updated_at = CURRENT_TIMESTAMP WHERE chain_id = ?',
+            [signature_path, chain_id]
+        );
+        
+        return {
+            success: true,
+            chain_id,
+            signature_path,
+            message: 'E-signature uploaded successfully'
+        };
+    } catch (error) {
+        console.error('Error uploading user signature:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
 async function getUpdateApplication(application_id){
     const connection = await pool.getConnection();
     try {
@@ -888,16 +1210,17 @@ async function updateApplicationPeriod(startDate, endDate, startTime, endTime, p
     }
 }
 
-async function initiateApprovalProcess(applicationId, userid) {
+async function createApprovalChain(applicationId, initiatedByEmail) {
     const connection = await pool.getConnection();
     try {
-        const [rows] = await connection.query('CALL InitiateApprovalProcess(?, ?)', [
+        // Use NEW approval chain procedure with e-signature support
+        const [rows] = await connection.query('CALL sp_CreateApprovalChain(?, ?)', [
             applicationId,
-            userid
+            initiatedByEmail
         ]);
         return rows[0];
     } catch (error) {
-        console.error('Error initiating approval process:', error);
+        console.error('Error creating approval chain:', error);
         throw error;
     } finally {
         connection.release();
@@ -1372,114 +1695,6 @@ async function rejectLeaveApplication(leave_application_id, organization_id, org
         connection.release();
     }
 }
-
-// Get organization by name (includes adviser_id)
-async function getOrganizationByName(org_name) {
-    const connection = await pool.getConnection();
-    try {
-        const [rows] = await connection.query(
-            'SELECT organization_id, name, adviser_id, status, current_org_version_id FROM tbl_organization WHERE name = ? LIMIT 1',
-            [org_name]
-        );
-        return rows[0] || null;
-    } catch (error) {
-        console.error('Error fetching organization by name:', error);
-        throw error;
-    } finally {
-        connection.release();
-    }
-}
-
-module.exports = {
-    createOrganizationApplication,
-    getSpecificApplication,
-    approveApplication,
-    rejectApplication,
-    getOrganizationApplications,
-    checkOrganizationName,
-    checkOrganizationEmails,
-    getOrganizationDetails,
-    getUserByEmail,
-    archiveOrganization,
-    unarchiveOrganization,
-    getOrganizationsByStatus,
-    getOrganizationEventApplications,
-    getEventRequirementSubmissionsByOrganization,
-    getOrganizationIdByName,
-    getOrganizationByName,
-    getOrganizationDashboardStats,
-    createExecutiveMember,
-    updateExecutiveMember,
-    archiveExecutiveMember,
-    getOrganizationCommittees,
-    createCommittee,
-    updateCommittee,
-    archiveCommittee,
-    getAllCommitteeMembers,
-    addCommitteeMember,
-    updateCommitteeMember,
-    archiveCommitteeMember,
-    getPendingOrganizationMembers,
-    approveMembershipApplication,
-    rejectMembershipApplication,
-    addOrganizationMember,
-    editOrganizationMember,
-    archiveOrganizationMember,
-    GetApprovalTimeline,
-    getUpdateApplication,
-    getOrganizationByRole,
-    getOrganizationByProgram,
-    getOrganizationById,
-    getOrganizationOfficers,
-    getOrganizationMembers,
-    getOrganizationUsers,
-    getAllUsers,
-    getProgram,
-    getApplication,
-    getAllExecutiveRanks,
-    getSingleUser,
-    GetSingleOrganizationUser,
-    getSingleOrganizationMember,
-    // Enhanced functions
-    addApplicationPeriod,
-    updateApplicationPeriod,
-    initiateApprovalProcess,
-    sendApprovalNotification,
-    getApprovedOrganizationLogos,
-    checkOrgRenewalStatus,
-    getOrganizationDashboardOverview,
-    getAllOrganizations,
-    getAllApplicationsByOrganization,
-    getUserOrganization,
-    getOrganizationCommitteeRoles,
-    getOrganizationExecutives,
-    getOrganizationPermissions,
-    updateCommitteePermissions,
-    updateExecutivePermissions,
-    getMemberPermissionOverrides,
-    getEmailSuggestionOverride,
-    addMemberPermissionOverride,
-    updateMemberPermissionOverride,
-    removeMemberPermissionOverride,
-    getArchivedOrganizationMembers,
-    unarchiveOrganizationMember,
-    getLeaveApplications,
-    // Membership Questions functions
-    getMembershipQuestions,
-    createMembershipQuestion,
-    updateMembershipQuestion,
-    deleteMembershipQuestion,
-    getMembershipResponses,
-    createMembershipResponse,
-    processMembershipApproval,
-    processMembershipRejection,
-    approveLeaveApplication,
-    rejectLeaveApplication,
-    getApplicationOfficers,
-    updateOrganizationPaymentType,
-    updateOrganizationTermOption
-};
-
 async function getApplicationOfficers(application_id) {
     const connection = await pool.getConnection();
     try {
@@ -1575,3 +1790,103 @@ async function updateOrganizationTermOption(organization_id, organization_versio
         }
     }
 }
+
+module.exports = {
+    createOrganizationApplication,
+    getSpecificApplication,
+    approveApplication,
+    rejectApplication,
+    getOrganizationApplications,
+    checkOrganizationName,
+    checkOrganizationEmails,
+    getOrganizationDetails,
+    getUserByEmail,
+    archiveOrganization,
+    unarchiveOrganization,
+    getOrganizationsByStatus,
+    getOrganizationEventApplications,
+    getEventRequirementSubmissionsByOrganization,
+    getOrganizationIdByName,
+    getOrganizationDashboardStats,
+    createExecutiveMember,
+    updateExecutiveMember,
+    archiveExecutiveMember,
+    getOrganizationCommittees,
+    createCommittee,
+    updateCommittee,
+    archiveCommittee,
+    getAllCommitteeMembers,
+    addCommitteeMember,
+    updateCommitteeMember,
+    archiveCommitteeMember,
+    getPendingOrganizationMembers,
+    approveMembershipApplication,
+    rejectMembershipApplication,
+    addOrganizationMember,
+    editOrganizationMember,
+    archiveOrganizationMember,
+    GetApprovalTimeline,
+    getUpdateApplication,
+    getOrganizationByRole,
+    getOrganizationByProgram,
+    getOrganizationById,
+    getOrganizationOfficers,
+    getOrganizationMembers,
+    getOrganizationUsers,
+    getAllUsers,
+    getProgram,
+    getApplication,
+    getAllExecutiveRanks,
+    getSingleUser,
+    GetSingleOrganizationUser,
+    getSingleOrganizationMember,
+    // Enhanced functions
+    addApplicationPeriod,
+    updateApplicationPeriod,
+    createApprovalChain,
+    sendApprovalNotification,
+    getApprovedOrganizationLogos,
+    checkOrgRenewalStatus,
+    getOrganizationDashboardOverview,
+    getAllOrganizations,
+    getAllApplicationsByOrganization,
+    getUserOrganization,
+    getOrganizationCommitteeRoles,
+    getOrganizationExecutives,
+    getOrganizationPermissions,
+    updateCommitteePermissions,
+    updateExecutivePermissions,
+    getMemberPermissionOverrides,
+    getEmailSuggestionOverride,
+    addMemberPermissionOverride,
+    updateMemberPermissionOverride,
+    removeMemberPermissionOverride,
+    getArchivedOrganizationMembers,
+    unarchiveOrganizationMember,
+    getLeaveApplications,
+    // Membership Questions functions
+    getMembershipQuestions,
+    createMembershipQuestion,
+    updateMembershipQuestion,
+    deleteMembershipQuestion,
+    getMembershipResponses,
+    markApprovalAsReceived,
+    markApprovalAsSigned,
+    checkUserHasESignature,
+    createMembershipResponse,
+    processMembershipApproval,
+    processMembershipRejection,
+    approveLeaveApplication,
+    rejectLeaveApplication,
+    getApplicationOfficers,
+    updateOrganizationPaymentType,
+    updateOrganizationTermOption,
+    // E-signature approval chain functions
+    getApprovalChain,  // NEW: Use sp_GetApprovalChain with proper field names
+    getApprovalChainById,
+    markApprovalAsReceived,
+    markApprovalAsSigned,
+    uploadApprovalSignature,
+    checkUserSignature,
+    uploadUserSignature
+};

@@ -1,5 +1,7 @@
 const express = require('express');
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
 const { initializeSocket } = require('./mobile/controllers/eventsController');
 require('dotenv').config();
 const db = require('./config/db');
@@ -8,6 +10,22 @@ const { redisClient } = require('./config/redis');
 // const { scanner } = require('./config/clamav');
 const cors = require('cors');
 const helmet = require('helmet');
+
+// ====================================
+// 📁 ENSURE REQUIRED DIRECTORIES EXIST
+// ====================================
+const requiredDirs = [
+    path.join(__dirname, 'uploads'),
+    path.join(__dirname, 'uploads/esignatures'),
+    path.join(__dirname, 'approval-signatures'),
+];
+
+requiredDirs.forEach(dir => {
+    if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+        console.log(`✅ Created directory: ${dir}`);
+    }
+});
 
 const app = express();
 const server = http.createServer(app);
@@ -52,13 +70,36 @@ app.use(helmet({
 // Middleware
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(fileUpload({
-    limits: {fileSize: 100 * 1024 * 1024},
-    abortOnLimit: true, 
-    safeFileNames: false,  // Disable safe file names to preserve original extensions
-    preserveExtension: true,
-    createParentPath: true,
-}));
+
+// ====================================
+// 📤 CONDITIONAL FILE UPLOAD MIDDLEWARE
+// ====================================
+// Use express-fileupload for MOST routes
+// BUT skip routes that use multer (to avoid conflicts)
+app.use((req, res, next) => {
+    // List of routes that use MULTER (not express-fileupload)
+    const multerRoutes = [
+        '/api/web/esignature/upload',           // E-signature uploads (multer)
+        '/approval-signature',                   // Approval chain signatures (multer)
+    ];
+    
+    // Check if current path matches any multer route
+    const isMulterRoute = multerRoutes.some(route => req.path.includes(route));
+    
+    if (isMulterRoute) {
+        console.log(`🔄 [MULTER ROUTE] Skipping express-fileupload for: ${req.path}`);
+        return next(); // Skip express-fileupload, let multer handle it
+    }
+    
+    // Apply express-fileupload for all other routes
+    fileUpload({
+        limits: {fileSize: 100 * 1024 * 1024},
+        abortOnLimit: true, 
+        safeFileNames: false,  // Disable safe file names to preserve original extensions
+        preserveExtension: true,
+        createParentPath: true,
+    })(req, res, next);
+});
 
 // Debug middleware to log all file uploads
 app.use((req, res, next) => {
@@ -158,6 +199,8 @@ const novaRoutes = require('./web/routes/nova');
 const termPaymentRoutes = require('./web/routes/termPaymentRoutes');
 const qrVerificationRoutes = require('./web/routes/qrVerification');
 const filesRoutes = require('./web/routes/files');
+const esignatureRoutes = require('./web/routes/esignature'); // 🆕 E-signature routes
+const approvalRoutes = require('./web/routes/approval'); // 🆕 Approval chain routes
 
 
 // Routes on Mobile
@@ -193,7 +236,10 @@ app.use('/api/web', analytics);
 app.use('/api/web', novaRoutes);
 app.use('/api/web', termPaymentRoutes);
 app.use('/api/web/term-payments', termPaymentRoutes); // Temporary fallback for old path
-app.use('/api/web', filesRoutes);
+// 🆕 Specific routes MUST come before catch-all filesRoutes
+app.use('/api/web/esignature', esignatureRoutes); // 🆕 E-signature endpoints
+app.use('/api/web/approvals', approvalRoutes); // 🆕 Approval chain endpoints
+app.use('/api/web', filesRoutes); // Catch-all file route (MUST be last)
 
 
 // Initialize cron jobs
