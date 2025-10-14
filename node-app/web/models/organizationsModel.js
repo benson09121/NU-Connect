@@ -1373,6 +1373,23 @@ async function rejectLeaveApplication(leave_application_id, organization_id, org
     }
 }
 
+// Get organization by name (includes adviser_id)
+async function getOrganizationByName(org_name) {
+    const connection = await pool.getConnection();
+    try {
+        const [rows] = await connection.query(
+            'SELECT organization_id, name, adviser_id, status, current_org_version_id FROM tbl_organization WHERE name = ? LIMIT 1',
+            [org_name]
+        );
+        return rows[0] || null;
+    } catch (error) {
+        console.error('Error fetching organization by name:', error);
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
 module.exports = {
     createOrganizationApplication,
     getSpecificApplication,
@@ -1389,6 +1406,7 @@ module.exports = {
     getOrganizationEventApplications,
     getEventRequirementSubmissionsByOrganization,
     getOrganizationIdByName,
+    getOrganizationByName,
     getOrganizationDashboardStats,
     createExecutiveMember,
     updateExecutiveMember,

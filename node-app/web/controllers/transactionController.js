@@ -41,7 +41,8 @@ async function create(req, res) {
       event_remarks,
       organization_id,
       cycle_number,
-      organization_version_id
+      organization_version_id,
+      remarks
     } = req.body;
 
     // Validate required fields for organization transactions
@@ -102,7 +103,8 @@ async function create(req, res) {
       event_remarks,
       organization_id,
       cycle_number,
-      org_version_id: organization_version_id
+      org_version_id: organization_version_id,
+      remarks
     }, proofImagePath);
 
     console.log(`🟢 [TRANSACTION-CREATE] Created transaction ID: ${txn?.transaction_id}, Organization ID: ${organization_id}, User: ${req.user?.email}`);
@@ -166,7 +168,8 @@ async function update(req, res) {
       event_remarks,
       organization_id,        // preferred for pathing when uploading a new file
       organization_version_id, // required if organization_id is provided
-      remove_proof_image      // flag to remove existing file+db (true/1/'true')
+      remove_proof_image,      // flag to remove existing file+db (true/1/'true')
+      remarks
     } = req.body;
 
     if (!transaction_id) {
@@ -355,7 +358,8 @@ async function update(req, res) {
       organization_id: chosenOrgId,
       cycle_number: req.body.cycle_number,
       org_version_id: organization_version_id,
-      remove_proof_image: removeFlag
+      remove_proof_image: removeFlag,
+      remarks
     });
 
     const payload = unwrapSPResult(raw);

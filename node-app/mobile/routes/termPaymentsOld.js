@@ -63,11 +63,11 @@ router.post('/term-payments/create-payment',
                 });
             }
 
-            // Validate file size (5MB limit)
-            if (receipt.size > 5 * 1024 * 1024) {
+            // Validate file size (10MB limit)
+            if (receipt.size > 10 * 1024 * 1024) {
                 return res.status(400).json({
                     success: false,
-                    message: 'File size must be less than 5MB'
+                    message: 'File size must be less than 10MB'
                 });
             }
 
@@ -177,11 +177,11 @@ router.post('/term-payments/upload-proof',
                 });
             }
 
-            // Validate file size (5MB limit)
-            if (receipt.size > 5 * 1024 * 1024) {
+            // Validate file size (10MB limit)
+            if (receipt.size > 10 * 1024 * 1024) {
                 return res.status(400).json({
                     success: false,
-                    message: 'File size must be less than 5MB'
+                    message: 'File size must be less than 10MB'
                 });
             }
 

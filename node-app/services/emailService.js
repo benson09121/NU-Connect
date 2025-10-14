@@ -2,6 +2,35 @@ const nodemailer = require('nodemailer');
 const msal = require('@azure/msal-node');
 const axios = require('axios');
 const userModel = require('../web/models/userModel');
+const fs = require('fs');
+const path = require('path');
+
+// Load NU Connect logo as base64 for email embedding
+// Try multiple potential paths for the logo
+const LOGO_PATHS = [
+  path.join(__dirname, '../../react-app/dist/images/NU-Connect.png'),
+  path.join(__dirname, '../public/images/NU-Connect.png'),
+  path.join(__dirname, '../../node-app/public/images/NU-Connect.png')
+];
+
+let NU_CONNECT_LOGO_BASE64 = '';
+
+for (const logoPath of LOGO_PATHS) {
+  try {
+    if (fs.existsSync(logoPath)) {
+      const logoBuffer = fs.readFileSync(logoPath);
+      NU_CONNECT_LOGO_BASE64 = `data:image/png;base64,${logoBuffer.toString('base64')}`;
+      console.log(`✅ NU Connect logo loaded from: ${logoPath}`);
+      break;
+    }
+  } catch (error) {
+    continue; // Try next path
+  }
+}
+
+if (!NU_CONNECT_LOGO_BASE64) {
+  console.warn('⚠️ Could not load NU Connect logo from any path. Using text-only header.');
+}
 
 // Validate environment variables
 const isEmailConfigured = () => {
@@ -240,72 +269,6 @@ async function sendRejectionEmail(recipient, rejectionReason, canReapply = true)
   }
 }
 
-async function testEmailConfig() {
-  if (!transporter) {
-    return { success: false, message: 'Email not configured' };
-  }
-  
-  try {
-    await transporter.verify();
-    return { success: true, message: 'Email configuration valid' };
-  } catch (error) {
-    return { success: false, message: error.message };
-  }
-}
-
-async function sendTestEmail(recipient) {
-  if (!transporter) {
-    return { success: false, message: 'Email service not configured' };
-  }
-
-  const mailOptions = {
-    from: `"${process.env.FROM_NAME || 'NU Connect Team'}" <${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}>`,
-    to: recipient,
-    subject: 'Test Email - NU Connect',
-    html: `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <h2>Test Email</h2>
-        <p>This is a test email from NU Connect system.</p>
-        <p>If you receive this, the email configuration is working correctly.</p>
-        <p>Sent at: ${new Date().toISOString()}</p>
-      </div>
-    `,
-    text: `Test email from NU Connect system. Sent at: ${new Date().toISOString()}`,
-    // Enhanced headers for test email
-    headers: {
-      'X-Priority': '3',
-      'X-MSMail-Priority': 'Normal',
-      'Importance': 'normal',
-      'X-Mailer': 'NU Connect System - Test',
-      'Reply-To': process.env.SUPPORT_EMAIL || process.env.GMAIL_USER,
-      'Return-Path': process.env.FROM_EMAIL || 'noreply@nuconnect.net',
-      'X-Organization': 'National University - Dasmariñas',
-      'X-System': 'NU Connect Test',
-      'X-Test-Email': 'true'
-    },
-    envelope: {
-      from: process.env.FROM_EMAIL || 'noreply@nuconnect.net',
-      to: recipient
-    },
-    messageId: false,
-    date: new Date()
-  };
-
-  try {
-    const info = await transporter.sendMail(mailOptions);
-    console.log(`✅ Test email sent to ${recipient} (ID: ${info.messageId})`);
-    return { 
-      success: true, 
-      messageId: info.messageId,
-      response: info.response,
-      deliveryInfo: info
-    };
-  } catch (error) {
-    console.error('❌ Test email send failed for', recipient, ':', error.message);
-    return { success: false, error: error.message };
-  }
-}
-
 // Enhanced delivery diagnostic function
 async function diagnoseEmailDelivery(recipient) {
   if (!transporter) {
@@ -330,11 +293,10 @@ async function diagnoseEmailDelivery(recipient) {
     return { success: false, message: 'SMTP connection failed' };
   }
   
-  // Check 3: Email configuration validation (test email removed to prevent spam)
+  // Check 3: Email configuration validation
   console.log('\n3. Email Configuration:');
   console.log('   ✅ SMTP connection verified');
   console.log('   ✅ Email service ready to send');
-  console.log('   � Use "Send Test Email" button to send actual test email');
   
   // Delivery troubleshooting tips
   console.log('\n💡 Email Delivery Best Practices:');
@@ -344,7 +306,6 @@ async function diagnoseEmailDelivery(recipient) {
   console.log('   4. Corporate emails may have stricter filters');
   console.log('   5. Check your Gmail account\'s reputation');
   console.log('   6. Ensure 2FA is enabled on your Gmail account');
-  console.log('   7. Use "Send Test Email" button to test email delivery');
   
   return { 
     success: true, 
@@ -353,7 +314,6 @@ async function diagnoseEmailDelivery(recipient) {
       smtpConnection: 'OK',
       emailConfigured: true,
       readyToSend: true,
-      note: 'Use "Send Test Email" button to send actual test email',
       troubleshootingSteps: [
         'Check spam/junk folder',
         'Whitelist sender domain',
@@ -724,7 +684,7 @@ function generateInvitationTemplate(redemptionUrl, isResend = false, isStudent =
     <meta name="supported-color-schemes" content="light dark">
     <title>NU CONNECT Invitation</title>
     <style>
-      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+      
       
       :root {
         color-scheme: light dark;
@@ -738,7 +698,7 @@ function generateInvitationTemplate(redemptionUrl, isResend = false, isStudent =
       }
       
       body {
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        font-family: Arial, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
         line-height: 1.2;
         color: #1E1E1E;
         background-color: #f5f5fa;
@@ -842,6 +802,22 @@ function generateInvitationTemplate(redemptionUrl, isResend = false, isStudent =
         padding: 40px 32px;
         text-align: center;
         color: white;
+      }
+      
+      .header .logo-img {
+        max-width: 180px;
+        height: auto;
+        margin-bottom: 16px;
+        display: block;
+        margin-left: auto;
+        margin-right: auto;
+      }
+      
+      .header .logo-text {
+        font-size: 32px;
+        font-weight: 700;
+        margin-bottom: 16px;
+        letter-spacing: -0.5px;
       }
       
       .header h1 {
@@ -1034,6 +1010,10 @@ function generateInvitationTemplate(redemptionUrl, isResend = false, isStudent =
     <div class="email-wrapper">
       <div class="container">
         <div class="header">
+          ${NU_CONNECT_LOGO_BASE64 ? 
+            `<img src="${NU_CONNECT_LOGO_BASE64}" alt="NU Connect Logo" class="logo-img">` : 
+            `<div class="logo-text">NU CONNECT</div>`
+          }
           <h1>${headerText}</h1>
           <p>National University - Dasmariñas</p>
         </div>
@@ -1068,15 +1048,12 @@ function generateInvitationTemplate(redemptionUrl, isResend = false, isStudent =
           
           <p>If you have any questions or need assistance, please don't hesitate to contact our support team.</p>
           
-          <p>Best regards,<br>
-          <strong>The NU CONNECT Team</strong></p>
+          <p><strong>NU Connect</strong></p>
         </div>
         
         <div class="footer">
-          <p class="logo">NU CONNECT</p>
+          <p class="logo">NU Connect</p>
           <p>&copy; ${new Date().getFullYear()} National University - Dasmariñas</p>
-          <p>All rights reserved.</p>
-          <p class="disclaimer">If you did not request this invitation, please ignore this email.</p>
         </div>
       </div>
     </div>
@@ -1096,7 +1073,7 @@ function generateRejectionTemplate(rejectionReason, canReapply) {
     <meta name="supported-color-schemes" content="light dark">
     <title>NU CONNECT Application Status</title>
     <style>
-      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+      
       
       :root {
         color-scheme: light dark;
@@ -1110,7 +1087,7 @@ function generateRejectionTemplate(rejectionReason, canReapply) {
       }
       
       body {
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        font-family: Arial, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
         line-height: 1.2;
         color: #1E1E1E;
         background-color: #f5f5fa;
@@ -1138,6 +1115,22 @@ function generateRejectionTemplate(rejectionReason, canReapply) {
         padding: 40px 32px;
         text-align: center;
         color: white;
+      }
+      
+      .header .logo-img {
+        max-width: 180px;
+        height: auto;
+        margin-bottom: 16px;
+        display: block;
+        margin-left: auto;
+        margin-right: auto;
+      }
+      
+      .header .logo-text {
+        font-size: 32px;
+        font-weight: 700;
+        margin-bottom: 16px;
+        letter-spacing: -0.5px;
       }
       
       .header h1 {
@@ -1391,6 +1384,10 @@ function generateRejectionTemplate(rejectionReason, canReapply) {
     <div class="email-wrapper">
       <div class="container">
         <div class="header">
+          ${NU_CONNECT_LOGO_BASE64 ? 
+            `<img src="${NU_CONNECT_LOGO_BASE64}" alt="NU Connect Logo" class="logo-img">` : 
+            `<div class="logo-text">NU CONNECT</div>`
+          }
           <h1>Application Status Update</h1>
           <p>NU CONNECT Application Review</p>
         </div>
@@ -1423,15 +1420,12 @@ function generateRejectionTemplate(rejectionReason, canReapply) {
           
           <p>We appreciate your understanding and encourage you to continue pursuing opportunities with National University - Dasmariñas.</p>
           
-          <p>Best regards,<br>
-          <strong>The NU CONNECT Team</strong></p>
+          <p><strong>NU Connect</strong></p>
         </div>
         
         <div class="footer">
-          <p class="logo">NU CONNECT</p>
+          <p class="logo">NU Connect</p>
           <p>&copy; ${new Date().getFullYear()} National University - Dasmariñas</p>
-          <p>All rights reserved.</p>
-          <p class="disclaimer">This is an automated message regarding your application status.</p>
         </div>
       </div>
     </div>
@@ -1865,7 +1859,7 @@ function generateEventReminderTemplate(eventDetails, reminderType) {
       }
       
       .cta-button {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
+        background: linear-gradient(135deg, #4e59c9 0%, #343fb0 100%) !important;
       }
       
       .footer {
@@ -1875,7 +1869,7 @@ function generateEventReminderTemplate(eventDetails, reminderType) {
       }
       
       .footer .logo {
-        color: #667eea !important;
+        color: #5474b4 !important;
       }
     }
     
@@ -1889,10 +1883,26 @@ function generateEventReminderTemplate(eventDetails, reminderType) {
     }
     
     .header {
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      background: linear-gradient(135deg, #424ec6 0%, #2c389e 100%);
       color: white;
       padding: 40px 30px;
       text-align: center;
+    }
+    
+    .header .logo-img {
+      max-width: 180px;
+      height: auto;
+      margin-bottom: 16px;
+      display: block;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    
+    .header .logo-text {
+      font-size: 32px;
+      font-weight: 700;
+      margin-bottom: 16px;
+      letter-spacing: -0.5px;
     }
     
     .reminder-icon {
@@ -2011,7 +2021,7 @@ function generateEventReminderTemplate(eventDetails, reminderType) {
     
     .cta-button {
       display: inline-block;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      background: linear-gradient(135deg, #424ec6 0%, #2c389e 100%);
       color: #ffffff !important;
       text-decoration: none;
       padding: 16px 40px;
@@ -2019,12 +2029,12 @@ function generateEventReminderTemplate(eventDetails, reminderType) {
       font-size: 16px;
       font-weight: 600;
       transition: transform 0.2s;
-      box-shadow: 0 4px 6px rgba(102, 126, 234, 0.3);
+      box-shadow: 0 4px 6px rgba(66, 78, 198, 0.3);
     }
     
     .cta-button:hover {
       transform: translateY(-2px);
-      box-shadow: 0 6px 12px rgba(102, 126, 234, 0.4);
+      box-shadow: 0 6px 12px rgba(66, 78, 198, 0.4);
     }
     
     .footer {
@@ -2036,7 +2046,7 @@ function generateEventReminderTemplate(eventDetails, reminderType) {
     
     .footer .logo {
       font-weight: 700;
-      color: #667eea;
+      color: #424ec6;
       font-size: 18px;
       margin-bottom: 8px;
     }
@@ -2091,6 +2101,10 @@ function generateEventReminderTemplate(eventDetails, reminderType) {
   <div class="email-container">
     
     <div class="header">
+      ${NU_CONNECT_LOGO_BASE64 ? 
+        `<img src="${NU_CONNECT_LOGO_BASE64}" alt="NU Connect Logo" class="logo-img">` : 
+        `<div class="logo-text">NU CONNECT</div>`
+      }
       <div class="reminder-icon">${reminder.icon}</div>
       <h1>${reminder.heading}</h1>
       <p class="timeframe">${reminder.timeframe}</p>
@@ -2168,13 +2182,1782 @@ function generateEventReminderTemplate(eventDetails, reminderType) {
     <div class="footer">
       <div class="logo">NU Connect</div>
       <p>&copy; ${new Date().getFullYear()} National University - Dasmariñas</p>
-      <p>Event Management System</p>
-      <p class="disclaimer">
-        You're receiving this because you registered for this event.
-        This is an automated reminder email.
-      </p>
     </div>
     
+  </div>
+</body>
+</html>
+  `;
+}
+
+/**
+ * Send organization application approval email
+ * @param {string|Array} recipient - Email(s) of the organization president/applicant and advisers
+ * @param {Object} organizationDetails - Organization information
+ * @param {string} organizationDetails.name - Organization name
+ * @param {string} organizationDetails.application_id - Application ID
+ * @param {string} organizationDetails.approved_date - Date approved
+ * @param {string} organizationDetails.adviser_email - Optional adviser email to include
+ */
+async function sendOrganizationApprovalEmail(recipient, organizationDetails) {
+  if (!transporter) {
+    console.warn('📧 Email service not configured. Skipping organization approval email.');
+    return { success: false, message: 'Email service not configured' };
+  }
+
+  const { name, application_id, approved_date, adviser_email } = organizationDetails;
+  const subject = `Organization Approved - ${name}`;
+
+  // Support multiple recipients including adviser
+  let recipients = Array.isArray(recipient) ? recipient : [recipient];
+  if (adviser_email && !recipients.includes(adviser_email)) {
+    recipients.push(adviser_email);
+  }
+  const recipientList = recipients.filter(e => e).join(', ');
+
+  const mailOptions = {
+    from: `"${process.env.FROM_NAME || 'NU Connect'}" <${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}>`,
+    to: recipientList,
+    subject: subject,
+    html: generateOrganizationApprovalTemplate(organizationDetails),
+    text: `Congratulations! Your organization application for "${name}" has been approved. Application ID: ${application_id}. Approved on: ${approved_date}`,
+    headers: {
+      'X-Priority': '3',
+      'X-MSMail-Priority': 'Normal',
+      'Importance': 'normal',
+      'X-Mailer': 'NU Connect System',
+      'Reply-To': process.env.SUPPORT_EMAIL || process.env.GMAIL_USER,
+      'Return-Path': process.env.FROM_EMAIL || 'noreply@nuconnect.net',
+      'X-Auto-Response-Suppress': 'All',
+      'List-Unsubscribe': `<mailto:${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}?subject=unsubscribe>`,
+      'X-Organization': 'National University - Dasmariñas',
+      'X-System': 'NU Connect',
+      'Precedence': 'bulk',
+      'X-Bulk': 'no'
+    },
+    envelope: {
+      from: process.env.FROM_EMAIL || 'noreply@nuconnect.net',
+      to: recipientList
+    },
+    messageId: false,
+    date: new Date()
+  };
+
+  try {
+    const info = await transporter.sendMail(mailOptions);
+    console.log(`✅ Organization approval email sent to ${recipientList} for "${name}" (ID: ${info.messageId})`);
+    return { 
+      success: true, 
+      messageId: info.messageId,
+      response: info.response 
+    };
+  } catch (error) {
+    console.error('❌ Organization approval email failed for', recipientList, ':', error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Send organization application rejection email
+ * @param {string|Array} recipient - Email(s) of the organization president/applicant and advisers
+ * @param {Object} rejectionDetails - Rejection information
+ * @param {string} rejectionDetails.name - Organization name
+ * @param {string} rejectionDetails.application_id - Application ID
+ * @param {string} rejectionDetails.reason - Rejection reason
+ * @param {string} rejectionDetails.rejector_name - Name of person who rejected
+ * @param {string} rejectionDetails.adviser_email - Optional adviser email to include
+ */
+async function sendOrganizationRejectionEmail(recipient, rejectionDetails) {
+  if (!transporter) {
+    console.warn('📧 Email service not configured. Skipping organization rejection email.');
+    return { success: false, message: 'Email service not configured' };
+  }
+
+  const { name, application_id, reason, rejector_name, adviser_email } = rejectionDetails;
+  const subject = `Organization Application Update - ${name}`;
+
+  // Support multiple recipients including adviser
+  let recipients = Array.isArray(recipient) ? recipient : [recipient];
+  if (adviser_email && !recipients.includes(adviser_email)) {
+    recipients.push(adviser_email);
+  }
+  const recipientList = recipients.filter(e => e).join(', ');
+
+  const mailOptions = {
+    from: `"${process.env.FROM_NAME || 'NU Connect'}" <${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}>`,
+    to: recipientList,
+    subject: subject,
+    html: generateOrganizationRejectionTemplate(rejectionDetails),
+    text: `Your organization application for "${name}" has been reviewed. Application ID: ${application_id}. Reason: ${reason}. You may address the feedback and reapply.`,
+    headers: {
+      'X-Priority': '3',
+      'X-MSMail-Priority': 'Normal',
+      'Importance': 'normal',
+      'X-Mailer': 'NU Connect System',
+      'Reply-To': process.env.SUPPORT_EMAIL || process.env.GMAIL_USER,
+      'Return-Path': process.env.FROM_EMAIL || 'noreply@nuconnect.net',
+      'X-Auto-Response-Suppress': 'All',
+      'List-Unsubscribe': `<mailto:${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}?subject=unsubscribe>`,
+      'X-Organization': 'National University - Dasmariñas',
+      'X-System': 'NU Connect',
+      'Precedence': 'bulk',
+      'X-Bulk': 'no'
+    },
+    envelope: {
+      from: process.env.FROM_EMAIL || 'noreply@nuconnect.net',
+      to: recipientList
+    },
+    messageId: false,
+    date: new Date()
+  };
+
+  try {
+    const info = await transporter.sendMail(mailOptions);
+    console.log(`✅ Organization rejection email sent to ${recipientList} for "${name}" (ID: ${info.messageId})`);
+    return { 
+      success: true, 
+      messageId: info.messageId,
+      response: info.response 
+    };
+  } catch (error) {
+    console.error('❌ Organization rejection email failed for', recipientList, ':', error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Send event proposal approval email
+ * @param {string|Array} recipient - Email(s) of the event organizer and advisers
+ * @param {Object} eventDetails - Event information
+ * @param {string} eventDetails.title - Event title
+ * @param {string} eventDetails.event_id - Event ID
+ * @param {string} eventDetails.start_date - Event start date
+ * @param {string} eventDetails.organization_name - Organizing organization
+ * @param {string} eventDetails.adviser_email - Optional adviser email to include
+ */
+async function sendEventApprovalEmail(recipient, eventDetails) {
+  if (!transporter) {
+    console.warn('📧 Email service not configured. Skipping event approval email.');
+    return { success: false, message: 'Email service not configured' };
+  }
+
+  const { title, event_id, start_date, organization_name, adviser_email } = eventDetails;
+  const subject = `Event Proposal Approved - ${title || 'Your Event'}`;
+
+  // Support multiple recipients including adviser
+  let recipients = Array.isArray(recipient) ? recipient : [recipient];
+  if (adviser_email && !recipients.includes(adviser_email)) {
+    recipients.push(adviser_email);
+  }
+  const recipientList = recipients.filter(e => e).join(', ');
+
+  const mailOptions = {
+    from: `"${process.env.FROM_NAME || 'NU Connect'}" <${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}>`,
+    to: recipientList,
+    subject: subject,
+    html: generateEventApprovalTemplate(eventDetails),
+    text: `Congratulations! Your event proposal "${title}" has been approved. Event ID: ${event_id}. Scheduled for: ${start_date}. Organized by: ${organization_name}`,
+    headers: {
+      'X-Priority': '3',
+      'X-MSMail-Priority': 'Normal',
+      'Importance': 'normal',
+      'X-Mailer': 'NU Connect Event System',
+      'Reply-To': process.env.SUPPORT_EMAIL || process.env.GMAIL_USER,
+      'Return-Path': process.env.FROM_EMAIL || 'noreply@nuconnect.net',
+      'X-Auto-Response-Suppress': 'All',
+      'List-Unsubscribe': `<mailto:${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}?subject=unsubscribe>`,
+      'X-Organization': 'National University - Dasmariñas',
+      'X-System': 'NU Connect',
+      'Precedence': 'bulk',
+      'X-Bulk': 'no'
+    },
+    envelope: {
+      from: process.env.FROM_EMAIL || 'noreply@nuconnect.net',
+      to: recipientList
+    },
+    messageId: false,
+    date: new Date()
+  };
+
+  try {
+    const info = await transporter.sendMail(mailOptions);
+    console.log(`✅ Event approval email sent to ${recipientList} for "${title}" (ID: ${info.messageId})`);
+    return { 
+      success: true, 
+      messageId: info.messageId,
+      response: info.response 
+    };
+  } catch (error) {
+    console.error('❌ Event approval email failed for', recipientList, ':', error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Send event proposal rejection email
+ * @param {string|Array} recipient - Email(s) of the event organizer and advisers
+ * @param {Object} rejectionDetails - Rejection information
+ * @param {string} rejectionDetails.title - Event title
+ * @param {string} rejectionDetails.event_id - Event ID
+ * @param {string} rejectionDetails.reason - Rejection reason
+ * @param {string} rejectionDetails.organization_name - Organizing organization
+ * @param {string} rejectionDetails.adviser_email - Optional adviser email to include
+ */
+async function sendEventRejectionEmail(recipient, rejectionDetails) {
+  if (!transporter) {
+    console.warn('📧 Email service not configured. Skipping event rejection email.');
+    return { success: false, message: 'Email service not configured' };
+  }
+
+  const { title, event_id, reason, organization_name, adviser_email } = rejectionDetails;
+  const subject = `Event Proposal Update - ${title || 'Your Event'}`;
+
+  // Support multiple recipients including adviser
+  let recipients = Array.isArray(recipient) ? recipient : [recipient];
+  if (adviser_email && !recipients.includes(adviser_email)) {
+    recipients.push(adviser_email);
+  }
+  const recipientList = recipients.filter(e => e).join(', ');
+
+  const mailOptions = {
+    from: `"${process.env.FROM_NAME || 'NU Connect'}" <${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}>`,
+    to: recipientList,
+    subject: subject,
+    html: generateEventRejectionTemplate(rejectionDetails),
+    text: `Your event proposal "${title}" has been reviewed. Event ID: ${event_id}. Reason: ${reason}. You may address the feedback and submit a new proposal.`,
+    headers: {
+      'X-Priority': '3',
+      'X-MSMail-Priority': 'Normal',
+      'Importance': 'normal',
+      'X-Mailer': 'NU Connect Event System',
+      'Reply-To': process.env.SUPPORT_EMAIL || process.env.GMAIL_USER,
+      'Return-Path': process.env.FROM_EMAIL || 'noreply@nuconnect.net',
+      'X-Auto-Response-Suppress': 'All',
+      'List-Unsubscribe': `<mailto:${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}?subject=unsubscribe>`,
+      'X-Organization': 'National University - Dasmariñas',
+      'X-System': 'NU Connect',
+      'Precedence': 'bulk',
+      'X-Bulk': 'no'
+    },
+    envelope: {
+      from: process.env.FROM_EMAIL || 'noreply@nuconnect.net',
+      to: recipientList
+    },
+    messageId: false,
+    date: new Date()
+  };
+
+  try {
+    const info = await transporter.sendMail(mailOptions);
+    console.log(`✅ Event rejection email sent to ${recipientList} for "${title}" (ID: ${info.messageId})`);
+    return { 
+      success: true, 
+      messageId: info.messageId,
+      response: info.response 
+    };
+  } catch (error) {
+    console.error('❌ Event rejection email failed for', recipientList, ':', error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Generate organization approval email template
+ */
+function generateOrganizationApprovalTemplate(organizationDetails) {
+  const { name, application_id, approved_date, organization_id, cycle_number } = organizationDetails;
+  const formattedDate = approved_date ? new Date(approved_date).toLocaleDateString('en-US', { 
+    year: 'numeric', 
+    month: 'long', 
+    day: 'numeric' 
+  }) : 'Recently';
+
+  return `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light dark">
+  <meta name="supported-color-schemes" content="light dark">
+  <title>Organization Approved - ${name}</title>
+  <style>
+    
+    
+    :root {
+      color-scheme: light dark;
+      supported-color-schemes: light dark;
+    }
+    
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    
+    body {
+      font-family: Arial, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      line-height: 1.6;
+      color: #1E1E1E;
+      background-color: #f5f5fa;
+      letter-spacing: -0.3px;
+      -webkit-text-size-adjust: 100%;
+      padding: 20px;
+    }
+    
+    /* Dark mode support */
+    @media (prefers-color-scheme: dark) {
+      body {
+        background-color: #1a1a1a;
+        color: #e0e0e0;
+      }
+      
+      .email-wrapper {
+        background-color: #1a1a1a !important;
+      }
+      
+      .container {
+        background-color: #2d2d2d !important;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.5) !important;
+      }
+      
+      .header {
+        background: linear-gradient(135deg, #4e59c9 0%, #343fb0 100%) !important;
+      }
+      
+      .content p {
+        color: #d0d0d0 !important;
+      }
+      
+      .success-banner {
+        background-color: #1e3a32 !important;
+        border-left-color: #10b981 !important;
+      }
+      
+      .info-card {
+        background-color: #3a3a3a !important;
+        border-color: #4a4a4a !important;
+      }
+      
+      .info-card h3 {
+        color: #ffffff !important;
+      }
+      
+      .info-card p {
+        color: #d0d0d0 !important;
+      }
+      
+      .feature-list li {
+        color: #d0d0d0 !important;
+      }
+      
+      .divider {
+        background-color: #4a4a4a !important;
+      }
+      
+      .footer {
+        background-color: #2d2d2d !important;
+        border-top-color: #4a4a4a !important;
+      }
+      
+      .footer p {
+        color: #a0a0a0 !important;
+      }
+      
+      .footer .logo {
+        color: #5474b4 !important;
+      }
+    }
+    
+    .email-wrapper {
+      width: 100%;
+      background-color: #f5f5fa;
+      padding: 24px 16px;
+    }
+    
+    .container {
+      max-width: 600px;
+      margin: 0 auto;
+      background-color: #ffffff;
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+    
+    .header {
+      background: linear-gradient(135deg, #424ec6 0%, #2c389e 100%);
+      padding: 40px 32px;
+      text-align: center;
+      color: white;
+    }
+    
+    .header .logo-img {
+      max-width: 180px;
+      height: auto;
+      margin-bottom: 16px;
+      display: block;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    
+    .header .logo-text {
+      font-size: 32px;
+      font-weight: 700;
+      margin-bottom: 16px;
+      letter-spacing: -0.5px;
+    }
+    
+    .header h1 {
+      font-size: 26px;
+      font-weight: 700;
+      margin: 0;
+      letter-spacing: -0.5px;
+    }
+    
+    .header p {
+      font-size: 16px;
+      font-weight: 400;
+      margin-top: 8px;
+      opacity: 0.9;
+    }
+    
+    .content {
+      padding: 32px;
+      line-height: 1.6;
+    }
+    
+    .content p {
+      margin-bottom: 16px;
+      font-size: 16px;
+      color: #1E1E1E;
+    }
+    
+    .success-banner {
+      background-color: #ecfdf5;
+      border-left: 4px solid #10b981;
+      padding: 16px;
+      margin: 24px 0;
+      border-radius: 4px;
+      text-align: center;
+    }
+    
+    .success-banner .icon {
+      font-size: 48px;
+      margin-bottom: 8px;
+    }
+    
+    .success-banner p {
+      font-size: 18px;
+      font-weight: 600;
+      color: #065f46;
+      margin: 0;
+    }
+    
+    .info-card {
+      background-color: #f5f5fa;
+      border: 1px solid #eaeaea;
+      border-radius: 8px;
+      padding: 20px;
+      margin: 24px 0;
+    }
+    
+    .info-card h3 {
+      font-size: 18px;
+      font-weight: 600;
+      color: #1E1E1E;
+      margin-bottom: 12px;
+      letter-spacing: -0.3px;
+    }
+    
+    .info-card p {
+      font-size: 14px;
+      color: #666;
+      margin: 8px 0;
+      line-height: 1.5;
+    }
+    
+    .info-card p strong {
+      font-weight: 600;
+    }
+    
+    .feature-list {
+      margin: 24px 0;
+      padding-left: 24px;
+    }
+    
+    .feature-list li {
+      margin: 12px 0;
+      font-size: 15px;
+      color: #1E1E1E;
+      line-height: 1.6;
+    }
+    
+    .cta-section {
+      text-align: center;
+      margin: 32px 0;
+    }
+    
+    .cta-button {
+      display: inline-block;
+      background: linear-gradient(135deg, #424ec6 0%, #2c389e 100%);
+      color: white !important;
+      padding: 16px 32px;
+      text-decoration: none;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 16px;
+      letter-spacing: -0.3px;
+      box-shadow: 0 4px 12px rgba(66, 78, 198, 0.3);
+      transition: all 0.2s ease;
+    }
+    
+    .cta-button:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 6px 16px rgba(66, 78, 198, 0.4);
+    }
+    
+    .divider {
+      height: 1px;
+      background-color: #e5e7eb;
+      margin: 32px 0;
+    }
+    
+    .footer {
+      background-color: #f5f5fa;
+      padding: 32px;
+      text-align: center;
+      border-top: 1px solid #e5e7eb;
+    }
+    
+    .footer p {
+      font-size: 14px;
+      color: #6b7280;
+      margin: 4px 0;
+    }
+    
+    .footer .logo {
+      font-weight: 600;
+      color: #424ec6;
+      font-size: 16px;
+      margin-bottom: 8px;
+    }
+    
+    .footer .disclaimer {
+      font-size: 12px;
+      color: #9ca3af;
+      margin-top: 16px;
+      font-style: italic;
+    }
+    
+    @media (max-width: 600px) {
+      .email-wrapper {
+        padding: 16px 8px;
+      }
+      
+      .container {
+        border-radius: 4px;
+      }
+      
+      .header {
+        padding: 32px 24px;
+      }
+      
+      .content {
+        padding: 24px;
+      }
+      
+      .header h1 {
+        font-size: 22px;
+      }
+      
+      .cta-button {
+        padding: 14px 24px;
+        font-size: 15px;
+      }
+      
+      .footer {
+        padding: 24px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="email-wrapper">
+    <div class="container">
+      <div class="header">
+        ${NU_CONNECT_LOGO_BASE64 ? 
+          `<img src="${NU_CONNECT_LOGO_BASE64}" alt="NU Connect Logo" class="logo-img">` : 
+          `<div class="logo-text">NU CONNECT</div>`
+        }
+        <h1>Organization Approved! 🎉</h1>
+        <p>Application Successfully Processed</p>
+      </div>
+      
+      <div class="content">
+        <div class="success-banner">
+          <div class="icon">✅</div>
+          <p>Congratulations! Your organization has been approved</p>
+        </div>
+        
+        <p>Dear Organization President,</p>
+        
+        <p>We are pleased to inform you that your organization application has been <strong>officially approved</strong> and is now active in the NU Connect system!</p>
+        
+        <div class="info-card">
+          <h3>📋 Organization Details</h3>
+          <p><strong>Organization Name:</strong> ${name || 'Not specified'}</p>
+          <p><strong>Approval Date:</strong> ${formattedDate}</p>
+        </div>
+        
+        <p><strong>What you can do now:</strong></p>
+        
+        <ul class="feature-list">
+          <li>✅ <strong>Manage Members:</strong> Add, remove, and assign roles to organization members</li>
+          <li>✅ <strong>Create Events:</strong> Submit event proposals and manage registrations</li>
+          <li>✅ <strong>Access Dashboard:</strong> View analytics, reports, and organization insights</li>
+          <li>✅ <strong>Collaborate:</strong> Partner with other organizations for joint events</li>
+          <li>✅ <strong>Financial Management:</strong> Track payments and manage organization finances</li>
+        </ul>
+        
+        <div class="cta-section">
+          <a href="${process.env.REACT_APP_URL || 'https://nuconnect.net'}/organizations" class="cta-button">
+            Access Organization Dashboard
+          </a>
+        </div>
+        
+        <div class="divider"></div>
+        
+        <p>If you have any questions or need assistance getting started, please don't hesitate to contact our support team.</p>
+        
+        <p><strong>NU Connect</strong></p>
+      </div>
+      
+      <div class="footer">
+        <p class="logo">NU Connect</p>
+        <p>&copy; ${new Date().getFullYear()} National University - Dasmariñas</p>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+  `;
+}
+
+/**
+ * Generate organization rejection email template
+ */
+function generateOrganizationRejectionTemplate(rejectionDetails) {
+  const { name, application_id, reason, rejector_name, rejected_date } = rejectionDetails;
+  const formattedDate = rejected_date ? new Date(rejected_date).toLocaleDateString('en-US', { 
+    year: 'numeric', 
+    month: 'long', 
+    day: 'numeric' 
+  }) : 'Recently';
+
+  return `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light dark">
+  <meta name="supported-color-schemes" content="light dark">
+  <title>Organization Application Update - ${name}</title>
+  <style>
+    
+    
+    :root {
+      color-scheme: light dark;
+      supported-color-schemes: light dark;
+    }
+    
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    
+    body {
+      font-family: Arial, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      line-height: 1.6;
+      color: #1E1E1E;
+      background-color: #f5f5fa;
+      letter-spacing: -0.3px;
+      -webkit-text-size-adjust: 100%;
+      padding: 20px;
+    }
+    
+    /* Dark mode support */
+    @media (prefers-color-scheme: dark) {
+      body {
+        background-color: #1a1a1a;
+        color: #e0e0e0;
+      }
+      
+      .email-wrapper {
+        background-color: #1a1a1a !important;
+      }
+      
+      .container {
+        background-color: #2d2d2d !important;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.5) !important;
+      }
+      
+      .header {
+        background: linear-gradient(135deg, #4e59c9 0%, #343fb0 100%) !important;
+      }
+      
+      .content p {
+        color: #d0d0d0 !important;
+      }
+      
+      .reason-card {
+        background-color: #3a2525 !important;
+        border-color: #7c2d2d !important;
+        border-left-color: #ef4444 !important;
+      }
+      
+      .reason-card h3 {
+        color: #f87171 !important;
+      }
+      
+      .reason-card p {
+        color: #fca5a5 !important;
+      }
+      
+      .reapply-card {
+        background-color: #1e3a32 !important;
+        border-color: #2d5a4d !important;
+        border-left-color: #34d399 !important;
+      }
+      
+      .reapply-card h3 {
+        color: #6ee7b7 !important;
+      }
+      
+      .reapply-card p {
+        color: #a7f3d0 !important;
+      }
+      
+      .info-card {
+        background-color: #3a3a3a !important;
+        border-color: #4a4a4a !important;
+      }
+      
+      .info-card h3 {
+        color: #ffffff !important;
+      }
+      
+      .info-card p {
+        color: #d0d0d0 !important;
+      }
+      
+      .content ul li {
+        color: #d0d0d0 !important;
+      }
+      
+      .divider {
+        background-color: #4a4a4a !important;
+      }
+      
+      .footer {
+        background-color: #2d2d2d !important;
+        border-top-color: #4a4a4a !important;
+      }
+      
+      .footer p {
+        color: #a0a0a0 !important;
+      }
+      
+      .footer .logo {
+        color: #7c87e0 !important;
+      }
+    }
+    
+    .email-wrapper {
+      width: 100%;
+      background-color: #f5f5fa;
+      padding: 24px 16px;
+    }
+    
+    .container {
+      max-width: 600px;
+      margin: 0 auto;
+      background-color: #ffffff;
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+    
+    .header {
+      background: linear-gradient(135deg, #424ec6 0%, #2c389e 100%);
+      padding: 40px 32px;
+      text-align: center;
+      color: white;
+    }
+    
+    .header .logo-img {
+      max-width: 180px;
+      height: auto;
+      margin-bottom: 16px;
+      display: block;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    
+    .header .logo-text {
+      font-size: 32px;
+      font-weight: 700;
+      margin-bottom: 16px;
+      letter-spacing: -0.5px;
+    }
+    
+    .header h1 {
+      font-size: 24px;
+      font-weight: 600;
+      margin: 0;
+      letter-spacing: -0.5px;
+    }
+    
+    .header p {
+      font-size: 16px;
+      font-weight: 400;
+      margin-top: 8px;
+      opacity: 0.9;
+    }
+    
+    .content {
+      padding: 32px;
+      line-height: 1.6;
+    }
+    
+    .content p {
+      margin-bottom: 16px;
+      font-size: 16px;
+      color: #1E1E1E;
+    }
+    
+    .reason-card {
+      background-color: #fef2f2;
+      border: 1px solid #fca5a5;
+      border-left: 4px solid #dc2626;
+      border-radius: 8px;
+      padding: 20px;
+      margin: 24px 0;
+    }
+    
+    .reason-card h3 {
+      font-size: 18px;
+      font-weight: 600;
+      color: #dc2626;
+      margin-bottom: 12px;
+      letter-spacing: -0.3px;
+    }
+    
+    .reason-card p {
+      font-size: 15px;
+      color: #7f1d1d;
+      margin: 8px 0;
+      line-height: 1.5;
+    }
+    
+    .reapply-card {
+      background-color: #ecfdf5;
+      border: 1px solid #6ee7b7;
+      border-left: 4px solid #10b981;
+      border-radius: 8px;
+      padding: 20px;
+      margin: 24px 0;
+    }
+    
+    .reapply-card h3 {
+      font-size: 18px;
+      font-weight: 600;
+      color: #047857;
+      margin-bottom: 12px;
+      letter-spacing: -0.3px;
+    }
+    
+    .reapply-card p {
+      font-size: 15px;
+      color: #065f46;
+      margin: 0;
+      line-height: 1.5;
+    }
+    
+    .info-card {
+      background-color: #f5f5fa;
+      border: 1px solid #eaeaea;
+      border-radius: 8px;
+      padding: 20px;
+      margin: 24px 0;
+    }
+    
+    .info-card h3 {
+      font-size: 18px;
+      font-weight: 600;
+      color: #1E1E1E;
+      margin-bottom: 12px;
+      letter-spacing: -0.3px;
+    }
+    
+    .info-card p {
+      font-size: 14px;
+      color: #666;
+      margin: 8px 0;
+      line-height: 1.5;
+    }
+    
+    .content ul {
+      margin: 24px 0;
+      padding-left: 24px;
+    }
+    
+    .content ul li {
+      margin: 12px 0;
+      font-size: 15px;
+      color: #1E1E1E;
+      line-height: 1.6;
+    }
+    
+    .divider {
+      height: 1px;
+      background-color: #e5e7eb;
+      margin: 32px 0;
+    }
+    
+    .footer {
+      background-color: #f5f5fa;
+      padding: 32px;
+      text-align: center;
+      border-top: 1px solid #e5e7eb;
+    }
+    
+    .footer p {
+      font-size: 14px;
+      color: #6b7280;
+      margin: 4px 0;
+    }
+    
+    .footer .logo {
+      font-weight: 600;
+      color: #424ec6;
+      font-size: 16px;
+      margin-bottom: 8px;
+    }
+    
+    .footer .disclaimer {
+      font-size: 12px;
+      color: #9ca3af;
+      margin-top: 16px;
+      font-style: italic;
+    }
+    
+    @media (max-width: 600px) {
+      .email-wrapper {
+        padding: 16px 8px;
+      }
+      
+      .container {
+        border-radius: 4px;
+      }
+      
+      .header {
+        padding: 32px 24px;
+      }
+      
+      .content {
+        padding: 24px;
+      }
+      
+      .header h1 {
+        font-size: 20px;
+      }
+      
+      .footer {
+        padding: 24px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="email-wrapper">
+    <div class="container">
+      <div class="header">
+        ${NU_CONNECT_LOGO_BASE64 ? 
+          `<img src="${NU_CONNECT_LOGO_BASE64}" alt="NU Connect Logo" class="logo-img">` : 
+          `<div class="logo-text">NU CONNECT</div>`
+        }
+        <h1>Application Update</h1>
+        <p>${name}</p>
+      </div>
+      
+      <div class="content">
+        <p>Dear Organization President,</p>
+        
+        <p>Thank you for your interest in registering <strong>${name}</strong> with NU Connect. We have carefully reviewed your application.</p>
+        
+        <div class="reason-card">
+          <h3>📋 Application Feedback</h3>
+          <p>${reason || 'Your application requires revisions before it can be approved.'}</p>
+          ${rejector_name ? `<p style="margin-top: 12px; font-size: 13px;"><em>Reviewed by: ${rejector_name}</em></p>` : ''}
+          ${rejected_date ? `<p style="font-size: 13px;"><em>Review date: ${formattedDate}</em></p>` : ''}
+        </div>
+        
+        <div class="reapply-card">
+          <h3>✅ You Can Reapply!</h3>
+          <p>Good news! You may submit a new application after addressing the feedback above. Please ensure all requirements are met and any issues mentioned have been resolved before reapplying.</p>
+        </div>
+        
+        <div class="info-card">
+          <h3>Application Details</h3>
+          <p><strong>Organization Name:</strong> ${name || 'Not specified'}</p>
+          <p><strong>Review Date:</strong> ${formattedDate}</p>
+        </div>
+        
+        <p><strong>Next Steps:</strong></p>
+        <ul>
+          <li>📝 Review the feedback carefully</li>
+          <li>✓ Address all mentioned concerns</li>
+          <li>📎 Gather any missing documentation</li>
+          <li>📤 Submit a new application when ready</li>
+        </ul>
+        
+        <div class="divider"></div>
+        
+        <p>If you have questions about this feedback or need clarification on the requirements, please contact our support team.</p>
+        
+        <p><strong>NU Connect</strong></p>
+      </div>
+      
+      <div class="footer">
+        <p class="logo">NU Connect</p>
+        <p>&copy; ${new Date().getFullYear()} National University - Dasmariñas</p>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+  `;
+}
+
+/**
+ * Generate event approval email template
+ */
+function generateEventApprovalTemplate(eventDetails) {
+  const { title, event_id, start_date, start_time, venue, organization_name, description } = eventDetails;
+  const formattedDate = start_date ? new Date(start_date).toLocaleDateString('en-US', { 
+    weekday: 'long',
+    year: 'numeric', 
+    month: 'long', 
+    day: 'numeric' 
+  }) : 'To be scheduled';
+
+  return `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light dark">
+  <meta name="supported-color-schemes" content="light dark">
+  <title>Event Proposal Approved - ${title || 'Your Event'}</title>
+  <style>
+    
+    
+    :root {
+      color-scheme: light dark;
+      supported-color-schemes: light dark;
+    }
+    
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    
+    body { 
+      font-family: Arial, -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; 
+      line-height: 1.6; 
+      color: #1E1E1E; 
+      background-color: #f5f5fa; 
+      letter-spacing: -0.3px;
+      -webkit-text-size-adjust: 100%;
+      padding: 20px;
+    }
+    
+    @media (prefers-color-scheme: dark) {
+      body {
+        background-color: #1a1a1a;
+        color: #e0e0e0;
+      }
+      
+      .container {
+        background-color: #2d2d2d !important;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.5) !important;
+      }
+      
+      .header {
+        background: linear-gradient(135deg, #4e59c9 0%, #343fb0 100%) !important;
+      }
+      
+      .content p {
+        color: #d0d0d0 !important;
+      }
+      
+      .event-card {
+        background-color: #3a3a3a !important;
+        border-color: #4a4a4a !important;
+      }
+      
+      .event-card h3 {
+        color: #ffffff !important;
+      }
+      
+      .detail-content strong {
+        color: #ffffff !important;
+      }
+      
+      .detail-content p {
+        color: #d0d0d0 !important;
+      }
+      
+      .detail-row {
+        border-bottom-color: #4a4a4a !important;
+      }
+      
+      .footer {
+        background-color: #2d2d2d !important;
+        border-top-color: #4a4a4a !important;
+      }
+      
+      .footer p {
+        color: #a0a0a0 !important;
+      }
+      
+      .footer .logo {
+        color: #5474b4 !important;
+      }
+    }
+    
+    .container { 
+      max-width: 600px; 
+      margin: 0 auto; 
+      background-color: #ffffff; 
+      border-radius: 8px; 
+      overflow: hidden; 
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    }
+    
+    .header { 
+      background: linear-gradient(135deg, #424ec6 0%, #2c389e 100%); 
+      color: white; 
+      padding: 40px 30px; 
+      text-align: center;
+    }
+    
+    .header .logo-img {
+      max-width: 180px;
+      height: auto;
+      margin-bottom: 16px;
+      display: block;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    
+    .header .logo-text {
+      font-size: 32px;
+      font-weight: 700;
+      margin-bottom: 16px;
+      letter-spacing: -0.5px;
+    }
+    
+    .header h1 { 
+      font-size: 28px; 
+      margin: 0 0 8px 0;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+    }
+    
+    .header p {
+      font-size: 16px;
+      opacity: 0.9;
+    }
+    
+    .content { 
+      padding: 40px 30px;
+    }
+    
+    .content p {
+      margin-bottom: 16px;
+      font-size: 16px;
+      color: #1E1E1E;
+    }
+    
+    .success-icon { 
+      font-size: 64px; 
+      text-align: center; 
+      margin: 20px 0;
+    }
+    
+    .event-card { 
+      background-color: #f5f5fa;
+      border: 1px solid #eaeaea;
+      border-radius: 12px; 
+      padding: 24px; 
+      margin: 24px 0;
+    }
+    
+    .event-card h3 { 
+      font-size: 22px; 
+      color: #1E1E1E; 
+      margin: 0 0 16px 0;
+      font-weight: 600;
+      letter-spacing: -0.3px;
+    }
+    
+    .detail-row { 
+      display: flex; 
+      padding: 12px 0; 
+      border-bottom: 1px solid #e5e7eb;
+    }
+    
+    .detail-row:last-child { 
+      border-bottom: none;
+    }
+    
+    .detail-icon { 
+      font-size: 20px; 
+      min-width: 32px; 
+      margin-right: 12px;
+    }
+    
+    .detail-content { 
+      flex: 1;
+    }
+    
+    .detail-content strong { 
+      display: block; 
+      font-size: 14px; 
+      color: #1E1E1E; 
+      margin-bottom: 4px;
+      font-weight: 600;
+    }
+    
+    .detail-content p { 
+      margin: 0; 
+      font-size: 15px; 
+      color: #4a5568;
+    }
+    
+    .cta-button { 
+      display: inline-block; 
+      background: linear-gradient(135deg, #424ec6 0%, #2c389e 100%); 
+      color: white !important; 
+      padding: 16px 32px; 
+      text-decoration: none; 
+      border-radius: 8px; 
+      font-weight: 600; 
+      font-size: 16px;
+      letter-spacing: -0.3px;
+      box-shadow: 0 4px 12px rgba(66, 78, 198, 0.3);
+      transition: all 0.2s ease;
+    }
+    
+    .cta-button:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 6px 16px rgba(66, 78, 198, 0.4);
+    }
+    
+    .feature-list {
+      margin: 24px 0;
+      padding-left: 24px;
+    }
+    
+    .feature-list li {
+      margin: 12px 0;
+      font-size: 15px;
+      color: #1E1E1E;
+      line-height: 1.6;
+    }
+    
+    .footer { 
+      background-color: #f5f5fa; 
+      padding: 30px; 
+      text-align: center; 
+      border-top: 1px solid #e5e7eb;
+    }
+    
+    .footer p {
+      font-size: 14px;
+      color: #6b7280;
+      margin: 4px 0;
+    }
+    
+    .footer .logo { 
+      font-weight: 600; 
+      color: #424ec6; 
+      font-size: 16px; 
+      margin-bottom: 8px;
+    }
+    
+    @media (max-width: 600px) {
+      body {
+        padding: 10px;
+      }
+      
+      .header {
+        padding: 32px 24px;
+      }
+      
+      .content {
+        padding: 30px 20px;
+      }
+      
+      .header h1 {
+        font-size: 24px;
+      }
+      
+      .event-card h3 {
+        font-size: 20px;
+      }
+      
+      .cta-button {
+        padding: 14px 24px;
+        font-size: 15px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      ${NU_CONNECT_LOGO_BASE64 ? 
+        `<img src="${NU_CONNECT_LOGO_BASE64}" alt="NU Connect Logo" class="logo-img">` : 
+        `<div class="logo-text">NU CONNECT</div>`
+      }
+      <h1>🎉 Event Proposal Approved!</h1>
+      <p>Your Event Is Ready to Go</p>
+    </div>
+    <div class="content">
+      <div class="success-icon">✅</div>
+      <p>Dear Event Organizer,</p>
+      <p>Congratulations! Your event proposal has been <strong>approved</strong> and is now scheduled in the NU Connect system.</p>
+      
+      <div class="event-card">
+        <h3>${title || 'Your Event'}</h3>
+        <div class="detail-row">
+          <span class="detail-icon">📅</span>
+          <div class="detail-content">
+            <strong>Date</strong>
+            <p>${formattedDate}</p>
+          </div>
+        </div>
+        ${start_time ? `
+        <div class="detail-row">
+          <span class="detail-icon">🕐</span>
+          <div class="detail-content">
+            <strong>Time</strong>
+            <p>${start_time}</p>
+          </div>
+        </div>
+        ` : ''}
+        ${venue ? `
+        <div class="detail-row">
+          <span class="detail-icon">📍</span>
+          <div class="detail-content">
+            <strong>Venue</strong>
+            <p>${venue}</p>
+          </div>
+        </div>
+        ` : ''}
+        ${organization_name ? `
+        <div class="detail-row">
+          <span class="detail-icon">🏢</span>
+          <div class="detail-content">
+            <strong>Organized By</strong>
+            <p>${organization_name}</p>
+          </div>
+        </div>
+        ` : ''}
+      </div>
+      
+      <p><strong>What's Next?</strong></p>
+      <ul class="feature-list">
+        <li>✅ Your event is now visible to all NU Connect users</li>
+        <li>✅ Students can register and attend your event</li>
+        <li>✅ Manage attendees through the event dashboard</li>
+        <li>✅ Track registrations and engagement in real-time</li>
+        <li>✅ Submit post-event requirements after completion</li>
+      </ul>
+      
+      <div style="text-align: center; margin: 30px 0;">
+        <a href="${process.env.REACT_APP_URL || 'https://nuconnect.net'}/events" class="cta-button">
+          View Event Dashboard
+        </a>
+      </div>
+      
+      <p>Make sure to promote your event and engage with potential attendees!</p>
+      
+      <p><strong>NU Connect</strong></p>
+    </div>
+    <div class="footer">
+      <div class="logo">NU Connect</div>
+      <p>&copy; ${new Date().getFullYear()} National University - Dasmariñas</p>
+    </div>
+  </div>
+</body>
+</html>
+  `;
+}
+
+/**
+ * Generate event rejection email template
+ */
+function generateEventRejectionTemplate(rejectionDetails) {
+  const { title, event_id, reason, organization_name, rejected_date, rejector_name } = rejectionDetails;
+  const formattedDate = rejected_date ? new Date(rejected_date).toLocaleDateString('en-US', { 
+    year: 'numeric', 
+    month: 'long', 
+    day: 'numeric' 
+  }) : 'Recently';
+
+  return `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light dark">
+  <meta name="supported-color-schemes" content="light dark">
+  <title>Event Proposal Update - ${title || 'Your Event'}</title>
+  <style>
+    
+    
+    :root {
+      color-scheme: light dark;
+      supported-color-schemes: light dark;
+    }
+    
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    
+    body { 
+      font-family: Arial, -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; 
+      line-height: 1.6; 
+      color: #1E1E1E; 
+      background-color: #f5f5fa; 
+      letter-spacing: -0.3px;
+      -webkit-text-size-adjust: 100%;
+      padding: 20px;
+    }
+    
+    @media (prefers-color-scheme: dark) {
+      body {
+        background-color: #1a1a1a;
+        color: #e0e0e0;
+      }
+      
+      .container {
+        background-color: #2d2d2d !important;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.5) !important;
+      }
+      
+      .header {
+        background: linear-gradient(135deg, #4e59c9 0%, #343fb0 100%) !important;
+      }
+      
+      .content p {
+        color: #d0d0d0 !important;
+      }
+      
+      .reason-card {
+        background-color: #3a2525 !important;
+        border-color: #7c2d2d !important;
+        border-left-color: #ef4444 !important;
+      }
+      
+      .reason-card h3 {
+        color: #f87171 !important;
+      }
+      
+      .reason-card p {
+        color: #fca5a5 !important;
+      }
+      
+      .reapply-card {
+        background-color: #1e3a32 !important;
+        border-color: #2d5a4d !important;
+        border-left-color: #34d399 !important;
+      }
+      
+      .reapply-card h3 {
+        color: #6ee7b7 !important;
+      }
+      
+      .reapply-card p {
+        color: #a7f3d0 !important;
+      }
+      
+      .info-card {
+        background-color: #3a3a3a !important;
+        border-color: #4a4a4a !important;
+      }
+      
+      .info-card h3 {
+        color: #e0e0e0 !important;
+      }
+      
+      .info-card p {
+        color: #b0b0b0 !important;
+      }
+      
+      .footer {
+        background-color: #2d2d2d !important;
+        border-top-color: #4a4a4a !important;
+      }
+      
+      .footer p {
+        color: #a0a0a0 !important;
+      }
+      
+      .footer .logo {
+        color: #5474b4 !important;
+      }
+    }
+    
+    .container { 
+      max-width: 600px; 
+      margin: 0 auto; 
+      background-color: #ffffff; 
+      border-radius: 8px; 
+      overflow: hidden; 
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    }
+    
+    .header { 
+      background: linear-gradient(135deg, #424ec6 0%, #2c389e 100%); 
+      color: white; 
+      padding: 40px 30px; 
+      text-align: center;
+    }
+    
+    .header .logo-img {
+      max-width: 180px;
+      height: auto;
+      margin-bottom: 16px;
+      display: block;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    
+    .header .logo-text {
+      font-size: 32px;
+      font-weight: 700;
+      margin-bottom: 16px;
+      letter-spacing: -0.5px;
+    }
+    
+    .header h1 { 
+      font-size: 24px; 
+      margin: 0;
+      font-weight: 600;
+      letter-spacing: -0.5px;
+    }
+    
+    .header p {
+      font-size: 16px;
+      margin-top: 8px;
+      opacity: 0.9;
+    }
+    
+    .content { 
+      padding: 40px 30px;
+    }
+    
+    .content p {
+      margin-bottom: 16px;
+      font-size: 16px;
+      color: #1E1E1E;
+    }
+    
+    .reason-card { 
+      background-color: #fef2f2; 
+      border: 1px solid #fca5a5; 
+      border-left: 4px solid #dc2626; 
+      border-radius: 6px; 
+      padding: 20px; 
+      margin: 24px 0;
+    }
+    
+    .reason-card h3 { 
+      font-size: 16px; 
+      color: #dc2626; 
+      margin: 0 0 8px 0;
+      font-weight: 600;
+      letter-spacing: -0.3px;
+    }
+    
+    .reason-card p { 
+      font-size: 15px; 
+      color: #7f1d1d; 
+      margin: 0;
+      line-height: 1.5;
+    }
+    
+    .reapply-card { 
+      background-color: #ecfdf5; 
+      border: 1px solid #6ee7b7; 
+      border-left: 4px solid #10b981; 
+      border-radius: 6px; 
+      padding: 20px; 
+      margin: 24px 0;
+    }
+    
+    .reapply-card h3 { 
+      font-size: 16px; 
+      color: #047857; 
+      margin: 0 0 8px 0;
+      font-weight: 600;
+      letter-spacing: -0.3px;
+    }
+    
+    .reapply-card p { 
+      font-size: 15px; 
+      color: #065f46; 
+      margin: 0;
+      line-height: 1.5;
+    }
+    
+    .info-card { 
+      background-color: #f5f5fa; 
+      border: 1px solid #eaeaea; 
+      border-radius: 8px; 
+      padding: 20px; 
+      margin: 24px 0;
+    }
+    
+    .info-card h3 {
+      font-size: 18px;
+      font-weight: 600;
+      color: #1E1E1E;
+      margin-bottom: 12px;
+      letter-spacing: -0.3px;
+    }
+    
+    .info-card p {
+      font-size: 14px;
+      color: #666;
+      margin: 8px 0;
+      line-height: 1.5;
+    }
+    
+    .info-card p strong {
+      font-weight: 600;
+    }
+    
+    .feature-list {
+      margin: 24px 0;
+      padding-left: 24px;
+    }
+    
+    .feature-list li {
+      margin: 12px 0;
+      font-size: 15px;
+      color: #1E1E1E;
+      line-height: 1.6;
+    }
+    
+    .footer { 
+      background-color: #f5f5fa; 
+      padding: 30px; 
+      text-align: center; 
+      border-top: 1px solid #e5e7eb;
+    }
+    
+    .footer p {
+      font-size: 14px;
+      color: #6b7280;
+      margin: 4px 0;
+    }
+    
+    .footer .logo { 
+      font-weight: 600; 
+      color: #424ec6; 
+      font-size: 16px; 
+      margin-bottom: 8px;
+    }
+    
+    @media (max-width: 600px) {
+      body {
+        padding: 10px;
+      }
+      
+      .header {
+        padding: 32px 24px;
+      }
+      
+      .content {
+        padding: 30px 20px;
+      }
+      
+      .header h1 {
+        font-size: 20px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      ${NU_CONNECT_LOGO_BASE64 ? 
+        `<img src="${NU_CONNECT_LOGO_BASE64}" alt="NU Connect Logo" class="logo-img">` : 
+        `<div class="logo-text">NU CONNECT</div>`
+      }
+      <h1>Event Proposal Update</h1>
+      <p>${title || 'Your Event'}</p>
+    </div>
+    <div class="content">
+      <p>Dear Event Organizer,</p>
+      <p>Thank you for submitting your event proposal for <strong>${title || 'your event'}</strong>. We have carefully reviewed your submission.</p>
+      
+      <div class="reason-card">
+        <h3>Proposal Feedback</h3>
+        <p>${reason || 'Your event proposal requires revisions before it can be approved.'}</p>
+      </div>
+      
+      <div class="reapply-card">
+        <h3>Submit a New Proposal!</h3>
+        <p>Don't worry! You can submit a new event proposal after addressing the feedback above. Please ensure all requirements are met and any concerns mentioned have been resolved.</p>
+      </div>
+      
+      <div class="info-card">
+        <h3>Event Details</h3>
+        <p><strong>Event Title:</strong> ${title || 'Not specified'}</p>
+        ${organization_name ? `<p><strong>Organization:</strong> ${organization_name}</p>` : ''}
+        <p><strong>Review Date:</strong> ${formattedDate}</p>
+      </div>
+      
+      <p><strong>Next Steps:</strong></p>
+      <ul class="feature-list">
+        <li>Review the feedback carefully</li>
+        <li>Address all mentioned concerns</li>
+        <li>Ensure all event requirements are complete</li>
+        <li>Check schedule conflicts and venue availability</li>
+        <li>Submit a new event proposal when ready</li>
+      </ul>
+      
+      <p>If you have questions about this feedback or need assistance with your event proposal, please contact our support team.</p>
+      
+      <p><strong>NU Connect</strong></p>
+    </div>
+    <div class="footer">
+      <div class="logo">NU Connect</div>
+      <p>&copy; ${new Date().getFullYear()} National University - Dasmariñas</p>
+    </div>
   </div>
 </body>
 </html>
@@ -2184,11 +3967,17 @@ function generateEventReminderTemplate(eventDetails, reminderType) {
 module.exports = {
   sendInvitationEmail,
   sendRejectionEmail,
-  testEmailConfig,
-  sendTestEmail,
   diagnoseEmailDelivery,
   resendInvitationEmail,
   sendStudentInvitationEmail,
   sendEventReminderEmail,
-  printInboxDeliveryTips
+  printInboxDeliveryTips,
+  // New functions for organization and event approvals/rejections
+  sendOrganizationApprovalEmail,
+  sendOrganizationRejectionEmail,
+  sendEventApprovalEmail,
+  sendEventRejectionEmail
 };
+
+
+

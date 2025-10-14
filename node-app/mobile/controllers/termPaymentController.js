@@ -829,7 +829,7 @@ class MobileTermPaymentController {
             'image/png', 
             'application/pdf'
         ];
-        const maxSize = 5 * 1024 * 1024; // 5MB
+        const maxSize = 10 * 1024 * 1024; // 10MB
 
         console.log(`[DEBUG] Validating receipt file:`, {
             fileName: file.name,
@@ -863,7 +863,7 @@ class MobileTermPaymentController {
             console.log(`[DEBUG] File rejected - size too large: ${file.size} bytes`);
             return {
                 valid: false,
-                message: 'File size must be less than 5MB'
+                message: 'File size must be less than 10MB'
             };
         }
 

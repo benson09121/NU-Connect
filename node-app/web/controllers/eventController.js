@@ -667,6 +667,69 @@ async function approveEventApplication(req, res) {
       data: Array.isArray(timeline) ? timeline : []
     });
 
+    // 📧 Check if event is fully approved and send email
+    try {
+      // Check if this was the last approval step
+      const isFullyApproved = timeline && timeline.length > 0 && 
+        timeline.every(step => step.status === 'Approved' || step.status === 'approved');
+      
+      if (isFullyApproved) {
+        console.log('🎉 Event proposal fully approved - sending email notification');
+        
+        // Get event details
+        const eventDetails = await eventModel.getEventApplicationDetails(event_application_id);
+        
+        if (eventDetails && eventDetails.application) {
+          const emailService = require('../../services/emailService');
+          const app = eventDetails.application;
+          const event = eventDetails.event;
+          
+          // Get adviser email from organization
+          let adviserEmail = null;
+          if (app.organization_name) {
+            try {
+              const organizationsModel = require('../models/organizationsModel');
+              const userModel = require('../models/userModel');
+              const orgDetails = await organizationsModel.getOrganizationByName(app.organization_name);
+              if (orgDetails?.adviser_id) {
+                const adviserUser = await userModel.getUserById(orgDetails.adviser_id);
+                adviserEmail = adviserUser?.email;
+                console.log(`📧 Found adviser email: ${adviserEmail}`);
+              }
+            } catch (adviserError) {
+              console.warn('⚠️ Could not fetch adviser email:', adviserError.message);
+            }
+          }
+          
+          const emailDetails = {
+            title: event?.title || app.event_title,
+            event_id: event?.event_id || app.proposed_event_id,
+            start_date: event?.start_date || app.start_date,
+            start_time: event?.start_time || app.start_time,
+            venue: event?.venue || app.venue,
+            organization_name: app.organization_name,
+            description: event?.description || app.description,
+            adviser_email: adviserEmail // ✅ Include adviser
+          };
+          
+          // Get applicant email
+          const applicantEmail = app.applicant_email || user_email;
+          
+          if (applicantEmail) {
+            const emailResult = await emailService.sendEventApprovalEmail(applicantEmail, emailDetails);
+            if (emailResult.success) {
+              console.log(`✅ Event approval email sent to ${applicantEmail}${adviserEmail ? ` and adviser ${adviserEmail}` : ''}`);
+            } else {
+              console.warn(`⚠️ Failed to send event approval email: ${emailResult.error || emailResult.message}`);
+            }
+          }
+        }
+      }
+    } catch (emailError) {
+      console.error('❌ Error sending event approval email:', emailError.message);
+      // Don't fail the request if email fails
+    }
+
     res.status(200).json({ message: "Event application approved successfully.", data: result });
   } catch (error) {
     console.error("approveEventApplication error:", error);
@@ -705,6 +768,61 @@ async function rejectEventApplication(req, res) {
       operation: 'SNAPSHOT',
       data: Array.isArray(timeline) ? timeline : []
     });
+
+    // 📧 Send event rejection email
+    try {
+      const emailService = require('../../services/emailService');
+      
+      // Get event details
+      const eventDetails = await eventModel.getEventApplicationDetails(event_application_id);
+      
+      if (eventDetails && eventDetails.application) {
+        const app = eventDetails.application;
+        const event = eventDetails.event;
+        
+        // Get adviser email from organization
+        let adviserEmail = null;
+        if (app.organization_name) {
+          try {
+            const organizationsModel = require('../models/organizationsModel');
+            const userModel = require('../models/userModel');
+            const orgDetails = await organizationsModel.getOrganizationByName(app.organization_name);
+            if (orgDetails?.adviser_id) {
+              const adviserUser = await userModel.getUserById(orgDetails.adviser_id);
+              adviserEmail = adviserUser?.email;
+              console.log(`📧 Found adviser email: ${adviserEmail}`);
+            }
+          } catch (adviserError) {
+            console.warn('⚠️ Could not fetch adviser email:', adviserError.message);
+          }
+        }
+        
+        const rejectionDetails = {
+          title: event?.title || app.event_title,
+          event_id: event?.event_id || app.proposed_event_id,
+          reason: comment || 'Your event proposal requires revisions before it can be approved.',
+          organization_name: app.organization_name,
+          rejector_name: req.user?.name || req.user?.email,
+          rejected_date: new Date().toISOString(),
+          adviser_email: adviserEmail // ✅ Include adviser
+        };
+        
+        // Get applicant email
+        const applicantEmail = app.applicant_email || user_email;
+        
+        if (applicantEmail) {
+          const emailResult = await emailService.sendEventRejectionEmail(applicantEmail, rejectionDetails);
+          if (emailResult.success) {
+            console.log(`✅ Event rejection email sent to ${applicantEmail}${adviserEmail ? ` and adviser ${adviserEmail}` : ''}`);
+          } else {
+            console.warn(`⚠️ Failed to send event rejection email: ${emailResult.error || emailResult.message}`);
+          }
+        }
+      }
+    } catch (emailError) {
+      console.error('❌ Error sending event rejection email:', emailError.message);
+      // Don't fail the request if email fails
+    }
 
     res.status(200).json({ message: "Event application rejected successfully." });
   } catch (error) {
@@ -877,6 +995,82 @@ async function markEventRequirementAsViewed(req, res) {
     console.error('[markEventRequirementAsViewed] Error:', error);
     res.status(500).json({
       error: error.message || "An error occurred while marking requirement as viewed.",
+    });
+  }
+}
+
+async function approvePostEventRequirement(req, res) {
+  try {
+    const { submission_id } = req.params;
+    const { remarks } = req.body;
+    const user_email = req.user?.email;
+
+    if (!submission_id) {
+      return res.status(400).json({ message: "submission_id is required." });
+    }
+
+    if (!user_email) {
+      return res.status(401).json({ message: "User not authenticated." });
+    }
+
+    const result = await eventModel.approvePostEventRequirement(
+      parseInt(submission_id),
+      user_email,
+      remarks
+    );
+
+    if (!result) {
+      return res.status(404).json({ message: "Submission not found or could not be approved." });
+    }
+
+    res.status(200).json({
+      message: "Post-event requirement approved successfully.",
+      submission: result
+    });
+  } catch (error) {
+    console.error('[approvePostEventRequirement] Error:', error);
+    res.status(500).json({
+      error: error.message || "An error occurred while approving the post-event requirement.",
+    });
+  }
+}
+
+async function rejectPostEventRequirement(req, res) {
+  try {
+    const { submission_id } = req.params;
+    const { remarks } = req.body;
+    const user_email = req.user?.email;
+
+    if (!submission_id) {
+      return res.status(400).json({ message: "submission_id is required." });
+    }
+
+    if (!user_email) {
+      return res.status(401).json({ message: "User not authenticated." });
+    }
+
+    if (!remarks) {
+      return res.status(400).json({ message: "Remarks are required when rejecting a submission." });
+    }
+
+    const result = await eventModel.rejectPostEventRequirement(
+      parseInt(submission_id),
+      user_email,
+      remarks
+    );
+
+    if (!result) {
+      return res.status(404).json({ message: "Submission not found or could not be rejected." });
+    }
+
+    res.status(200).json({
+      message: "Post-event requirement rejected successfully.",
+      submission: result
+    });
+  } catch (error) {
+    console.error('[rejectPostEventRequirement] Error:', error);
+    res.status(500).json({
+      error: error.message || "An error occurred while rejecting the post-event requirement.",
     });
   }
 }
@@ -2320,6 +2514,8 @@ module.exports = {
   updateEventEvaluationConfig,
   uploadOrUpdatePostEventRequirement,
   markEventRequirementAsViewed,
+  approvePostEventRequirement,
+  rejectPostEventRequirement,
   createEvent,
   getaddEventStatus,
   getEventApprovalTimeline,
