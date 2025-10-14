@@ -617,17 +617,31 @@ async function approveApplication(req, res) {
                 const presidentOfficer = officers.find(o => o.rank_name && o.rank_name.toLowerCase().includes('president'));
                 const recipientEmail = presidentOfficer ? presidentOfficer.email : memberEmails[0];
                 
+                // Get adviser email from organization data
+                let adviserEmail = null;
+                if (result?.organization?.adviser_id) {
+                  try {
+                    const userModel = require('../models/userModel');
+                    const adviserUser = await userModel.getUserById(result.organization.adviser_id);
+                    adviserEmail = adviserUser?.email;
+                    console.log(`📧 Found adviser email: ${adviserEmail}`);
+                  } catch (adviserError) {
+                    console.warn('⚠️ Could not fetch adviser email:', adviserError.message);
+                  }
+                }
+                
                 const emailDetails = {
                   name: organizationName,
                   application_id: application_id,
                   approved_date: new Date().toISOString(),
                   organization_id: orgId,
-                  cycle_number: result?.other?.cycle_number
+                  cycle_number: result?.other?.cycle_number,
+                  adviser_email: adviserEmail // ✅ Include adviser
                 };
                 
                 const emailResult = await emailService.sendOrganizationApprovalEmail(recipientEmail, emailDetails);
                 if (emailResult.success) {
-                  console.log(`✅ Organization approval email sent to ${recipientEmail}`);
+                  console.log(`✅ Organization approval email sent to ${recipientEmail}${adviserEmail ? ` and adviser ${adviserEmail}` : ''}`);
                 } else {
                   console.warn(`⚠️ Failed to send organization approval email: ${emailResult.error || emailResult.message}`);
                 }
@@ -766,17 +780,31 @@ async function rejectApplication(req, res) {
         const applicationDetails = await organizationsModel.getSpecificApplication(null, null, application_id);
         const orgName = applicationDetails?.[0]?.organization_name || appName;
         
+        // Get adviser email if available
+        let adviserEmail = null;
+        if (applicationDetails?.[0]?.adviser_id) {
+          try {
+            const userModel = require('../models/userModel');
+            const adviserUser = await userModel.getUserById(applicationDetails[0].adviser_id);
+            adviserEmail = adviserUser?.email;
+            console.log(`📧 Found adviser email: ${adviserEmail}`);
+          } catch (adviserError) {
+            console.warn('⚠️ Could not fetch adviser email:', adviserError.message);
+          }
+        }
+        
         const rejectionDetails = {
           name: orgName,
           application_id: application_id,
           reason: comments || 'Your application requires revisions before it can be approved.',
           rejector_name: req.user?.name || req.user?.email,
-          rejected_date: new Date().toISOString()
+          rejected_date: new Date().toISOString(),
+          adviser_email: adviserEmail // ✅ Include adviser
         };
         
         const emailResult = await emailService.sendOrganizationRejectionEmail(recipientEmail, rejectionDetails);
         if (emailResult.success) {
-          console.log(`✅ Organization rejection email sent to ${recipientEmail}`);
+          console.log(`✅ Organization rejection email sent to ${recipientEmail}${adviserEmail ? ` and adviser ${adviserEmail}` : ''}`);
         } else {
           console.warn(`⚠️ Failed to send organization rejection email: ${emailResult.error || emailResult.message}`);
         }
