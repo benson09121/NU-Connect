@@ -119,7 +119,8 @@ RUN echo "📋 [BUILD] Setting up document generation templates..." && \
 
 # Copy and setup init script
 COPY scripts/init-templates.sh /app/scripts/init-templates.sh
-RUN chmod +x /app/scripts/init-templates.sh && \
+RUN dos2unix /app/scripts/init-templates.sh 2>/dev/null || sed -i 's/\r$//' /app/scripts/init-templates.sh && \
+    chmod +x /app/scripts/init-templates.sh && \
     chown node:node /app/scripts/init-templates.sh && \
     echo "✅ [BUILD] Template initialization script ready"
 
@@ -167,6 +168,6 @@ ENV CRAWLEE_STORAGE_DIR=/app/storage
 
 EXPOSE 3000
 
-# Run init script then start server
-CMD ["/bin/sh", "-c", "/app/scripts/init-templates.sh && npm run dev"]
+# Run init script if it exists, then start server
+CMD ["/bin/sh", "-c", "if [ -x /app/scripts/init-templates.sh ]; then /app/scripts/init-templates.sh; fi && npm run dev"]
 
