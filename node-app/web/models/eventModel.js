@@ -365,6 +365,45 @@ async function getEventRequirementSubmissions({
   }
 }
 
+async function markEventRequirementAsViewed(submission_id, user_email) {
+  const connection = await pool.getConnection();
+  try {
+    const [rows] = await connection.query(
+      'CALL MarkEventRequirementAsViewed(?, ?);',
+      [submission_id, user_email]
+    );
+    return rows[0]?.[0] || null;
+  } finally {
+    connection.release();
+  }
+}
+
+async function approvePostEventRequirement(submission_id, user_email, remarks) {
+  const connection = await pool.getConnection();
+  try {
+    const [rows] = await connection.query(
+      'CALL ApprovePostEventRequirement(?, ?, ?);',
+      [submission_id, user_email, remarks || null]
+    );
+    return rows[0]?.[0] || null;
+  } finally {
+    connection.release();
+  }
+}
+
+async function rejectPostEventRequirement(submission_id, user_email, remarks) {
+  const connection = await pool.getConnection();
+  try {
+    const [rows] = await connection.query(
+      'CALL RejectPostEventRequirement(?, ?, ?);',
+      [submission_id, user_email, remarks || null]
+    );
+    return rows[0]?.[0] || null;
+  } finally {
+    connection.release();
+  }
+}
+
 async function createEvent(event) {
   const connection = await pool.getConnection();
   try {
@@ -817,6 +856,9 @@ module.exports = {
     updateEventEvaluationConfig,
     uploadOrUpdatePostEventRequirement,
     getEventRequirementSubmissions,
+    markEventRequirementAsViewed,
+    approvePostEventRequirement,
+    rejectPostEventRequirement,
     createEvent,
     getaddEventStatus,
     getEventApprovalTimeline,

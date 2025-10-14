@@ -328,9 +328,16 @@ async function approveUserApplication(req, res) {
           { headers: { Authorization: `Bearer ${token}` } }
         );
         const redemptionUrl = response.data.inviteRedeemUrl;
-        await emailService.sendInvitationEmail(application.email, redemptionUrl);
+        console.log(`📨 Sending invitation email to ${application.email}...`);
+        const emailResult = await emailService.sendInvitationEmail(application.email, redemptionUrl);
+        if (emailResult.success) {
+          console.log(`✅ Invitation email sent successfully to ${application.email} (ID: ${emailResult.messageId})`);
+        } else {
+          console.error(`❌ Invitation email failed for ${application.email}:`, emailResult.error || emailResult.message);
+        }
       } catch (emailError) {
-        console.error('approveUserApplication: invitation email failed:', emailError);
+        console.error('approveUserApplication: invitation email failed:', emailError.message);
+        console.error('Full error:', emailError);
       }
     }
 
@@ -369,39 +376,6 @@ async function resendInvitationEmail(req, res) {
     res.status(500).json({
       success: false,
       error: error.message || 'An error occurred while resending the invitation email.',
-    });
-  }
-}
-
-async function sendTestEmail(req, res) {
-  const { email } = req.body;
-  try {
-    if (!email) {
-      return res
-        .status(400)
-        .json({ success: false, error: 'Email is required.' });
-    }
-
-    const result = await emailService.sendTestEmail(email);
-
-    if (result.success) {
-      res.status(200).json({
-        success: true,
-        message: 'Test email sent successfully.',
-        data: { email, messageId: result.messageId },
-      });
-    } else {
-      res.status(500).json({
-        success: false,
-        error: 'Failed to send test email: ' + result.error,
-      });
-    }
-  } catch (error) {
-    console.error('Failed to send test email:', error);
-    res.status(500).json({
-      success: false,
-      error:
-        error.message || 'An error occurred while sending the test email.',
     });
   }
 }
@@ -455,6 +429,18 @@ async function rejectUserApplication(req, res) {
       data: fullPending,
     });
     console.log(`📡 Broadcasted pending applications update for rejection: ${application_id}`);
+
+    // Send rejection email
+    if (application && application.email) {
+      try {
+        const reason = rejection_reason || 'No reason provided';
+        await emailService.sendRejectionEmail(application.email, reason, true);
+        console.log(`✅ Rejection email sent to ${application.email}`);
+      } catch (emailError) {
+        console.error('rejectUserApplication: rejection email failed:', emailError);
+        // Don't fail the rejection if email fails
+      }
+    }
 
     res.status(200).json({ success: true, data: application });
   } catch (error) {
@@ -613,7 +599,6 @@ module.exports = {
   approveUserApplication,
   rejectUserApplication,
   resendInvitationEmail,
-  sendTestEmail,
   diagnoseEmailDelivery,
   getUserActivationStatus,
   getPendingUsers,

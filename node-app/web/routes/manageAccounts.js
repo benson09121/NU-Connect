@@ -21,7 +21,6 @@ router.post('/manage/user-application/reject', middleware.validateAzureJWT, midd
 
 // Email functions
 router.post('/manage/resend-invitation', middleware.validateAzureJWT, middleware.hasPermission("MANAGE_ACCOUNT"), accountController.resendInvitationEmail);
-router.post('/manage/send-test-email', middleware.validateAzureJWT, middleware.hasPermission("MANAGE_ACCOUNT"), accountController.sendTestEmail);
 router.post('/manage/diagnose-email-delivery', middleware.validateAzureJWT, middleware.hasPermission("MANAGE_ACCOUNT"), accountController.diagnoseEmailDelivery);
 
 // User activation functions

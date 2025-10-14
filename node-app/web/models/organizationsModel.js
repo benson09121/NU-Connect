@@ -1695,7 +1695,6 @@ async function rejectLeaveApplication(leave_application_id, organization_id, org
         connection.release();
     }
 }
-
 async function getApplicationOfficers(application_id) {
     const connection = await pool.getConnection();
     try {

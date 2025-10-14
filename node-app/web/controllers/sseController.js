@@ -4,16 +4,21 @@ const sessionSubscriptions = new Map();
 
 // Publish updates to any Redis channel
 function publishToChannel(channel, data) {
-    console.log(`🟢 [BACKEND-SSE-DEBUG] Publishing to channel: ${channel}, data:`, data);
+    // Reduced logging to avoid flooding console with large data arrays
+    const dataPreview = Array.isArray(data) 
+        ? `Array(${data.length} items)`
+        : typeof data === 'object' 
+            ? `Object(${Object.keys(data).length} keys)`
+            : data;
+    
+    console.log(`🟢 [BACKEND-SSE-DEBUG] Publishing to channel: ${channel}, data: ${dataPreview}`);
     
     // Fix: Don't spread arrays, preserve them as arrays
     const payload = Array.isArray(data) 
         ? { data, timestamp: Date.now() }
         : { ...data, timestamp: Date.now() };
     
-    console.log(`🔍 [BACKEND-SSE-DEBUG] About to publish to Redis channel: ${channel}, payload:`, payload);
     const result = redisClient.publish(channel, JSON.stringify(payload));
-    console.log(`🔍 [BACKEND-SSE-DEBUG] Redis publish result:`, result);
     return result;
 }
 
@@ -58,26 +63,22 @@ async function handleSSEConnection(req, res) {
         try {
             const eventData = JSON.parse(message);
             
-            console.log(`🔵 [BACKEND-SSE-DEBUG] Redis message received on channel: ${channel}`, eventData);
+            // Reduced logging - only show summary for large data
+            const dataPreview = eventData.data && Array.isArray(eventData.data)
+                ? `${eventData.operation || 'data'} - Array(${eventData.data.length} items)`
+                : eventData.operation
+                    ? `${eventData.operation} - ${typeof eventData.data}`
+                    : 'data update';
             
-            // Debug organization channels specifically
-            if (channel && (channel.includes('organization') || channel.includes('orghub') || channel.startsWith('user_organizations_'))) {
-                console.log(`🔴 [BACKEND-SSE-DEBUG] Received message for org channel: ${channel}, subscribed: ${sessionSubscriptions.get(sessionId)?.channels.has(channel)}, data:`, eventData);
-            }
+            console.log(`� [BACKEND-SSE-DEBUG] Redis message on channel: ${channel} - ${dataPreview}`);
             
             // Only send if client is subscribed to this channel
             if (sessionSubscriptions.get(sessionId)?.channels.has(channel)) {
-                console.log(`✅ [BACKEND-SSE-DEBUG] Forwarding message to client for channel: ${channel}`);
+                console.log(`✅ [BACKEND-SSE-DEBUG] Forwarding to client: ${channel}`);
                 res.write(`event: ${channel}\n`);
                 res.write(`data: ${JSON.stringify(eventData)}\n\n`);
-                
-                // Debug what we're sending to client
-                if (channel && (channel.includes('organization') || channel.includes('orghub') || channel.startsWith('user_organizations_'))) {
-                    console.log(`🔴 [BACKEND-SSE-DEBUG] Sent to client - channel: ${channel}, data:`, eventData);
-                }
             } else {
-                console.log(`❌ [BACKEND-SSE-DEBUG] Client not subscribed to channel: ${channel}, available channels:`, 
-                    Array.from(sessionSubscriptions.get(sessionId)?.channels || []));
+                console.log(`❌ [BACKEND-SSE-DEBUG] Client not subscribed to: ${channel}`);
             }
         } catch (err) {
             console.error(`❌ [BACKEND-SSE-DEBUG] Error processing Redis message for channel ${channel}:`, err);

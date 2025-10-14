@@ -91,4 +91,19 @@ router.put(
   controller.approveTransaction
 );
 
+// Audit Trail Routes
+router.get(
+  '/transactions/:id/audit-trail',
+  middleware.validateAzureJWT,
+  middleware.hasPermission([VIEW, MANAGE]),
+  controller.getTransactionAuditTrail
+);
+
+router.get(
+  '/transaction-audits',
+  middleware.validateAzureJWT,
+  middleware.hasPermission([VIEW, MANAGE]),
+  controller.getAllTransactionAudits
+);
+
 module.exports = router;

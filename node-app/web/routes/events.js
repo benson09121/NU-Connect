@@ -31,6 +31,27 @@ router.post(
   eventController.uploadOrUpdatePostEventRequirement
 );
 
+router.put(
+  '/event-requirements/submissions/:submission_id/mark-viewed',
+  middleware.validateAzureJWT,
+  middleware.hasPermission("VIEW_EVENT"),
+  eventController.markEventRequirementAsViewed
+);
+
+router.put(
+  '/event-requirements/submissions/:submission_id/approve',
+  middleware.validateAzureJWT,
+  middleware.hasPermission("MANAGE_REQUIREMENTS"),
+  eventController.approvePostEventRequirement
+);
+
+router.put(
+  '/event-requirements/submissions/:submission_id/reject',
+  middleware.validateAzureJWT,
+  middleware.hasPermission("MANAGE_REQUIREMENTS"),
+  eventController.rejectPostEventRequirement
+);
+
 router.get('/events/certificate-template', eventController.getCert);
 router.get('/events/sample-certificate', middleware.validateAzureJWT, middleware.hasPermission("UPDATE_EVALUATION"), eventController.getSampleCertificate);
 

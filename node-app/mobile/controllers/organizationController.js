@@ -4,6 +4,7 @@ const { publishToChannel, publishOrgHub } = require('../../web/controllers/sseCo
 const organizationModel = require('../models/organizationModel'); 
 const userModel = require('../models/userModel');
 const webOrganizationsModel = require('../../web/models/organizationsModel'); // Import web model for getPendingOrganizationMembers
+const fileProcessor = require('../../utils/fileProcessor'); // File processing utility
 
 
 async function getOrganizations(req, res) {
@@ -113,17 +114,16 @@ async function submitOrganizationApplication(req, res) {
                     size: uploadedFile.size
                 });
                 
-                // Validate file type (similar to term payment validation)
+                // Validate file type
                 const allowedTypes = [
                     'image/jpeg', 
-                    'image/jpg',      // Some mobile apps incorrectly use this
-                    'image/pjpeg',    // Progressive JPEG (IE)
+                    'image/jpg',
+                    'image/pjpeg',
                     'image/png', 
                     'application/pdf'
                 ];
-                const maxSize = 5 * 1024 * 1024; // 5MB
+                const maxSize = 10 * 1024 * 1024; // 10MB (before processing)
                 
-                // Also check file extension as a backup
                 const fileExt = uploadedFile.name.toLowerCase().split('.').pop();
                 const allowedExtensions = ['jpg', 'jpeg', 'png', 'pdf'];
                 
@@ -140,7 +140,7 @@ async function submitOrganizationApplication(req, res) {
                 if (uploadedFile.size > maxSize) {
                     console.log(`[DEBUG] Payment proof file rejected - size too large: ${uploadedFile.size} bytes`);
                     return res.status(400).json({ 
-                        message: 'Payment proof file size must be less than 5MB' 
+                        message: 'Payment proof file size must be less than 10MB' 
                     });
                 }
                 
@@ -150,17 +150,36 @@ async function submitOrganizationApplication(req, res) {
                     fs.mkdirSync(uploadDir, { recursive: true });
                 }
                 
-                // Generate unique filename for both database and file storage
+                // 🎯 PROCESS FILE: Resize and compress images
+                let processedFile;
+                try {
+                    console.log('📦 [FileProcessor] Processing payment proof...');
+                    processedFile = await fileProcessor.processUploadedFile(uploadedFile, 'receipt');
+                    console.log('✅ [FileProcessor] Processing complete:', processedFile.stats);
+                } catch (procError) {
+                    console.warn('⚠️ [FileProcessor] Processing failed, using original:', procError.message);
+                    // Fallback to original file (backward compatibility)
+                    processedFile = {
+                        buffer: uploadedFile.data,
+                        filename: uploadedFile.name,
+                        stats: { processed: false, error: procError.message }
+                    };
+                }
+                
+                // Generate unique filename
                 const timestamp = Date.now();
                 const randomString = Math.random().toString(36).substring(2, 8);
-                const fileExtension = path.extname(uploadedFile.name);
+                const fileExtension = path.extname(processedFile.filename);
                 uploadedFileName = `payment-proof-${timestamp}-${randomString}${fileExtension}`;
                 
                 const uploadPath = path.join(uploadDir, uploadedFileName);
                 
-                // Move the uploaded file
-                await uploadedFile.mv(uploadPath);
-                console.log('Payment proof file uploaded to:', uploadPath);
+                // Write processed file
+                fs.writeFileSync(uploadPath, processedFile.buffer);
+                console.log('💾 Payment proof saved:', uploadPath);
+                if (processedFile.stats.processed) {
+                    console.log(`💰 Storage saved: ${processedFile.stats.savings} (${((processedFile.stats.originalSize - processedFile.stats.processedSize) / 1024).toFixed(2)} KB)`);
+                }
             }
 
             // Create membership transaction

@@ -16,6 +16,21 @@ async function getLeaderboards(req, res) {
     }
 }
 
+async function getLeaderboardsByCategory(req, res) {
+    const { sessionId } = req.query;
+    try {
+        const leaderboards = await analyticsModel.getLeaderboardsByCategory();
+        if (sessionId) {
+            subscribeToChannel(sessionId, "leaderboards_by_category");
+        }
+        res.status(200).json(leaderboards);
+    } catch (error) {
+        res.status(500).json({
+            error: error.message || "An error occurred while fetching the leaderboards by category.",
+        });
+    }
+}
+
 async function getOrganizationAnalytics(req, res) {
         const { sessionId } = req.query;
 
@@ -83,6 +98,7 @@ async function getMemberEngagement(req, res) {
 
 module.exports = {
     getLeaderboards,
+    getLeaderboardsByCategory,
     getActivities,
     getOrganizationAnalytics,
     getOrganizationFinance,

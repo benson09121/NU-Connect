@@ -2,6 +2,7 @@ const requirementModel = require('../models/requirementModel');
 const path = require('path');
 const fs = require('fs');
 const { subscribeToChannel, publishToChannel } = require('./sseController');
+const fileProcessor = require('../../utils/fileProcessor'); // File processing utility
 
 async function addRequirement(req, res) {
   try {
