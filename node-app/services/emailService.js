@@ -3976,7 +3976,9 @@ module.exports = {
   sendOrganizationApprovalEmail,
   sendOrganizationRejectionEmail,
   sendEventApprovalEmail,
-  sendEventRejectionEmail
+  sendEventRejectionEmail //Ilagay itu s Controrlleru 
+
+  //Palitan email na nuconnect2026
 };
 
 
