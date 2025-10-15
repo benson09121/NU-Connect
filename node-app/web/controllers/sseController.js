@@ -11,7 +11,6 @@ function publishToChannel(channel, data) {
             ? `Object(${Object.keys(data).length} keys)`
             : data;
     
-    console.log(`🟢 [BACKEND-SSE-DEBUG] Publishing to channel: ${channel}, data: ${dataPreview}`);
     
     // Fix: Don't spread arrays, preserve them as arrays
     const payload = Array.isArray(data) 
@@ -70,18 +69,16 @@ async function handleSSEConnection(req, res) {
                     ? `${eventData.operation} - ${typeof eventData.data}`
                     : 'data update';
             
-            console.log(`� [BACKEND-SSE-DEBUG] Redis message on channel: ${channel} - ${dataPreview}`);
-            
+           
             // Only send if client is subscribed to this channel
             if (sessionSubscriptions.get(sessionId)?.channels.has(channel)) {
-                console.log(`✅ [BACKEND-SSE-DEBUG] Forwarding to client: ${channel}`);
                 res.write(`event: ${channel}\n`);
                 res.write(`data: ${JSON.stringify(eventData)}\n\n`);
             } else {
-                console.log(`❌ [BACKEND-SSE-DEBUG] Client not subscribed to: ${channel}`);
+               
             }
         } catch (err) {
-            console.error(`❌ [BACKEND-SSE-DEBUG] Error processing Redis message for channel ${channel}:`, err);
+          
         }
     });
     
@@ -99,35 +96,26 @@ async function handleSSEConnection(req, res) {
 
 // Subscribe session to a channel
 function subscribeToChannel(sessionId, channel) {
-    console.log(`🔍 [BACKEND-SSE-DEBUG] Attempting to subscribe session ${sessionId} to channel: ${channel}`);
-    console.log(`🔍 [BACKEND-SSE-DEBUG] Current sessions:`, Array.from(sessionSubscriptions.keys()));
     
     const session = sessionSubscriptions.get(sessionId);
     if (!session) {
-        console.log(`❌ [BACKEND-SSE-DEBUG] No session found for ${sessionId}`);
-        console.log(`🔍 [BACKEND-SSE-DEBUG] Available sessions:`, Array.from(sessionSubscriptions.keys()));
         return false;
     }
     
-    console.log(`✅ [BACKEND-SSE-DEBUG] Session ${sessionId} found, current channels:`, Array.from(session.channels));
-    
     if (session.channels.has(channel)) {
-        console.log(`⚠️ [BACKEND-SSE-DEBUG] Session ${sessionId} already subscribed to channel: ${channel}`);
         return true; // Changed from false to true - already subscribed should be success
     }
     
     // Debug organization channels specifically
     if (channel && (channel.includes('organization') || channel.includes('orghub') || channel.startsWith('user_organizations_'))) {
-        console.log(`🟡 [BACKEND-SSE-DEBUG] Subscribing session ${sessionId} to org channel: ${channel}`);
+   
     }
     
     try {
         session.subscriber.subscribe(channel);
         session.channels.add(channel);
-        console.log(`✅ [BACKEND-SSE-DEBUG] Successfully subscribed session ${sessionId} to channel: ${channel}. Total channels: ${session.channels.size}`);
         return true;
     } catch (error) {
-        console.error(`❌ [BACKEND-SSE-DEBUG] Failed to subscribe session ${sessionId} to channel: ${channel}`, error);
         return false;
     }
 }
@@ -148,16 +136,12 @@ function generateSessionId() {
 }
 
 function cleanupSession(sessionId) {
-    console.log(`🧹 [BACKEND-SSE-DEBUG] Cleaning up session: ${sessionId}`);
     const session = sessionSubscriptions.get(sessionId);
     if (session) {
-        console.log(`🧹 [BACKEND-SSE-DEBUG] Session ${sessionId} had ${session.channels.size} channels subscribed`);
         session.subscriber.unsubscribe();
         session.subscriber.quit();
         sessionSubscriptions.delete(sessionId);
-        console.log(`🧹 [BACKEND-SSE-DEBUG] Session ${sessionId} cleaned up successfully`);
     } else {
-        console.log(`⚠️ [BACKEND-SSE-DEBUG] Attempted to cleanup non-existent session: ${sessionId}`);
     }
 }
 
@@ -217,5 +201,6 @@ module.exports = {
     subscribeToChannel,
     unsubscribeFromChannel,
     publishToChannel,
-    publishOrgHub
+    publishOrgHub,
+    getOrgHubChannel
 };

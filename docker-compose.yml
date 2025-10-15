@@ -23,6 +23,7 @@ services:
     build: ./node-app
     environment:
       TZ: Asia/Manila
+      NODE_ENV: production
     volumes:
       - /opt/certificates/templates:/app/certificates/templates
       - /opt/certificates/generated:/app/certificates/generated

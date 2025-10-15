@@ -390,14 +390,6 @@ exports.approveApprovalStep = async (req, res) => {
         
         const chainData = chainInfo[0];
         
-        console.log('🔍 [APPROVE] Chain data BEFORE stored procedure:', {
-            chain_id: chainData.chain_id,
-            application_id: chainData.application_id,
-            approval_order: chainData.approval_order,
-            is_final_approval: chainData.is_final_approval,
-            approver_user_id: chainData.approver_user_id
-        });
-        
         // Verify user has e-signature
         if (!chainData.user_signature_path) {
             return res.status(400).json({
@@ -427,21 +419,12 @@ exports.approveApprovalStep = async (req, res) => {
             [chainId, remarks || null]
         );
         
-        console.log('🔍 [DEBUG] Raw stored procedure result structure:', {
-            result_length: result.length,
-            result_0_length: result[0] ? result[0].length : 0,
-            result_0_0_exists: result[0] && result[0][0] ? true : false,
-            result_full: JSON.stringify(result, null, 2)
-        });
-        
         let spResult = result[0][0];
-        console.log('✅ [APPROVE] Stored procedure result (spResult):', JSON.stringify(spResult, null, 2));
         
         // COMPATIBILITY FIX: Handle old stored procedure format
         // Old format: { result: { organization: {...}, other: {...} } }
         // New format: { organization_created: true, organization_id: ..., ... }
         if (spResult && spResult.result) {
-            console.log('🔄 [APPROVE] Detected OLD stored procedure format, converting to new format...');
             const oldResult = spResult.result;
             spResult = {
                 message: 'Application fully approved - organization created successfully',
@@ -736,8 +719,6 @@ exports.approveApprovalStep = async (req, res) => {
             setImmediate(async () => {
                 const docConnection = await pool.getConnection();
                 try {
-                    console.log('📄 [ASYNC-DOC-GEN] Background document generation started for application:', appId);
-                    
                     const documentGenerationService = require('../services/documentGenerationService');
                     const { publishToChannel } = require('./sseController');
                     
@@ -745,9 +726,7 @@ exports.approveApprovalStep = async (req, res) => {
                     await documentGenerationService.updateDocumentStatus(appId, 'docx', null, 'processing');
                     
                     // Generate DOCX
-                    console.log('📄 [ASYNC-DOC-GEN] Generating DOCX...');
                     const docxPath = await documentGenerationService.generateApplicationForm(appId, 'docx');
-                    console.log('✅ [ASYNC-DOC-GEN] DOCX generated:', docxPath);
                     
                     // Send SSE event for DOCX completion
                     publishToChannel(`application_${appId}`, {
@@ -759,9 +738,7 @@ exports.approveApprovalStep = async (req, res) => {
                     });
                     
                     // Generate PDF
-                    console.log('📄 [ASYNC-DOC-GEN] Generating PDF...');
                     const pdfPath = await documentGenerationService.generateApplicationForm(appId, 'pdf');
-                    console.log('✅ [ASYNC-DOC-GEN] PDF generated:', pdfPath);
                     
                     // Send SSE event for complete generation
                     publishToChannel(`application_${appId}`, {
@@ -824,10 +801,15 @@ exports.approveApprovalStep = async (req, res) => {
         
     } catch (error) {
         console.error('❌ [APPROVE] Error approving approval step:', error);
-        res.status(500).json({
-            error: 'Failed to approve approval step',
-            message: error.message
-        });
+        // Only send error response if we haven't already sent a response
+        if (!res.headersSent) {
+            res.status(500).json({
+                error: 'Failed to approve approval step',
+                message: error.message
+            });
+        } else {
+            console.error('❌ [APPROVE] Cannot send error response - headers already sent');
+        }
     } finally {
         connection.release();
     }

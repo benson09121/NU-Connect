@@ -5,6 +5,93 @@ const pool = require('../../config/db');
 const convertToPdf = require('../../config/convertToPdf');
 
 /**
+ * Requirement lists for NEW and RENEWAL applications
+ */
+const NEW_REQUIREMENTS = [
+    'Letter of Intent',
+    'Application Form',
+    'By Laws of the Organization (approved by the officers, adviser/s, program chairs and dean)',
+    'List of Officers/Founders',
+    'Official Logo (send to sdao@nu-dasma.edu.ph)',
+    'Letter from the College Dean endorsing the Faculty Adviser (Co-Curricular organizations)',
+    'List of Members',
+    'Latest Certificate of Grades of Officers',
+    'Biodata/CV of Officers',
+    'Resume/CV of Adviser',
+    'Letter from the College Dean/Department Chair endorsing the Faculty Adviser',
+    'List of Proposed Projects with Proposed Budget for the AY',
+    'Others'
+];
+
+const RENEWAL_REQUIREMENTS = [
+    'Letter of Intent',
+    'Application Form',
+    'By Laws of the Organization (if there is an update done last AY and approved by the officers, adviser/s, program chairs and dean)',
+    'Updated List of Officers/Founders for the AY',
+    'Updated Logo (send to sdao@nu-dasma.edu.ph)',
+    'Letter from the College Dean/Department Chair endorsing the Faculty Adviser',
+    'List of Members',
+    'Latest Certificate of Grades of Officers',
+    'Biodata/CV of New Elected Officers',
+    'List of Proposed Projects with Proposed Budget for the AY',
+    'List of Past Projects',
+    'Financial Statement of the previous AY (signed by officers and adviser)',
+    'Summary of Evaluation of the Past Projects',
+    'Others'
+];
+
+/**
+ * Helper function to create a slug from requirement name
+ */
+function slugify(text) {
+    return text
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, '') // Remove special characters
+        .replace(/\s+/g, '_')        // Replace spaces with underscores
+        .replace(/_+/g, '_')         // Replace multiple underscores with single
+        .replace(/^_|_$/g, '');      // Remove leading/trailing underscores
+}
+
+/**
+ * Check if a requirement was submitted
+ */
+function hasRequirement(requirementName, submittedRequirements) {
+    const reqLower = requirementName.toLowerCase().trim();
+    
+    const found = submittedRequirements.some(r => {
+        const submittedLower = r.requirement_name.toLowerCase().trim();
+        
+        // 1. Exact match
+        if (submittedLower === reqLower) {
+            return true;
+        }
+        
+        // 2. Check if submitted requirement contains the target requirement
+        if (submittedLower.includes(reqLower)) {
+            return true;
+        }
+        
+        // 3. Check if target requirement contains the submitted requirement
+        if (reqLower.includes(submittedLower)) {
+            return true;
+        }
+        
+        // 4. Check for key words (first 3 significant words)
+        const reqWords = reqLower.split(' ').filter(w => w.length > 3).slice(0, 3);
+        const submittedWords = submittedLower.split(' ').filter(w => w.length > 3);
+        
+        const hasCommonWords = reqWords.some(word => submittedWords.some(sw => sw.includes(word) || word.includes(sw)));
+        if (hasCommonWords) {
+            return true;
+        }
+        
+        return false;
+    });
+    
+    return found;
+}
+
+/**
  * Generate Student Organization Application Form
  * @param {number} applicationId - Application ID
  * @param {string} format - Output format: 'docx' or 'pdf' (default: 'docx')
@@ -28,8 +115,6 @@ async function generateApplicationForm(applicationId, format = 'docx') {
         // 4. Map data to template
         const templateData = mapDataToTemplate(appData, approvalData, requirements);
         
-        console.log('📄 [DOC-GEN] Template data prepared:', JSON.stringify(templateData, null, 2));
-        
         // 5. Load template
         const templatePath = path.join('/app/templates', 'NUD-ACS-SDA-F-003 - Student Org Application Form.docx');
         
@@ -37,9 +122,22 @@ async function generateApplicationForm(applicationId, format = 'docx') {
             throw new Error(`Template file not found: ${templatePath}`);
         }
         
+        console.log('📄 [DOC-GEN] Template file loaded successfully:', templatePath);
         const templateFile = fs.readFileSync(templatePath);
         
         // 6. Generate document
+        console.log('🔍 [TEMPLATE-DEBUG] ALL DATA being passed to template:');
+        
+        // Show ALL placeholders and their values
+        const allPlaceholders = Object.keys(templateData).sort();
+        allPlaceholders.forEach(key => {
+            if (key.includes('checkbox') || key.includes('app_') || key.includes('req_')) {
+                console.log(`  ${key}: "${templateData[key]}"`);
+            }
+        });
+        
+        console.log('🔍 [TEMPLATE-DEBUG] Total placeholders count:', allPlaceholders.length);
+        
         const handler = new TemplateHandler();
         const doc = await handler.process(templateFile, templateData);
         
@@ -114,6 +212,7 @@ async function fetchApplicationData(connection, applicationId) {
             a.submitted_org_name,
             a.description as submitted_org_description,
             a.category,
+            a.application_type,
             a.student_id,
             a.submitter_contact_no,
             a.base_program_id,
@@ -201,6 +300,17 @@ async function fetchRequirementsData(connection, applicationId) {
  * Map database data to template placeholders
  */
 function mapDataToTemplate(appData, approvalData, requirements) {
+    // More robust application type detection
+    const appTypeStr = (appData.application_type || '').toLowerCase().trim();
+    const isNewApplication = appTypeStr === 'new' || appTypeStr === 'new organization' || appTypeStr === 'new org';
+    
+    console.log('📄 [DOC-GEN] Application type detection:', {
+        raw_application_type: appData.application_type,
+        normalized_application_type: appTypeStr,
+        isNewApplication: isNewApplication,
+        category: appData.category
+    });
+    
     const data = {
         // Basic information
         'academic-year': appData.academic_year || '',
@@ -212,21 +322,42 @@ function mapDataToTemplate(appData, approvalData, requirements) {
         'description': appData.submitted_org_description || '',
         'College': appData.college || '',
         
-        // Category checkboxes - use checkbox characters
-        'checkbox_cocurricular': appData.category === 'Co-Curricular Organization' ? '☑' : '☐',
-        'checkbox_extracurricular': appData.category === 'Extra Curricular Organization' ? '☑' : '☐',
+        // Category checkboxes - TEST with X/empty instead of Unicode
+        'checkbox_cocurricular': appData.category === 'Co-Curricular Organization' ? 'X' : '',
+        'checkbox_extracurricular': appData.category === 'Extra Curricular Organization' ? 'X' : '',
+        
+        // Application type checkboxes - TEST with X/empty instead of Unicode
+        'app_new': isNewApplication ? 'X' : '',
+        'app_renewal': !isNewApplication ? 'X' : '',
     };
+    
+    console.log('� [CHECKBOX-DEBUG] Final checkbox values:', {
+        'app_new': data['app_new'],
+        'app_renewal': data['app_renewal'],
+        'checkbox_cocurricular': data['checkbox_cocurricular'],
+        'checkbox_extracurricular': data['checkbox_extracurricular']
+    });
+    
+    // Add dynamic requirement checkboxes based on application type
+    const requirementList = isNewApplication ? NEW_REQUIREMENTS : RENEWAL_REQUIREMENTS;
+    const requirementPrefix = isNewApplication ? 'req_new_' : 'req_renewal_';
+    
+    console.log(`📄 [DOC-GEN] Generating ${isNewApplication ? 'NEW' : 'RENEWAL'} requirements (${requirementList.length} items)`);
+    
+    requirementList.forEach((reqName, index) => {
+        const placeholderName = `${requirementPrefix}${index + 1}`;
+        const isSubmitted = hasRequirement(reqName, requirements);
+        data[placeholderName] = isSubmitted ? 'X' : '';  // TEST with X/empty instead of Unicode
+        
+        if (isSubmitted) {
+            console.log(`✓ ${placeholderName}: X - "${reqName}" (SUBMITTED)`);
+        }
+    });
     
     // Map approval chain signatures
     const endorsers = approvalData.filter(a => a.uses_endorsed === 1);
     const receivers = approvalData.filter(a => a.status === 'Received');
     const approvers = approvalData.filter(a => a.is_final_approval === 1);
-    
-    console.log('📄 [DOC-GEN] Approval chain breakdown:', {
-        endorsers: endorsers.length,
-        receivers: receivers.length,
-        approvers: approvers.length
-    });
     
     // Endorsers - Updated placeholder names
     if (endorsers[0]) {
