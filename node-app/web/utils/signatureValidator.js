@@ -103,9 +103,9 @@ async function validateSignature(imageBuffer, filename) {
         // Ensure confidence doesn't go below 0
         confidence = Math.max(0, confidence);
 
-        // ADJUSTED: Lower confidence threshold for acceptance (was 50, now 65)
-        // This allows simpler signatures to pass validation
-        const isValid = confidence >= 65 && issues.length === 0;
+        // ADJUSTED: Lower confidence threshold for acceptance (was 65, now 40)
+        // This allows simpler and more varied signatures to pass validation
+        const isValid = confidence >= 40 && issues.length === 0;
 
         console.log(`✅ Validation result: ${isValid ? 'VALID' : 'INVALID'} (confidence: ${confidence}%)`);
         if (issues.length > 0) {

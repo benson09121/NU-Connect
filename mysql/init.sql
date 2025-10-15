@@ -4624,7 +4624,7 @@ BEGIN
         SELECT JSON_ARRAYAGG(u.email)
         FROM tbl_user u
         INNER JOIN tbl_role r ON u.role_id = r.role_id
-        WHERE r.name = 'SDAO'
+        WHERE r.role_name = 'SDAO'
     );
     
     -- Notify SDAO admins
@@ -4738,7 +4738,7 @@ BEGIN
         SELECT JSON_ARRAYAGG(u.email)
         FROM tbl_user u
         INNER JOIN tbl_role r ON u.role_id = r.role_id
-        WHERE r.name = 'SDAO'
+        WHERE r.role_name = 'SDAO'
     );
     
     -- Notify SDAO admins
@@ -4894,7 +4894,7 @@ BEGIN
         SELECT JSON_ARRAYAGG(u.email)
         FROM tbl_user u
         INNER JOIN tbl_role r ON u.role_id = r.role_id
-        WHERE r.name = 'SDAO'
+        WHERE r.role_name = 'SDAO'
     );
     
     -- Notify SDAO admins
@@ -4971,7 +4971,7 @@ BEGIN
         SELECT JSON_ARRAYAGG(u.email)
         FROM tbl_user u
         INNER JOIN tbl_role r ON u.role_id = r.role_id
-        WHERE r.name = 'SDAO'
+        WHERE r.role_name = 'SDAO'
     );
     
     -- Notify SDAO admins

@@ -120,51 +120,73 @@ app.use((req, res, next) => {
     next();
 });
 
-// 🔍 CORS Debugging Middleware - Log all preflight requests
-app.use((req, res, next) => {
-    if (req.method === 'OPTIONS') {
-        console.log('🔍 [CORS DEBUG] Preflight OPTIONS request:');
-        console.log('  - Origin:', req.headers.origin);
-        console.log('  - Method:', req.headers['access-control-request-method']);
-        console.log('  - Headers requested:', req.headers['access-control-request-headers']);
-        console.log('  - URL:', req.url);
-        console.log('  - All headers:', JSON.stringify(req.headers, null, 2));
-    }
-    next();
-});
+// ====================================
+// � CORS Configuration (COMMENTED OUT - CAUSING SYSTEM ISSUES)
+// ====================================
+
+// �🔍 CORS Debugging Middleware - Log all preflight requests
+// app.use((req, res, next) => {
+//     if (req.method === 'OPTIONS') {
+//         console.log('🔍 [CORS DEBUG] Preflight OPTIONS request:');
+//         console.log('  - Origin:', req.headers.origin);
+//         console.log('  - Method:', req.headers['access-control-request-method']);
+//         console.log('  - Headers requested:', req.headers['access-control-request-headers']);
+//         console.log('  - URL:', req.url);
+//         console.log('  - All headers:', JSON.stringify(req.headers, null, 2));
+//     }
+//     next();
+// });
+
+// CORS Configuration (Secure) - COMMENTED OUT TO FIX SYSTEM ISSUES
+// app.use(cors({
+//     origin: function (origin, callback) {        
+//         // Allow requests without origin (nginx proxy, mobile apps)
+//         if (!origin) {
+//             console.log('✅ [CORS] Allowing request without origin (proxy/mobile)');
+//             return callback(null, true);
+//         }
+//         
+//         const allowedOrigins = process.env.NODE_ENV === 'production' 
+//             ? [
+//                 'https://admin.nuconnect.net',
+//                 'http://localhost:8080',  // nginx inside Docker
+//                 'http://admin.nuconnect.net' // in case HTTPS is handled by proxy
+//               ]
+//             : [
+//                 'http://localhost:5173',
+//                 'http://localhost:3000',
+//                 'http://localhost:8080',
+//                 'https://admin.nuconnect.net' // Allow production domain in dev
+//               ];
+//         
+//         console.log(`🔍 [CORS] Allowed origins:`, allowedOrigins);
+//         
+//         if (allowedOrigins.indexOf(origin) !== -1) {
+//             console.log(`✅ [CORS] Origin "${origin}" allowed`);
+//             callback(null, true);
+//         } else {
+//             console.warn(`🚫 [CORS] Blocked origin: "${origin}"`);
+//             console.warn(`🔍 [CORS] Available origins:`, allowedOrigins);
+//             callback(new Error('Not allowed by CORS'));
+//         }
+//     },
+//     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+//     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
+//     credentials: true,
+//     optionsSuccessStatus: 200,
+//     preflightContinue: false,
+//     maxAge: 86400,
+//     
+// }));
 
 // ====================================
-// 🔒 CORS Configuration (Secure)
+// 🔓 SIMPLE CORS - ALLOW ALL ORIGINS (TEMPORARY FIX)
 // ====================================
 app.use(cors({
-    origin: function (origin, callback) {
-        if (!origin) return callback(null, true);
-        
-        const allowedOrigins = process.env.NODE_ENV === 'production' 
-            ? [
-                'https://admin.nuconnect.net',
-                'http://localhost:8080'  // nginx inside Docker
-              ]
-            : [
-                'http://localhost:5173',
-                'http://localhost:3000',
-                'http://localhost:8080'
-              ];
-        
-        if (allowedOrigins.indexOf(origin) !== -1) {
-            callback(null, true);
-        } else {
-            console.warn(`🚫 [CORS] Blocked origin: ${origin}`);
-            callback(new Error('Not allowed by CORS'));
-        }
-    },
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
+    origin: true,  // Allow all origins
     credentials: true,
-    optionsSuccessStatus: 200,
-    preflightContinue: false,
-    maxAge: 86400,
-    
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin']
 }));
 
 

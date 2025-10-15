@@ -168,7 +168,7 @@ async function sendInvitationEmail(recipient, redemptionUrl, isResend = false) {
     : 'You\'re Invited to Join NU Connect!';
 
   const mailOptions = {
-    from: `"${process.env.FROM_NAME || 'NU Connect Team'}" <${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}>`,
+    from: `"${process.env.FROM_NAME || 'NU Connect Team'}" <${process.env.FROM_EMAIL || 'nuconnect2026@gmail.com'}>`,
     to: recipient,
     subject: subject,
     html: generateInvitationTemplate(redemptionUrl, isResend),
@@ -180,9 +180,9 @@ async function sendInvitationEmail(recipient, redemptionUrl, isResend = false) {
       'Importance': 'normal',
       'X-Mailer': 'NU Connect System',
       'Reply-To': process.env.SUPPORT_EMAIL || process.env.GMAIL_USER,
-      'Return-Path': process.env.FROM_EMAIL || 'noreply@nuconnect.net',
+      'Return-Path': process.env.FROM_EMAIL || 'nuconnect2026@gmail.com',
       'X-Auto-Response-Suppress': 'All',
-      'List-Unsubscribe': `<mailto:${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}?subject=unsubscribe>`,
+      'List-Unsubscribe': `<mailto:${process.env.FROM_EMAIL || 'nuconnect2026@gmail.com'}?subject=unsubscribe>`,
       // Add organization identification
       'X-Organization': 'National University - Dasmariñas',
       'X-System': 'NU Connect',
@@ -192,7 +192,7 @@ async function sendInvitationEmail(recipient, redemptionUrl, isResend = false) {
     },
     // Add envelope settings for better delivery
     envelope: {
-      from: process.env.FROM_EMAIL || 'noreply@nuconnect.net',
+      from: process.env.FROM_EMAIL || 'nuconnect2026@gmail.com',
       to: recipient
     },
     // Add message settings
@@ -231,7 +231,7 @@ async function sendRejectionEmail(recipient, rejectionReason, canReapply = true)
   }
 
   const mailOptions = {
-    from: `"${process.env.FROM_NAME || 'NU Connect Team'}" <${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}>`,
+    from: `"${process.env.FROM_NAME || 'NU Connect Team'}" <${process.env.FROM_EMAIL || 'nuconnect2026@gmail.com'}>`,
     to: recipient,
     subject: 'Application Status Update - NU Connect',
     html: generateRejectionTemplate(rejectionReason, canReapply),
@@ -243,16 +243,16 @@ async function sendRejectionEmail(recipient, rejectionReason, canReapply = true)
       'Importance': 'normal',
       'X-Mailer': 'NU Connect System',
       'Reply-To': process.env.SUPPORT_EMAIL || process.env.GMAIL_USER,
-      'Return-Path': process.env.FROM_EMAIL || 'noreply@nuconnect.net',
+      'Return-Path': process.env.FROM_EMAIL || 'nuconnect2026@gmail.com',
       'X-Auto-Response-Suppress': 'All',
-      'List-Unsubscribe': `<mailto:${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}?subject=unsubscribe>`,
+      'List-Unsubscribe': `<mailto:${process.env.FROM_EMAIL || 'nuconnect2026@gmail.com'}?subject=unsubscribe>`,
       'X-Organization': 'National University - Dasmariñas',
       'X-System': 'NU Connect',
       'Precedence': 'bulk',
       'X-Bulk': 'no'
     },
     envelope: {
-      from: process.env.FROM_EMAIL || 'noreply@nuconnect.net',
+      from: process.env.FROM_EMAIL || 'nuconnect2026@gmail.com',
       to: recipient
     },
     messageId: false,
@@ -1525,7 +1525,7 @@ async function sendStudentInvitationEmail(recipient, redemptionUrl, programName 
   const htmlContent = generateInvitationTemplate(redemptionUrl, isResend, true, programName);
 
   const mailOptions = {
-    from: `"NU Connect" <noreply@nuconnect.net>`,
+    from: `"NU Connect" <nuconnect2026@gmail.com>`,
     to: recipient,
     subject: subject,
     html: htmlContent,
@@ -1544,7 +1544,7 @@ async function sendStudentInvitationEmail(recipient, redemptionUrl, programName 
       
       // Reply and routing
       'Reply-To': `"NU-Connect Support" <${process.env.SUPPORT_EMAIL || process.env.GMAIL_USER}>`,
-      'Return-Path': process.env.FROM_EMAIL || 'noreply@nuconnect.net',
+      'Return-Path': process.env.FROM_EMAIL || 'nuconnect2026@gmail.com',
       'Errors-To': process.env.SUPPORT_EMAIL || process.env.GMAIL_USER,
       
       // Anti-spam and authentication
@@ -1580,7 +1580,7 @@ async function sendStudentInvitationEmail(recipient, redemptionUrl, programName 
       'X-Bulk': 'no',
       'Auto-Submitted': 'no',
       'X-Auto-Response-Suppress': 'All',
-      'List-Unsubscribe': `<mailto:${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}?subject=unsubscribe>`,
+      'List-Unsubscribe': `<mailto:${process.env.FROM_EMAIL || 'nuconnect2026@gmail.com'}?subject=unsubscribe>`,
       
       // Microsoft specific headers
       'X-MS-Exchange-MessageClassification': 'Educational-Official',
@@ -1699,7 +1699,7 @@ async function sendEventReminderEmail(recipient, eventDetails, reminderType) {
   const subject = `${reminderTitles[reminderType]} - ${eventDetails.title}`;
 
   const mailOptions = {
-    from: `"${process.env.FROM_NAME || 'NU Connect Events'}" <${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}>`,
+    from: `"${process.env.FROM_NAME || 'NU Connect Events'}" <${process.env.FROM_EMAIL || 'nuconnect2026@gmail.com'}>`,
     to: recipient,
     subject: subject,
     html: generateEventReminderTemplate(eventDetails, reminderType),
@@ -1710,9 +1710,9 @@ async function sendEventReminderEmail(recipient, eventDetails, reminderType) {
       'Importance': 'normal',
       'X-Mailer': 'NU Connect Event System',
       'Reply-To': process.env.SUPPORT_EMAIL || process.env.GMAIL_USER,
-      'Return-Path': process.env.FROM_EMAIL || 'noreply@nuconnect.net',
+      'Return-Path': process.env.FROM_EMAIL || 'nuconnect2026@gmail.com',
       'X-Auto-Response-Suppress': 'All',
-      'List-Unsubscribe': `<mailto:${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}?subject=unsubscribe>`,
+      'List-Unsubscribe': `<mailto:${process.env.FROM_EMAIL || 'nuconnect2026@gmail.com'}?subject=unsubscribe>`,
       'X-Organization': 'National University - Dasmariñas',
       'X-System': 'NU Connect',
       'X-Event-Type': 'reminder',
@@ -1720,7 +1720,7 @@ async function sendEventReminderEmail(recipient, eventDetails, reminderType) {
       'X-Bulk': 'no'
     },
     envelope: {
-      from: process.env.FROM_EMAIL || 'noreply@nuconnect.net',
+      from: process.env.FROM_EMAIL || 'nuconnect2026@gmail.com',
       to: recipient
     },
     messageId: false,
@@ -2216,7 +2216,7 @@ async function sendOrganizationApprovalEmail(recipient, organizationDetails) {
   const recipientList = recipients.filter(e => e).join(', ');
 
   const mailOptions = {
-    from: `"${process.env.FROM_NAME || 'NU Connect'}" <${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}>`,
+    from: `"${process.env.FROM_NAME || 'NU Connect'}" <${process.env.FROM_EMAIL || 'nuconnect2026@gmail.com'}>`,
     to: recipientList,
     subject: subject,
     html: generateOrganizationApprovalTemplate(organizationDetails),
@@ -2227,16 +2227,16 @@ async function sendOrganizationApprovalEmail(recipient, organizationDetails) {
       'Importance': 'normal',
       'X-Mailer': 'NU Connect System',
       'Reply-To': process.env.SUPPORT_EMAIL || process.env.GMAIL_USER,
-      'Return-Path': process.env.FROM_EMAIL || 'noreply@nuconnect.net',
+      'Return-Path': process.env.FROM_EMAIL || 'nuconnect2026@gmail.com',
       'X-Auto-Response-Suppress': 'All',
-      'List-Unsubscribe': `<mailto:${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}?subject=unsubscribe>`,
+      'List-Unsubscribe': `<mailto:${process.env.FROM_EMAIL || 'nuconnect2026@gmail.com'}?subject=unsubscribe>`,
       'X-Organization': 'National University - Dasmariñas',
       'X-System': 'NU Connect',
       'Precedence': 'bulk',
       'X-Bulk': 'no'
     },
     envelope: {
-      from: process.env.FROM_EMAIL || 'noreply@nuconnect.net',
+      from: process.env.FROM_EMAIL || 'nuconnect2026@gmail.com',
       to: recipientList
     },
     messageId: false,
@@ -2284,7 +2284,7 @@ async function sendOrganizationRejectionEmail(recipient, rejectionDetails) {
   const recipientList = recipients.filter(e => e).join(', ');
 
   const mailOptions = {
-    from: `"${process.env.FROM_NAME || 'NU Connect'}" <${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}>`,
+    from: `"${process.env.FROM_NAME || 'NU Connect'}" <${process.env.FROM_EMAIL || 'nuconnect2026@gmail.com'}>`,
     to: recipientList,
     subject: subject,
     html: generateOrganizationRejectionTemplate(rejectionDetails),
@@ -2295,16 +2295,16 @@ async function sendOrganizationRejectionEmail(recipient, rejectionDetails) {
       'Importance': 'normal',
       'X-Mailer': 'NU Connect System',
       'Reply-To': process.env.SUPPORT_EMAIL || process.env.GMAIL_USER,
-      'Return-Path': process.env.FROM_EMAIL || 'noreply@nuconnect.net',
+      'Return-Path': process.env.FROM_EMAIL || 'nuconnect2026@gmail.com',
       'X-Auto-Response-Suppress': 'All',
-      'List-Unsubscribe': `<mailto:${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}?subject=unsubscribe>`,
+      'List-Unsubscribe': `<mailto:${process.env.FROM_EMAIL || 'nuconnect2026@gmail.com'}?subject=unsubscribe>`,
       'X-Organization': 'National University - Dasmariñas',
       'X-System': 'NU Connect',
       'Precedence': 'bulk',
       'X-Bulk': 'no'
     },
     envelope: {
-      from: process.env.FROM_EMAIL || 'noreply@nuconnect.net',
+      from: process.env.FROM_EMAIL || 'nuconnect2026@gmail.com',
       to: recipientList
     },
     messageId: false,
@@ -2352,7 +2352,7 @@ async function sendEventApprovalEmail(recipient, eventDetails) {
   const recipientList = recipients.filter(e => e).join(', ');
 
   const mailOptions = {
-    from: `"${process.env.FROM_NAME || 'NU Connect'}" <${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}>`,
+    from: `"${process.env.FROM_NAME || 'NU Connect'}" <${process.env.FROM_EMAIL || 'nuconnect2026@gmail.com'}>`,
     to: recipientList,
     subject: subject,
     html: generateEventApprovalTemplate(eventDetails),
@@ -2363,16 +2363,16 @@ async function sendEventApprovalEmail(recipient, eventDetails) {
       'Importance': 'normal',
       'X-Mailer': 'NU Connect Event System',
       'Reply-To': process.env.SUPPORT_EMAIL || process.env.GMAIL_USER,
-      'Return-Path': process.env.FROM_EMAIL || 'noreply@nuconnect.net',
+      'Return-Path': process.env.FROM_EMAIL || 'nuconnect2026@gmail.com',
       'X-Auto-Response-Suppress': 'All',
-      'List-Unsubscribe': `<mailto:${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}?subject=unsubscribe>`,
+      'List-Unsubscribe': `<mailto:${process.env.FROM_EMAIL || 'nuconnect2026@gmail.com'}?subject=unsubscribe>`,
       'X-Organization': 'National University - Dasmariñas',
       'X-System': 'NU Connect',
       'Precedence': 'bulk',
       'X-Bulk': 'no'
     },
     envelope: {
-      from: process.env.FROM_EMAIL || 'noreply@nuconnect.net',
+      from: process.env.FROM_EMAIL || 'nuconnect2026@gmail.com',
       to: recipientList
     },
     messageId: false,
@@ -2420,7 +2420,7 @@ async function sendEventRejectionEmail(recipient, rejectionDetails) {
   const recipientList = recipients.filter(e => e).join(', ');
 
   const mailOptions = {
-    from: `"${process.env.FROM_NAME || 'NU Connect'}" <${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}>`,
+    from: `"${process.env.FROM_NAME || 'NU Connect'}" <${process.env.FROM_EMAIL || 'nuconnect2026@gmail.com'}>`,
     to: recipientList,
     subject: subject,
     html: generateEventRejectionTemplate(rejectionDetails),
@@ -2431,16 +2431,16 @@ async function sendEventRejectionEmail(recipient, rejectionDetails) {
       'Importance': 'normal',
       'X-Mailer': 'NU Connect Event System',
       'Reply-To': process.env.SUPPORT_EMAIL || process.env.GMAIL_USER,
-      'Return-Path': process.env.FROM_EMAIL || 'noreply@nuconnect.net',
+      'Return-Path': process.env.FROM_EMAIL || 'nuconnect2026@gmail.com',
       'X-Auto-Response-Suppress': 'All',
-      'List-Unsubscribe': `<mailto:${process.env.FROM_EMAIL || 'noreply@nuconnect.net'}?subject=unsubscribe>`,
+      'List-Unsubscribe': `<mailto:${process.env.FROM_EMAIL || 'nuconnect2026@gmail.com'}?subject=unsubscribe>`,
       'X-Organization': 'National University - Dasmariñas',
       'X-System': 'NU Connect',
       'Precedence': 'bulk',
       'X-Bulk': 'no'
     },
     envelope: {
-      from: process.env.FROM_EMAIL || 'noreply@nuconnect.net',
+      from: process.env.FROM_EMAIL || 'nuconnect2026@gmail.com',
       to: recipientList
     },
     messageId: false,
