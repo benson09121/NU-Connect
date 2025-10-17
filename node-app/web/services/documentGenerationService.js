@@ -138,6 +138,7 @@ async function generateApplicationForm(applicationId, format = 'docx') {
         
         console.log('🔍 [TEMPLATE-DEBUG] Total placeholders count:', allPlaceholders.length);
         
+        // Use default TemplateHandler (no explicit delimiter configuration)
         const handler = new TemplateHandler();
         const doc = await handler.process(templateFile, templateData);
         
