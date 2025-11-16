@@ -21290,8 +21290,8 @@ INSERT INTO tbl_section (section_name, program_id) VALUES
 
 INSERT INTO tbl_user (user_id, f_name, l_name, email, program_id, section_id, role_id) VALUES
 -- SDAO and other roles (no program/section needed)
-('6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0', 'Benson', 'Javier', 'javierbb@students.nu-dasma.edu.ph', NULL, NULL, 4),
-('cyQuRJT6GaT0Y89NFQua6nMhFJF6E-SAIk_rpryVY1k', ' Carl Roehl', 'Falcon', 'falconcs@students.nu-dasma.edu.ph', NULL, NULL, 6),
+('6mfvyVan6vlls4M78nSj7B5cGt1B7-bSSvPLzT28CQ0', 'Kaye', 'Burias', 'buriaskb@students.nu-dasma.edu.ph', NULL, NULL, 4),
+('cyQuRJT6GaT0Y89NFQua6nMhFJF6E-SAIk_rpryVY1k', 'Anjobhel', 'Achas', 'achasgd@students.nu-dasma.edu.ph', NULL, NULL, 6),
 -- Advisers for Computer Science (program_id = 11)
 ('adviser1@nu-dasma.edu.ph', 'Maria', 'Santos', 'adviser1@nu-dasma.edu.ph', 11, NULL, 2),
 ('adviser2@nu-dasma.edu.ph', 'Juan', 'Dela Cruz', 'adviser2@nu-dasma.edu.ph', 11, NULL, 2),
@@ -21300,8 +21300,8 @@ INSERT INTO tbl_user (user_id, f_name, l_name, email, program_id, section_id, ro
 ('adviser3@nu-dasma.edu.ph', 'Roberto', 'Garcia', 'adviser3@nu-dasma.edu.ph', 13, NULL, 2),
 -- Students with BSIT program (program_id = 13) and sections
 ('dumalagim@students.nu-dasma.edu.ph', 'Iver', 'Dumalag', 'dumalagim@students.nu-dasma.edu.ph', 13, (SELECT section_id FROM tbl_section WHERE section_name = 'INF251' AND program_id = 13), 1),
-('LBmQ-WzvRhVmb55Ucidrc14aL39ae9Ei-7xfbOrPeEA', ' Samantha Joy', 'Madrunio', 'madruniosm@students.nu-dasma.edu.ph', 13, NULL, 2),
-('NqBfAZcMXHZF5g9ztwkQ1ykPgtNmZwYRcIPKKK40ROc', ' Alister Dylan Emmanuel', 'Realo', 'arisgc@students.nu-dasma.edu.ph', NULL, NULL, 4),
+-- ('LBmQ-WzvRhVmb55Ucidrc14aL39ae9Ei-7xfbOrPeEA', ' Samantha Joy', 'Madrunio', 'madruniosm@students.nu-dasma.edu.ph', 13, NULL, 2),
+('NqBfAZcMXHZF5g9ztwkQ1ykPgtNmZwYRcIPKKK40ROc', 'Alister', 'Realo', 'realoam@students.nu-dasma.edu.ph', NULL, NULL, 4),
 -- Students with Computer Science program (program_id = 11) and sections
 ('CY4e1GmCXysMRn8VYudhqDy7CDJ8xVidGO1v8RnRj1E', ' Shamiah M', 'Mendoza', 'mendozasm@students.nu-dasma.edu.ph', 13, NULL, 5);
 
@@ -22219,42 +22219,42 @@ VALUES ('PRE004','Sofia','Santos','pre004@students.nu-dasma.edu.ph', 12, 1, NULL
 ON DUPLICATE KEY UPDATE user_id=user_id;
 
 /* 2) Organization versions */
-INSERT INTO tbl_organization_version (name, status, created_by)
-VALUES ('CS Tech Innovators Society AY2025', 'Approved', @sdao);
+INSERT INTO tbl_organization_version (name, status, created_by, logo_path)
+VALUES ('Junior Blockchain Education Consortium of the Philippines NUD', 'Approved', @sdao,'jbecp_logo.jpg');
 SET ov1 = LAST_INSERT_ID();
 
-INSERT INTO tbl_organization_version (name, status, created_by)
-VALUES ('BSIT Web Development Club AY2025', 'Approved', @sdao);
+INSERT INTO tbl_organization_version (name, status, created_by, logo_path)
+VALUES ('NUD Chapter Isite', 'Approved', @sdao,'isite_logo.jpg');
 SET ov2 = LAST_INSERT_ID();
 
-INSERT INTO tbl_organization_version (name, status, created_by)
-VALUES ('CS AI & Machine Learning Circle AY2025', 'Approved', @sdao);
+INSERT INTO tbl_organization_version (name, status, created_by, logo_path)
+VALUES ('Microsoft Student Community NUD', 'Approved', @sdao,'microsoft_logo.jpg');
 SET ov3 = LAST_INSERT_ID();
 
-INSERT INTO tbl_organization_version (name, status, created_by)
-VALUES ('BSIT Mobile App Developers AY2025', 'Approved', @sdao);
+INSERT INTO tbl_organization_version (name, status, created_by, logo_path)
+VALUES ('Junior Philippine Computer Society', 'Approved', @sdao,'jpcs_logo.jpg');
 SET ov4 = LAST_INSERT_ID();
 
 /* 3) Organizations */
 INSERT INTO tbl_organization (adviser_id, current_org_version_id, name, description, base_program_id, logo, status, membership_fee_type, category, membership_fee_amount, is_recruiting, is_open_to_all_courses, archived_at, archived_by, archived_reason)
-VALUES ('adviser1@nu-dasma.edu.ph', ov1, 'CS Tech Innovators Society', 'Computer Science organization focused on technology innovation and hackathons', 11, NULL, 'Approved', 'Free', 'Co-Curricular Organization', NULL, TRUE, FALSE, NULL, NULL, NULL);
+VALUES ('adviser1@nu-dasma.edu.ph', ov1, 'Junior Blockchain Education Consortium of the Philippines NUD', 'Computer Science organization focused on technology innovation and hackathons', 11, 'jbecp_logo.jpg', 'Approved', 'Free', 'Co-Curricular Organization', NULL, TRUE, FALSE, NULL, NULL, NULL);
 SET org1 = LAST_INSERT_ID();
-UPDATE tbl_organization_version SET organization_id=org1, name='CS Tech Innovators Society', base_program_id=11 WHERE org_version_id=ov1;
+UPDATE tbl_organization_version SET organization_id=org1, name='Junior Blockchain Education Consortium of the Philippines NUD', base_program_id=11 WHERE org_version_id=ov1;
 
 INSERT INTO tbl_organization (adviser_id, current_org_version_id, name, description, base_program_id, logo, status, membership_fee_type, category, membership_fee_amount, is_recruiting, is_open_to_all_courses, archived_at, archived_by, archived_reason)
-VALUES ('CyTLmjW4Edhvk2WvWFDNuWLYjW0WJETBPbY2HWk-ZqE', ov2, 'BSIT Web Development Club', 'BSIT organization for web development and modern web technologies', 13, NULL, 'Approved', 'Free', 'Co-Curricular Organization', NULL, TRUE, FALSE, NULL, NULL, NULL);
+VALUES ('CyTLmjW4Edhvk2WvWFDNuWLYjW0WJETBPbY2HWk-ZqE', ov2, 'NUD Chapter Isite', 'BSIT organization for web development and modern web technologies', 13, 'isite_logo.jpg', 'Approved', 'Free', 'Co-Curricular Organization', NULL, TRUE, FALSE, NULL, NULL, NULL);
 SET org2 = LAST_INSERT_ID();
-UPDATE tbl_organization_version SET organization_id=org2, name='BSIT Web Development Club', base_program_id=13 WHERE org_version_id=ov2;
+UPDATE tbl_organization_version SET organization_id=org2, name='NUD Chapter Isite', base_program_id=13 WHERE org_version_id=ov2;
 
 INSERT INTO tbl_organization (adviser_id, current_org_version_id, name, description, base_program_id, logo, status, membership_fee_type, category, membership_fee_amount, is_recruiting, is_open_to_all_courses, archived_at, archived_by, archived_reason)
-VALUES ('adviser2@nu-dasma.edu.ph', ov3, 'CS AI & Machine Learning Circle', 'Computer Science organization focused on AI and ML research and projects', 11, NULL, 'Approved', 'Free', 'Co-Curricular Organization', NULL, TRUE, FALSE, NULL, NULL, NULL);
+VALUES ('adviser2@nu-dasma.edu.ph', ov3, 'Microsoft Student Community NUD', 'Computer Science organization focused on AI and ML research and projects', 11, 'microsoft_logo.jpg', 'Approved', 'Free', 'Co-Curricular Organization', NULL, TRUE, FALSE, NULL, NULL, NULL);
 SET org3 = LAST_INSERT_ID();
-UPDATE tbl_organization_version SET organization_id=org3, name='CS AI & Machine Learning Circle', base_program_id=11 WHERE org_version_id=ov3;
+UPDATE tbl_organization_version SET organization_id=org3, name='Microsoft Student Community NUD', base_program_id=11 WHERE org_version_id=ov3;
 
 INSERT INTO tbl_organization (adviser_id, current_org_version_id, name, description, base_program_id, logo, status, membership_fee_type, category, membership_fee_amount, is_recruiting, is_open_to_all_courses, archived_at, archived_by, archived_reason)
-VALUES ('adviser3@nu-dasma.edu.ph', ov4, 'BSIT Mobile App Developers', 'BSIT organization for mobile application development and innovation', 13, NULL, 'Approved', 'Free', 'Co-Curricular Organization', NULL, TRUE, FALSE, NULL, NULL, NULL);
+VALUES ('adviser3@nu-dasma.edu.ph', ov4, 'Junior Philippine Computer Society', 'BSIT organization for mobile application development and innovation', 11, 'jpcs_logo.jpg', 'Approved', 'Free', 'Co-Curricular Organization', NULL, TRUE, FALSE, NULL, NULL, NULL);
 SET org4 = LAST_INSERT_ID();
-UPDATE tbl_organization_version SET organization_id=org4, name='BSIT Mobile App Developers', base_program_id=13 WHERE org_version_id=ov4;
+UPDATE tbl_organization_version SET organization_id=org4, name='Junior Philippine Computer Society', base_program_id=11 WHERE org_version_id=ov4;
 
 /* 4) Renewal cycles */
 INSERT INTO tbl_renewal_cycle (organization_id, cycle_number, start_date, president_id, org_version_id, created_at)
@@ -22567,11 +22567,47 @@ VALUES ('Letter of Intent', 'new', NULL, @sdao, NOW(), NOW())
 ON DUPLICATE KEY UPDATE requirement_name = VALUES(requirement_name);
 
 INSERT INTO tbl_application_requirement (requirement_name, is_applicable_to, file_path, created_by, created_at, updated_at)
-VALUES ('Student Org Application Form', 'new', NULL, @sdao, NOW(), NOW())
+VALUES ('By Laws of the Organization', 'both', NULL, @sdao, NOW(), NOW())
 ON DUPLICATE KEY UPDATE requirement_name = VALUES(requirement_name);
 
 INSERT INTO tbl_application_requirement (requirement_name, is_applicable_to, file_path, created_by, created_at, updated_at)
-VALUES ('By Laws of the Organization', 'both', NULL, @sdao, NOW(), NOW())
+VALUES ('List of Officers/Founders', 'both', NULL, @sdao, NOW(), NOW())
+ON DUPLICATE KEY UPDATE requirement_name = VALUES(requirement_name);
+
+INSERT INTO tbl_application_requirement (requirement_name, is_applicable_to, file_path, created_by, created_at, updated_at)
+VALUES ('Letter from the College Dean/Department Chair endorsing the Faculty Adviser', 'both', NULL, @sdao, NOW(), NOW())
+ON DUPLICATE KEY UPDATE requirement_name = VALUES(requirement_name);
+
+INSERT INTO tbl_application_requirement (requirement_name, is_applicable_to, file_path, created_by, created_at, updated_at)
+VALUES ('List of Members', 'both', NULL, @sdao, NOW(), NOW())
+ON DUPLICATE KEY UPDATE requirement_name = VALUES(requirement_name);
+
+INSERT INTO tbl_application_requirement (requirement_name, is_applicable_to, file_path, created_by, created_at, updated_at)
+VALUES ('Latest Certificate of Grades of Officers', 'both', NULL, @sdao, NOW(), NOW())
+ON DUPLICATE KEY UPDATE requirement_name = VALUES(requirement_name);
+
+INSERT INTO tbl_application_requirement (requirement_name, is_applicable_to, file_path, created_by, created_at, updated_at)
+VALUES ('Biodata/CV of Officers', 'both', NULL, @sdao, NOW(), NOW())
+ON DUPLICATE KEY UPDATE requirement_name = VALUES(requirement_name);
+
+INSERT INTO tbl_application_requirement (requirement_name, is_applicable_to, file_path, created_by, created_at, updated_at)
+VALUES ('Resume/CV of Adviser', 'new', NULL, @sdao, NOW(), NOW())
+ON DUPLICATE KEY UPDATE requirement_name = VALUES(requirement_name);
+
+INSERT INTO tbl_application_requirement (requirement_name, is_applicable_to, file_path, created_by, created_at, updated_at)
+VALUES ('List of Proposed Projects with Proposed Budget for the AY', 'both', NULL, @sdao, NOW(), NOW())
+ON DUPLICATE KEY UPDATE requirement_name = VALUES(requirement_name);
+
+INSERT INTO tbl_application_requirement (requirement_name, is_applicable_to, file_path, created_by, created_at, updated_at)
+VALUES ('List of Past Projects', 'renew', NULL, @sdao, NOW(), NOW())
+ON DUPLICATE KEY UPDATE requirement_name = VALUES(requirement_name);
+
+INSERT INTO tbl_application_requirement (requirement_name, is_applicable_to, file_path, created_by, created_at, updated_at)
+VALUES ('Financial Statement of the Previous AY (Signed by Officers and Adviser)', 'renew', NULL, @sdao, NOW(), NOW())
+ON DUPLICATE KEY UPDATE requirement_name = VALUES(requirement_name);
+
+INSERT INTO tbl_application_requirement (requirement_name, is_applicable_to, file_path, created_by, created_at, updated_at)
+VALUES ('Summary of Evaluation of the Past Projects', 'renew', NULL, @sdao, NOW(), NOW())
 ON DUPLICATE KEY UPDATE requirement_name = VALUES(requirement_name);
 
 INSERT INTO tbl_organization_requirement_submission (application_id, requirement_id, cycle_number, organization_id, org_version_id, file_path, submitted_by, submitted_at, status, submitted_requirement_title, submitted_requirement_hash)
@@ -22668,12 +22704,36 @@ ea.status, 'Event application review', 1, IF(ea.status='Approved', NOW(), NULL)
 FROM tbl_event_application AS ea;
 
 INSERT INTO tbl_event_application_requirement (requirement_name, is_applicable_to, file_path, status, created_by, created_at, updated_at)
-VALUES ('Event Proposal', 'pre-event', NULL, 'active', @sdao, NOW(), NOW())
+VALUES ('Activity Proposal Plan', 'pre-event','NUD-ACS-SDA-F-004 - ACTIVITY PROPOSAL PLAN.docx', 'active', @sdao, NOW(), NOW())
 ON DUPLICATE KEY UPDATE requirement_name=VALUES(requirement_name);
 
 INSERT INTO tbl_event_application_requirement (requirement_name, is_applicable_to, file_path, status, created_by, created_at, updated_at)
-VALUES ('Budget Plan', 'pre-event', NULL, 'active', @sdao, NOW(), NOW())
+VALUES ('Student Organization Activity Application Form', 'pre-event', 'NUD-ACS-SDA-F-012 - SDAO-ACTIVITY-FORM.docx', 'active', @sdao, NOW(), NOW())
 ON DUPLICATE KEY UPDATE requirement_name=VALUES(requirement_name);
+
+
+INSERT INTO tbl_event_application_requirement (requirement_name, is_applicable_to, file_path, status, created_by, created_at, updated_at)
+VALUES ('Approved Reservation Form', 'pre-event', 'Facility Reservation form.docx', 'active', @sdao, NOW(), NOW())
+ON DUPLICATE KEY UPDATE requirement_name=VALUES(requirement_name);
+
+
+INSERT INTO tbl_event_application_requirement (requirement_name, is_applicable_to, file_path, status, created_by, created_at, updated_at)
+VALUES ('Proposal Letter', 'pre-event', NULL, 'active', @sdao, NOW(), NOW())
+ON DUPLICATE KEY UPDATE requirement_name=VALUES(requirement_name);
+
+
+INSERT INTO tbl_event_application_requirement (requirement_name, is_applicable_to, file_path, status, created_by, created_at, updated_at)
+VALUES ('Budget Breakdown', 'pre-event', NULL, 'active', @sdao, NOW(), NOW())
+ON DUPLICATE KEY UPDATE requirement_name=VALUES(requirement_name);
+
+INSERT INTO tbl_event_application_requirement (requirement_name, is_applicable_to, file_path, status, created_by, created_at, updated_at)
+VALUES ('Narrative Report', 'post-event', 'Screenshot 2025-10-15 at 9.46.48 PM.png', 'active', @sdao, NOW(), NOW())
+ON DUPLICATE KEY UPDATE requirement_name=VALUES(requirement_name);
+
+INSERT INTO tbl_event_application_requirement (requirement_name, is_applicable_to, file_path, status, created_by, created_at, updated_at)
+VALUES ('Liquidation Report', 'post-event', 'NUD-ACS-SDA-F-013 - RSO LIQUIDATION FORMS.xlsx', 'active', @sdao, NOW(), NOW())
+ON DUPLICATE KEY UPDATE requirement_name=VALUES(requirement_name);
+
 
 INSERT INTO tbl_event_requirement_submissions (event_id, event_application_id, requirement_id, cycle_number, status, organization_id, file_path, submitted_by, submitted_at)
 SELECT e.event_id, ea.event_application_id, r.requirement_id, 1, 'Approved', e.organization_id,

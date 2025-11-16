@@ -276,7 +276,8 @@ async function addGeneratedCertificate(req) {
         const pdfPath = `/app/certificates/generated/${pdfFilename}`;
         console.log(pdfFilename);
 
-        const handler = new TemplateHandler(templateContent);
+        // Use default TemplateHandler (no explicit delimiter configuration)
+        const handler = new TemplateHandler();
         const doc = await handler.process(templateContent, data);
 
 

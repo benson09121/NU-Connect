@@ -71,12 +71,13 @@ COPY fonts/fonts.conf /etc/fonts/fonts.conf
 RUN mkdir -p /app/certificates/templates /app/certificates/generated && \
     chown -R node:node /app/certificates
 
-RUN mkdir -p /app/requirements && \
-    chown -R node:node /app/requirements
+# Copy requirements folder with its contents
+COPY requirements /app/requirements
+RUN chown -R node:node /app/requirements
 
-RUN mkdir -p /app/organizations && \ 
-    mkdir -p /app/organizations/requirements && \
-    chown -R node:node /app/organizations
+# Copy organizations folder with its contents
+COPY organizations /app/organizations
+RUN chown -R node:node /app/organizations
 
 RUN mkdir -p /app/applications && \
     chown -R node:node /app/applications
