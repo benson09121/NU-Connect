@@ -485,12 +485,13 @@ class TermPaymentModel {
             // Step 2: Check if organization is Per Term and user is active member
             const [membershipCheck] = await connection.query(`
                 SELECT 
-                    o.membership_fee_type,
-                    o.membership_fee_amount,
+                    ov.membership_fee_type,
+                    ov.membership_fee_amount,
                     o.name as organization_name,
                     o.current_org_version_id,
                     om.status as member_status
                 FROM tbl_organization o
+                JOIN tbl_organization_version ov ON ov.org_version_id = o.current_org_version_id
                 LEFT JOIN tbl_organization_members om ON o.organization_id = om.organization_id AND om.user_id = ?
                 WHERE o.organization_id = ?
             `, [userId, organizationId]);

@@ -553,8 +553,9 @@ async function getUserOrganizations(userId) {
   try {
     const [organizations] = await db.query(
       `
-      SELECT DISTINCT o.organization_id, o.name, o.status, o.category
+      SELECT DISTINCT o.organization_id, o.name, o.status, ov.category
       FROM tbl_organization o
+      JOIN tbl_organization_version ov ON ov.org_version_id = o.current_org_version_id
       WHERE o.organization_id IN (
         SELECT organization_id FROM tbl_organization WHERE adviser_id = ?
         UNION
@@ -789,10 +790,11 @@ async function sendMessage(req, res) {
       try {
         const [allOrgs] = await db.query(
           `
-          SELECT organization_id, name, status, category 
-          FROM tbl_organization 
-          WHERE status = 'Approved' 
-          ORDER BY name
+          SELECT o.organization_id, o.name, o.status, ov.category
+          FROM tbl_organization o
+          JOIN tbl_organization_version ov ON ov.org_version_id = o.current_org_version_id
+          WHERE o.status = 'Approved' 
+          ORDER BY o.name
         `
         );
         userOrgs = allOrgs;

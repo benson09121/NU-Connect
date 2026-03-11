@@ -1,4 +1,75 @@
 const pool = require('../../config/db');
+const { prisma } = require('../../config/db');
+
+// ── Helper: resolve cycle_number from org_version_id ───────────────────────
+async function _getCycleNumber(orgId, orgVersionId) {
+  const cycle = await prisma.tbl_renewal_cycle.findFirst({
+    where: { organization_id: Number(orgId), org_version_id: Number(orgVersionId) },
+    select: { cycle_number: true },
+  });
+  if (!cycle) throw new Error('No renewal cycle found for the given organization and version');
+  return cycle.cycle_number;
+}
+
+// ── Helper: fetch a single member override entry (for mutation return values) ─
+async function _getMemberOverrideEntry(memberId, orgId, cycleNumber) {
+  const om = await prisma.tbl_organization_members.findFirst({
+    where: { member_id: Number(memberId) },
+    include: {
+      tbl_user: {
+        include: {
+          tbl_program_tbl_user_program_idTotbl_program: { select: { name: true, abbreviation: true } },
+        },
+      },
+      tbl_executive_role: { include: { tbl_executive_rank: true } },
+      tbl_member_permission_override: { include: { tbl_permission: true } },
+    },
+  });
+  if (!om) return null;
+  const cms = await prisma.tbl_committee_members.findMany({
+    where: {
+      user_id: om.user_id,
+      tbl_committee: { organization_id: Number(orgId), cycle_number: cycleNumber },
+    },
+    include: {
+      tbl_committee: { select: { name: true } },
+      tbl_committee_role: { select: { role_name: true } },
+    },
+  });
+  const u = om.tbl_user;
+  const er = om.tbl_executive_role;
+  const rank = er?.tbl_executive_rank;
+  const prog = u?.tbl_program_tbl_user_program_idTotbl_program;
+  const committeeNames = [...new Set(cms.map(c => c.tbl_committee?.name).filter(Boolean))].join(', ');
+  const committeeRoles = [...new Set(cms.map(c => c.tbl_committee_role?.role_name).filter(Boolean))].join(', ');
+  return {
+    id: om.member_id,
+    user_id: om.user_id,
+    member_name: `${u?.f_name ?? ''} ${u?.l_name ?? ''}`.trim(),
+    f_name: u?.f_name,
+    l_name: u?.l_name,
+    member_email: u?.email,
+    member_type: om.member_type,
+    executive_role: er?.role_title ?? null,
+    executive_rank_level: rank?.rank_level ?? null,
+    executive_rank_title: rank?.default_title ?? null,
+    committee_names: committeeNames || null,
+    committee_roles: committeeRoles || null,
+    program_name: prog?.name ?? null,
+    program_abbreviation: prog?.abbreviation ?? null,
+    member_status: om.status,
+    joined_at: om.joined_at,
+    permission_overrides: om.tbl_member_permission_override.map(mpo => ({
+      override_id: mpo.override_id,
+      permission_id: mpo.permission_id,
+      permission_name: mpo.tbl_permission.permission_name,
+      permission_scope: mpo.tbl_permission.scope,
+      is_allowed: mpo.is_allowed,
+      override_type: mpo.is_allowed ? 'Force Allow' : 'Force Deny',
+    })),
+    total_overrides: om.tbl_member_permission_override.length,
+  };
+}
 
 async function createOrganizationApplication(organizations, executives, requirements, user_id) {
     const connection = await pool.getConnection();
@@ -1322,156 +1393,424 @@ async function getUserOrganization(user_id) {
     }
 }
 
-async function getOrganizationCommitteeRoles(orgId, orgVersionId){
-    const connection = await pool.getConnection();
-    try {
-        const [rows] = await connection.query('CALL GetOrganizationCommitteeRoles(?, ?);', [orgId, orgVersionId]);
-        return rows[0];
-    } catch (error) {
-        console.error('Error fetching organization committee roles:', error);
-        throw error;
-    } finally {
-        connection.release();
+// ── Prisma: getOrganizationCommitteeRoles ──────────────────────────────────
+async function getOrganizationCommitteeRoles(orgId, orgVersionId) {
+  const cycle_number = await _getCycleNumber(orgId, orgVersionId);
+  const committees = await prisma.tbl_committee.findMany({
+    where: { organization_id: Number(orgId), cycle_number },
+    include: {
+      tbl_committee_role: {
+        include: {
+          tbl_committee_role_permission: { include: { tbl_permission: true } },
+        },
+        orderBy: { role_name: 'asc' },
+      },
+    },
+    orderBy: { name: 'asc' },
+  });
+  const result = [];
+  for (const c of committees) {
+    for (const cr of c.tbl_committee_role) {
+      result.push({
+        role_type: 'Committee',
+        id: cr.committee_role_id,
+        role_name: cr.role_name,
+        committee_id: c.committee_id,
+        committee_name: c.name,
+        permissions: cr.tbl_committee_role_permission.map(rp => ({
+          permission_id: rp.tbl_permission.permission_id,
+          permission_name: rp.tbl_permission.permission_name,
+          permission_scope: rp.tbl_permission.scope,
+          permission_source: 'committee_role',
+        })),
+      });
     }
+  }
+  return result;
 }
 
+// ── Prisma: getOrganizationExecutives ──────────────────────────────────────
 async function getOrganizationExecutives(org_id, org_version_id) {
-    const connection = await pool.getConnection();
-    try {
-        const [rows] = await connection.query('CALL GetOrganizationExecutives(?, ?);', [org_id, org_version_id]);
-        return rows[0];
-    } catch (error) {
-        console.error('Error fetching organization executives:', error);
-        throw error;
-    } finally {
-        connection.release();
-    }
+  const cycle_number = await _getCycleNumber(org_id, org_version_id);
+  const roles = await prisma.tbl_executive_role.findMany({
+    where: { organization_id: Number(org_id), cycle_number },
+    include: {
+      tbl_executive_rank: {
+        include: { tbl_rank_permission: { include: { tbl_permission: true } } },
+      },
+    },
+    orderBy: { tbl_executive_rank: { rank_level: 'asc' } },
+  });
+  return roles.map(er => ({
+    role_type: 'Executive',
+    id: er.executive_role_id,
+    role_name: er.role_title,
+    rank_id: er.rank_id,
+    rank_title: er.tbl_executive_rank.default_title,
+    rank_level: er.tbl_executive_rank.rank_level,
+    permissions: er.tbl_executive_rank.tbl_rank_permission.map(rp => ({
+      permission_id: rp.tbl_permission.permission_id,
+      permission_name: rp.tbl_permission.permission_name,
+      permission_scope: rp.tbl_permission.scope,
+      permission_source: 'rank',
+    })),
+  }));
 }
 
-async function getOrganizationPermissions(){
-    const connection = await pool.getConnection();
-    try {
-        const [rows] = await connection.query('CALL GetOrganizationPermissions();');
-        return rows[0];
-    } catch (error) {
-        console.error('Error fetching organization permissions:', error);
-        throw error;
-    } finally {
-        connection.release();
-    }
+// ── Prisma: getOrganizationPermissions ─────────────────────────────────────
+async function getOrganizationPermissions() {
+  return prisma.tbl_permission.findMany({ where: { scope: 'Organization' } });
 }
+// ── Prisma: updateCommitteePermissions ────────────────────────────────────
 async function updateCommitteePermissions(committee_id, role_type, permissions) {
-    const connection = await pool.getConnection();
-    try {
-        const [rows] = await connection.query(
-            'CALL UpdateCommitteePermissions(?, ?, ?)',
-            [committee_id, role_type, JSON.stringify(permissions)]
-        );
-        return rows[0]; // Return the first row of the result set
-    } catch (error) {
-        console.error('Error updating committee permissions:', error);
-        throw error;
-    } finally {
-        connection.release();
+  const numId = Number(committee_id);
+  // Map display role_type to Prisma enum value
+  const roleEnumMap = { 'Committee Head': 'Committee_Head', 'Committee Officer': 'Committee_Officer' };
+  const roleEnum = roleEnumMap[role_type];
+  if (!roleEnum) throw new Error(`Invalid role_type: ${role_type}`);
+
+  // Ensure both committee roles exist
+  await prisma.tbl_committee_role.createMany({
+    data: [
+      { committee_id: numId, role_name: 'Committee_Head' },
+      { committee_id: numId, role_name: 'Committee_Officer' },
+    ],
+    skipDuplicates: true,
+  });
+
+  // Find the target role
+  const role = await prisma.tbl_committee_role.findFirst({
+    where: { committee_id: numId, role_name: roleEnum },
+  });
+  if (!role) throw new Error('Committee role not found');
+
+  // Replace permissions
+  await prisma.tbl_committee_role_permission.deleteMany({ where: { committee_role_id: role.committee_role_id } });
+  if (permissions.length > 0) {
+    const perms = await prisma.tbl_permission.findMany({ where: { permission_name: { in: permissions } } });
+    if (perms.length > 0) {
+      await prisma.tbl_committee_role_permission.createMany({
+        data: perms.map(p => ({ committee_role_id: role.committee_role_id, permission_id: p.permission_id })),
+        skipDuplicates: true,
+      });
     }
+  }
+  return { success: true, committee_role_id: role.committee_role_id };
 }
 
+// ── Prisma: updateExecutivePermissions ────────────────────────────────────
 async function updateExecutivePermissions(executive_id, permissions) {
-    const connection = await pool.getConnection();
-    try {
-        const [rows] = await connection.query(
-            'CALL UpdateExecutivePermissions(?, ?)',
-            [executive_id, JSON.stringify(permissions)]
-        );
-        return rows[0]; // Return the first row of the result set
-    } catch (error) {
-        console.error('Error updating executive permissions:', error);
-        throw error;
-    } finally {
-        connection.release();
+  // executive_id is the rank_id
+  const rankId = Number(executive_id);
+  const rank = await prisma.tbl_executive_rank.findUnique({ where: { rank_id: rankId } });
+  if (!rank) throw new Error('Executive rank not found');
+
+  // Replace rank permissions
+  await prisma.tbl_rank_permission.deleteMany({ where: { rank_id: rankId } });
+  if (permissions.length > 0) {
+    const perms = await prisma.tbl_permission.findMany({ where: { permission_name: { in: permissions } } });
+    if (perms.length > 0) {
+      await prisma.tbl_rank_permission.createMany({
+        data: perms.map(p => ({ rank_id: rankId, permission_id: p.permission_id })),
+        skipDuplicates: true,
+      });
     }
+  }
+
+  // Return updated executive roles for this rank
+  const roles = await prisma.tbl_executive_role.findMany({
+    where: { rank_id: rankId },
+    include: {
+      tbl_executive_rank: { include: { tbl_rank_permission: { include: { tbl_permission: true } } } },
+    },
+  });
+  return roles.map(er => ({
+    id: er.executive_role_id,
+    role_name: er.role_title,
+    rank_id: er.rank_id,
+    rank_title: er.tbl_executive_rank.default_title,
+    rank_level: er.tbl_executive_rank.rank_level,
+    role_type: 'Executive',
+    permissions: er.tbl_executive_rank.tbl_rank_permission.map(rp => ({
+      permission_id: rp.tbl_permission.permission_id,
+      permission_name: rp.tbl_permission.permission_name,
+      permission_scope: rp.tbl_permission.scope,
+      permission_source: 'rank',
+    })),
+  }));
 }
 
-async function getMemberPermissionOverrides(organization_id, organization_version_id){
-    const connection = await pool.getConnection();
-    try {
-        const [rows] = await connection.query('CALL GetMemberPermissionOverrides(?, ?);', [organization_id, organization_version_id]);
-        return rows[0];
-    } catch (error) {
-        console.error('Error fetching member permission overrides:', error);
-        throw error;
-    } finally {
-        connection.release();
-    }
+// ── Prisma: getMemberPermissionOverrides ──────────────────────────────────
+async function getMemberPermissionOverrides(organization_id, organization_version_id) {
+  const cycle_number = await _getCycleNumber(organization_id, organization_version_id);
+  const members = await prisma.tbl_organization_members.findMany({
+    where: {
+      organization_id: Number(organization_id),
+      cycle_number,
+      status: 'Active',
+      tbl_member_permission_override: { some: {} },
+    },
+    include: {
+      tbl_user: {
+        include: {
+          tbl_program_tbl_user_program_idTotbl_program: { select: { name: true, abbreviation: true } },
+        },
+      },
+      tbl_executive_role: { include: { tbl_executive_rank: true } },
+      tbl_member_permission_override: { include: { tbl_permission: true } },
+    },
+    orderBy: [{ tbl_user: { l_name: 'asc' } }, { tbl_user: { f_name: 'asc' } }],
+  });
+
+  // Fetch committee memberships for all relevant user_ids
+  const userIds = members.map(m => m.user_id);
+  const cms = await prisma.tbl_committee_members.findMany({
+    where: {
+      user_id: { in: userIds },
+      tbl_committee: { organization_id: Number(organization_id), cycle_number },
+    },
+    include: {
+      tbl_committee: { select: { name: true } },
+      tbl_committee_role: { select: { role_name: true } },
+    },
+  });
+  const committeesByUser = {};
+  for (const cm of cms) {
+    if (!committeesByUser[cm.user_id]) committeesByUser[cm.user_id] = { names: new Set(), roles: new Set() };
+    if (cm.tbl_committee?.name) committeesByUser[cm.user_id].names.add(cm.tbl_committee.name);
+    if (cm.tbl_committee_role?.role_name) committeesByUser[cm.user_id].roles.add(cm.tbl_committee_role.role_name);
+  }
+
+  return members.map(om => {
+    const u = om.tbl_user;
+    const er = om.tbl_executive_role;
+    const rank = er?.tbl_executive_rank;
+    const prog = u?.tbl_program_tbl_user_program_idTotbl_program;
+    const cb = committeesByUser[om.user_id];
+    return {
+      id: om.member_id,
+      user_id: om.user_id,
+      member_name: `${u?.f_name ?? ''} ${u?.l_name ?? ''}`.trim(),
+      f_name: u?.f_name,
+      l_name: u?.l_name,
+      member_email: u?.email,
+      member_type: om.member_type,
+      executive_role: er?.role_title ?? null,
+      executive_rank_level: rank?.rank_level ?? null,
+      executive_rank_title: rank?.default_title ?? null,
+      committee_names: cb ? [...cb.names].join(', ') || null : null,
+      committee_roles: cb ? [...cb.roles].join(', ') || null : null,
+      program_name: prog?.name ?? null,
+      program_abbreviation: prog?.abbreviation ?? null,
+      member_status: om.status,
+      joined_at: om.joined_at,
+      permission_overrides: om.tbl_member_permission_override.map(mpo => ({
+        override_id: mpo.override_id,
+        permission_id: mpo.permission_id,
+        permission_name: mpo.tbl_permission.permission_name,
+        permission_scope: mpo.tbl_permission.scope,
+        is_allowed: mpo.is_allowed,
+        override_type: mpo.is_allowed ? 'Force Allow' : 'Force Deny',
+      })),
+      total_overrides: om.tbl_member_permission_override.length,
+    };
+  });
 }
 
+// ── Prisma: getEmailSuggestionOverride ──────────────────────────────────────
 async function getEmailSuggestionOverride(organization_id, organization_version_id, pattern) {
-    const connection = await pool.getConnection();
-    try {
-        const [rows] = await connection.query('CALL GetEmailSuggestionOverride(?, ?, ?);', [organization_id, organization_version_id, pattern]);
-        return rows[0];
-    } catch (error) {
-        console.error('Error fetching email suggestion override:', error);
-        throw error;
-    } finally {
-        connection.release();
+  const cycle_number = await _getCycleNumber(organization_id, organization_version_id);
+  const search = (pattern ?? '').toLowerCase().trim();
+
+  // Get active members WITHOUT existing overrides, excluding rank-1 (President)
+  const members = await prisma.tbl_organization_members.findMany({
+    where: {
+      organization_id: Number(organization_id),
+      cycle_number,
+      status: 'Active',
+      tbl_member_permission_override: { none: {} },
+      // Exclude President (rank_level = 1)
+      NOT: {
+        AND: [
+          { member_type: 'Executive' },
+          { tbl_executive_role: { tbl_executive_rank: { rank_level: 1 } } },
+        ],
+      },
+    },
+    include: {
+      tbl_user: {
+        include: {
+          tbl_program_tbl_user_program_idTotbl_program: { select: { name: true, abbreviation: true } },
+        },
+      },
+      tbl_executive_role: { include: { tbl_executive_rank: true } },
+    },
+  });
+
+  // Apply search filter in JS (case-insensitive email/name match)
+  const filtered = search === '' ? members : members.filter(om => {
+    const u = om.tbl_user;
+    const email = (u?.email ?? '').toLowerCase();
+    const fullName = `${u?.f_name ?? ''} ${u?.l_name ?? ''}`.toLowerCase().trim();
+    const fName = (u?.f_name ?? '').toLowerCase();
+    const lName = (u?.l_name ?? '').toLowerCase();
+    return email.includes(search) || fullName.includes(search) || fName.includes(search) || lName.includes(search);
+  });
+
+  // Fetch committee memberships for filtered members
+  const userIds = filtered.map(m => m.user_id);
+  const cms = userIds.length > 0 ? await prisma.tbl_committee_members.findMany({
+    where: {
+      user_id: { in: userIds },
+      tbl_committee: { organization_id: Number(organization_id), cycle_number },
+    },
+    include: {
+      tbl_committee: { select: { name: true } },
+      tbl_committee_role: { select: { role_name: true } },
+    },
+  }) : [];
+  const committeesByUser = {};
+  for (const cm of cms) {
+    if (!committeesByUser[cm.user_id]) committeesByUser[cm.user_id] = { names: new Set(), roles: new Set() };
+    if (cm.tbl_committee?.name) committeesByUser[cm.user_id].names.add(cm.tbl_committee.name);
+    if (cm.tbl_committee_role?.role_name) committeesByUser[cm.user_id].roles.add(cm.tbl_committee_role.role_name);
+  }
+
+  // Compute search priority for ordering
+  const withPriority = filtered.map(om => {
+    const u = om.tbl_user;
+    const email = (u?.email ?? '').toLowerCase();
+    const fullName = `${u?.f_name ?? ''} ${u?.l_name ?? ''}`.toLowerCase().trim();
+    let priority = 5;
+    if (search !== '') {
+      if (email === search || fullName === search) priority = 1;
+      else if (fullName === search) priority = 2;
+      else if (email.startsWith(search)) priority = 3;
+      else if (fullName.startsWith(search)) priority = 4;
     }
+    return { om, priority };
+  });
+
+  withPriority.sort((a, b) => {
+    if (a.priority !== b.priority) return a.priority - b.priority;
+    // member_type DESC: Executive > Committee > Member
+    const typeOrder = { Executive: 0, Committee: 1, Member: 2 };
+    const tA = typeOrder[a.om.member_type] ?? 3;
+    const tB = typeOrder[b.om.member_type] ?? 3;
+    if (tA !== tB) return tA - tB;
+    // rank_level ASC for executives
+    const rA = a.om.tbl_executive_role?.tbl_executive_rank?.rank_level ?? 999;
+    const rB = b.om.tbl_executive_role?.tbl_executive_rank?.rank_level ?? 999;
+    if (rA !== rB) return rA - rB;
+    const lA = (a.om.tbl_user?.l_name ?? '').toLowerCase();
+    const lB = (b.om.tbl_user?.l_name ?? '').toLowerCase();
+    if (lA !== lB) return lA < lB ? -1 : 1;
+    return ((a.om.tbl_user?.f_name ?? '').toLowerCase() < (b.om.tbl_user?.f_name ?? '').toLowerCase()) ? -1 : 1;
+  });
+
+  return withPriority.slice(0, 50).map(({ om }) => {
+    const u = om.tbl_user;
+    const er = om.tbl_executive_role;
+    const rank = er?.tbl_executive_rank;
+    const prog = u?.tbl_program_tbl_user_program_idTotbl_program;
+    const cb = committeesByUser[om.user_id];
+    return {
+      user_id: u?.user_id,
+      f_name: u?.f_name,
+      l_name: u?.l_name,
+      name: `${u?.f_name ?? ''} ${u?.l_name ?? ''}`.trim(),
+      email: u?.email,
+      program_name: prog?.name ?? 'Unknown Program',
+      program_abbreviation: prog?.abbreviation ?? 'N/A',
+      member_type: om.member_type,
+      id: om.member_id,
+      executive_role: er?.role_title ?? null,
+      executive_rank_level: rank?.rank_level ?? null,
+      executive_rank_title: rank?.default_title ?? null,
+      committees: cb ? [...cb.names].join(', ') || null : null,
+      committee_roles: cb ? [...cb.roles].join(', ') || null : null,
+      member_status: om.status,
+      joined_at: om.joined_at,
+    };
+  });
 }
 
+// ── Prisma: addMemberPermissionOverride ──────────────────────────────────
 async function addMemberPermissionOverride(email, permissions, organization_id, organization_version_id, action_by_email) {
-    const connection = await pool.getConnection();
-    try {
-        const [rows] = await connection.query('CALL AddMemberPermissionOverride(?, ?, ?, ?, ?);', [
-            email, 
-            JSON.stringify(permissions), 
-            organization_id, 
-            organization_version_id, 
-            action_by_email
-        ]);
-        return rows[0];
-    } catch (error) {
-        console.error('Error adding member permission override:', error);
-        throw error;
-    } finally {
-        connection.release();
-    }
+  const cycle_number = await _getCycleNumber(organization_id, organization_version_id);
+
+  const user = await prisma.tbl_user.findFirst({ where: { email }, select: { user_id: true } });
+  if (!user) throw new Error('User not found');
+
+  const member = await prisma.tbl_organization_members.findFirst({
+    where: { organization_id: Number(organization_id), cycle_number, user_id: user.user_id, status: 'Active' },
+    select: { member_id: true },
+  });
+  if (!member) throw new Error('User is not an active member of this organization');
+
+  const existing = await prisma.tbl_member_permission_override.count({ where: { member_id: member.member_id } });
+  if (existing > 0) throw new Error('User already has permission overrides');
+
+  const permNames = permissions.map(p => p.permission_name);
+  const perms = await prisma.tbl_permission.findMany({ where: { permission_name: { in: permNames } } });
+  const permMap = Object.fromEntries(perms.map(p => [p.permission_name, p.permission_id]));
+
+  const overrideData = permissions
+    .filter(p => permMap[p.permission_name])
+    .map(p => ({ member_id: member.member_id, permission_id: permMap[p.permission_name], is_allowed: p.is_allowed }));
+  if (overrideData.length > 0) {
+    await prisma.tbl_member_permission_override.createMany({ data: overrideData });
+  }
+
+  return _getMemberOverrideEntry(member.member_id, organization_id, cycle_number);
 }
 
+// ── Prisma: updateMemberPermissionOverride ────────────────────────────────
 async function updateMemberPermissionOverride(member_id, organization_id, organization_version_id, permission_lists, action_by_email) {
-    const connection = await pool.getConnection();
-    try {
-        const [rows] = await connection.query('CALL UpdateMemberPermissionOverride(?, ?, ?, ?, ?);', [
-            member_id, 
-            organization_id, 
-            organization_version_id, 
-            JSON.stringify(permission_lists), 
-            action_by_email
-        ]);
-        return rows[0];
-    } catch (error) {
-        console.error('Error updating member permission override:', error);
-        throw error;
-    } finally {
-        connection.release();
+  const cycle_number = await _getCycleNumber(organization_id, organization_version_id);
+
+  const member = await prisma.tbl_organization_members.findFirst({
+    where: { member_id: Number(member_id), organization_id: Number(organization_id), cycle_number, status: 'Active' },
+    select: { member_id: true },
+  });
+  if (!member) throw new Error('Member not found or not active in this organization');
+
+  // Replace permissions
+  await prisma.tbl_member_permission_override.deleteMany({ where: { member_id: Number(member_id) } });
+  if (permission_lists.length > 0) {
+    const permNames = permission_lists.map(p => p.permission_name);
+    const perms = await prisma.tbl_permission.findMany({ where: { permission_name: { in: permNames } } });
+    const permMap = Object.fromEntries(perms.map(p => [p.permission_name, p.permission_id]));
+    const overrideData = permission_lists
+      .filter(p => permMap[p.permission_name])
+      .map(p => ({ member_id: Number(member_id), permission_id: permMap[p.permission_name], is_allowed: p.is_allowed }));
+    if (overrideData.length > 0) {
+      await prisma.tbl_member_permission_override.createMany({ data: overrideData });
     }
+  }
+
+  return _getMemberOverrideEntry(member_id, organization_id, cycle_number);
 }
 
+// ── Prisma: removeMemberPermissionOverride ────────────────────────────────
 async function removeMemberPermissionOverride(member_id, organization_id, organization_version_id, action_by_email) {
-    const connection = await pool.getConnection();
-    try {
-        const [rows] = await connection.query('CALL RemoveMemberPermissionOverride(?, ?, ?, ?);', [
-            member_id, 
-            organization_id, 
-            organization_version_id, 
-            action_by_email
-        ]);
-        return rows[0];
-    } catch (error) {
-        console.error('Error removing member permission override:', error);
-        throw error;
-    } finally {
-        connection.release();
-    }
+  const cycle_number = await _getCycleNumber(organization_id, organization_version_id);
+
+  const member = await prisma.tbl_organization_members.findFirst({
+    where: { member_id: Number(member_id), organization_id: Number(organization_id), cycle_number, status: 'Active' },
+    select: { member_id: true },
+  });
+  if (!member) throw new Error('Member not found or not active in this organization');
+
+  const overrideCount = await prisma.tbl_member_permission_override.count({ where: { member_id: Number(member_id) } });
+  if (overrideCount === 0) throw new Error('Member does not have any permission overrides to remove');
+
+  // Fetch entry before deletion (for response)
+  const entry = await _getMemberOverrideEntry(member_id, organization_id, cycle_number);
+
+  await prisma.tbl_member_permission_override.deleteMany({ where: { member_id: Number(member_id) } });
+
+  return { ...entry, permission_overrides: [], total_overrides: 0 };
 }
 
 async function getLeaveApplications(org_id, org_version_id) {
@@ -1740,12 +2079,14 @@ async function updateOrganizationPaymentType(organization_id, paymentData) {
     try {
         const { membership_fee_type, membership_fee_amount } = paymentData;
         
+        // Write to the current organization version (versioned data), not the parent row
         const [rows] = await connection.query(`
-            UPDATE tbl_organization 
-            SET membership_fee_type = ?, 
-                membership_fee_amount = ?,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE organization_id = ?
+            UPDATE tbl_organization_version
+            SET membership_fee_type = ?,
+                membership_fee_amount = ?
+            WHERE org_version_id = (
+                SELECT current_org_version_id FROM tbl_organization WHERE organization_id = ?
+            )
         `, [membership_fee_type, membership_fee_amount, organization_id]);
         
         if (rows.affectedRows === 0) {

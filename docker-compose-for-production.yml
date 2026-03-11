@@ -1,0 +1,97 @@
+services:
+
+  mysql:
+    user: "1000:1000"
+    environment:
+      MYSQL_ROOT_PASSWORD: admin
+      MYSQL_USER: admin
+      MYSQL_PASSWORD: admin
+      TZ: Asia/Manila
+    container_name: mysql
+    image: mysql:8.4.6
+    volumes:
+      - ./nuconnect-files/mysql_volume:/var/lib/mysql
+      - ./mysql/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./mysql/my.cnf:/etc/mysql/my.cnf
+    ports:
+      - "3307:3306"
+    networks:
+      - my-network
+    restart: unless-stopped
+
+  node-app:
+    container_name: node-app
+    build: ./node-app
+    environment:
+      TZ: Asia/Manila
+    volumes:
+      - ./nuconnect-files/certificates/templates:/app/certificates/templates
+      - ./nuconnect-files/certificates/generated:/app/certificates/generated
+      - ./nuconnect-files/requirements:/app/requirements
+      - ./nuconnect-files/organizations:/app/organizations
+      - ./nuconnect-files/applications:/app/applications
+      - ./nuconnect-files/events:/app/events
+      - ./nuconnect-files/esignatures:/app/esignatures
+      - ./nuconnect-files/approval-signatures:/app/uploads/approval-signatures
+      - ./nuconnect-files/templates:/app/templates
+    networks:
+      - my-network
+    ports:
+      - "3001:3000"
+    restart: unless-stopped
+    depends_on:
+      - mysql
+
+  nginx:
+    container_name: nginx
+    build: ./react-app
+    TZ: Asia/Manila
+    volumes:
+      - ./nuconnect-files/certificates/generated:/usr/share/nginx/html/certificates/generated
+      - ./nuconnect-files/certificates/templates:/usr/share/nginx/html/certificates/templates
+      - ./nuconnect-files/requirements:/usr/share/nginx/html/requirements
+      - ./nuconnect-files/organizations:/usr/share/nginx/html/organizations
+      - ./nuconnect-files/applications:/usr/share/nginx/html/applications
+      - ./nuconnect-files/events:/usr/share/nginx/html/events
+      - ./nuconnect-files/esignatures:/usr/share/nginx/html/esignatures
+      - ./nuconnect-files/approval-signatures:/usr/share/nginx/html/approval-signatures
+      - ./nuconnect-files/templates:/usr/share/nginx/html/templates
+    ports:
+      - "8080:80"
+    networks:
+      - my-network
+    depends_on:
+      - node-app
+    restart: unless-stopped
+
+  redis:
+    image: redis:8.0-M01
+    container_name: redis
+    command: redis-server --requirepass redis_password_nuconnect
+    ports:
+      - "6380:6379"
+    volumes:
+      - ./nuconnect-files/redis_volume:/data
+    networks:
+      - my-network
+    restart: unless-stopped
+  
+  # flask_app:
+  #   container_name: flask
+  #   build: ./converter
+  #   ports:
+  #     - "5000:5000"
+  #   environment:
+  #     - FLASK_ENV=production
+  #   networks:
+  #     - my-network
+
+networks:
+  my-network:
+      name: networks
+      driver: bridge
+
+volumes:
+  mysql_nuconnect_volume:
+  redis_volume:
+  # clamav_data:

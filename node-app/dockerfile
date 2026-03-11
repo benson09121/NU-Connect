@@ -103,6 +103,11 @@ RUN npx playwright install-deps
 # Copy application files
 COPY . .
 
+# Re-apply ownership after COPY (COPY resets ownership to root)
+RUN chown -R node:node /app/esignatures /app/uploads /app/applications /app/templates /app/.auth /app/storage
+
+USER node
+
 # 📋 DOCUMENT GENERATION SETUP
 # Copy templates to backup location (won't be overridden by volume mount)
 RUN echo "📋 [BUILD] Setting up document generation templates..." && \

@@ -304,7 +304,7 @@ function mapDataToTemplate(appData, approvalData, requirements) {
     // More robust application type detection
     const appTypeStr = (appData.application_type || '').toLowerCase().trim();
     const isNewApplication = appTypeStr === 'new' || appTypeStr === 'new organization' || appTypeStr === 'new org';
-    
+    ``
     console.log('📄 [DOC-GEN] Application type detection:', {
         raw_application_type: appData.application_type,
         normalized_application_type: appTypeStr,
@@ -314,7 +314,7 @@ function mapDataToTemplate(appData, approvalData, requirements) {
     
     const data = {
         // Basic information
-        'academic-year': appData.academic_year || '',
+        'academic_year': appData.academic_year || '',
         'organization_name': appData.submitted_org_name || '',
         'submitter_name': appData.submitter_name || '',
         'submitter_contactno': appData.submitter_contact_no || '',
@@ -360,38 +360,44 @@ function mapDataToTemplate(appData, approvalData, requirements) {
     const receivers = approvalData.filter(a => a.status === 'Received');
     const approvers = approvalData.filter(a => a.is_final_approval === 1);
     
-    // Endorsers - Updated placeholder names
+    // Endorsers
     if (endorsers[0]) {
-        data['1-endorser-e-signature'] = loadSignatureImage(endorsers[0].signature_path);
-        data['1-endorser-e-sig-date'] = formatDate(endorsers[0].endorsed_at);
-        data['1-endorser-e-sig-time'] = formatTime(endorsers[0].endorsed_at);
+        data['endorser_e_sig_1'] = loadSignatureImage(endorsers[0].signature_path);
+        data['endorser_date1'] = formatDate(endorsers[0].endorsed_at);
+        data['endorser_e_time_1'] = formatTime(endorsers[0].endorsed_at);
+        data['endorser_name_1'] = endorsers[0].approver_name || '';
     }
     if (endorsers[1]) {
-        data['2-endorser-e-signature'] = loadSignatureImage(endorsers[1].signature_path);
-        data['2-endorser-e-sig-date'] = formatDate(endorsers[1].endorsed_at);
-        data['2-endorser-e-sig-time'] = formatTime(endorsers[1].endorsed_at);
+        data['endorser_e_sig_2'] = loadSignatureImage(endorsers[1].signature_path);
+        data['endorser_date2'] = formatDate(endorsers[1].endorsed_at);
+        data['endorser_e_time_2'] = formatTime(endorsers[1].endorsed_at);
+        data['endorser_name_2'] = endorsers[1].approver_name || '';
     }
     
-    // Receivers - Updated placeholder names
+    // Receivers
     if (receivers[0]) {
-        data['1-rec-e-signature'] = loadSignatureImage(receivers[0].signature_path);
-        data['1-rec-e-signature-date'] = formatDate(receivers[0].received_at);
-        data['1-rec-e-signature-time'] = formatTime(receivers[0].received_at);
+        data['rec_e_sig_1'] = loadSignatureImage(receivers[0].signature_path);
+        data['rec_date_1'] = formatDate(receivers[0].received_at);
+        data['rec_time_1'] = formatTime(receivers[0].received_at);
+        data['rec_name_1'] = receivers[0].approver_name || '';
     }
     if (receivers[1]) {
-        data['2-rec-e-signature'] = loadSignatureImage(receivers[1].signature_path);
-        data['2-rec-e-signature-date'] = formatDate(receivers[1].received_at);
-        data['2-rec-e-signature-time'] = formatTime(receivers[1].received_at);
+        data['rec_e_sig_2'] = loadSignatureImage(receivers[1].signature_path);
+        data['rec_date_2'] = formatDate(receivers[1].received_at);
+        data['rec_time_2'] = formatTime(receivers[1].received_at);
+        data['rec_name_2'] = receivers[1].approver_name || '';
     }
     
-    // Final Approvers - Updated placeholder names
+    // Final Approvers
     if (approvers[0]) {
-        data['1-final-e-signature'] = loadSignatureImage(approvers[0].signature_path);
-        data['1-app-e-sig-date'] = formatDate(approvers[0].approved_at);
+        data['final_e_sig_1'] = loadSignatureImage(approvers[0].signature_path);
+        data['final_date_1'] = formatDate(approvers[0].approved_at);
+        data['final_name_1'] = approvers[0].approver_name || '';
     }
     if (approvers[1]) {
-        data['2-final-e-signature'] = loadSignatureImage(approvers[1].signature_path);
-        data['2-app-e-sig-date'] = formatDate(approvers[1].approved_at);
+        data['final_e_sig_2'] = loadSignatureImage(approvers[1].signature_path);
+        data['final_date_2'] = formatDate(approvers[1].approved_at);
+        data['final_name_2'] = approvers[1].approver_name || '';
     }
     
     // Remarks

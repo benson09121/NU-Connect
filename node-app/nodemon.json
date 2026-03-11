@@ -1,13 +1,14 @@
 {
   "watch": [
-    "server.js",
+    "server.ts",
     "config/",
     "middlewares/",
     "mobile/",
     "web/",
     "services/",
     "utils/",
-    "jobs/"
+    "jobs/",
+    "types/"
   ],
   "ignore": [
     "node_modules/",
@@ -33,11 +34,11 @@
     ".DS_Store",
     "Thumbs.db"
   ],
-  "ext": "js,json",
+  "ext": "ts,js,json",
   "legacyWatch": false,
   "verbose": false,
   "execMap": {
-    "js": "node"
+    "ts": "ts-node"
   },
   "delay": 2000
 }

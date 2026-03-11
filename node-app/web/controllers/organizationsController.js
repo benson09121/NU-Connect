@@ -2,6 +2,8 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const { subscribeToChannel, publishToChannel, publishOrgHub, getOrgHubChannel } = require('./sseController');
+const { broadcastToPage } = require('../../services/websocketService');
+const { logActivity } = require('../../services/notificationAndLogService');
 const organizationsModel = require('../models/organizationsModel');
 const userCacheModel = require('../models/userCacheModel');
 const { TermPaymentModel } = require('../models/simplifiedTermPaymentModel');
@@ -1263,12 +1265,12 @@ async function updateCommittee(req, res) {
 async function archiveCommittee(req, res) {
   try {
     const { committee_id, reason, orgId, orgVersionId } = req.body;
-    const archived_by_email = req.user.email;
+    const archived_by_user_id = req.user.user_id;
 
     const result = await organizationsModel.archiveCommittee({
       committee_id,
       reason,
-      archived_by_email
+      archived_by_user_id
     });
 
     // Publish updated committees list for real-time updates
@@ -1277,10 +1279,23 @@ async function archiveCommittee(req, res) {
       const committeesArray = Array.isArray(updatedCommittees) ? updatedCommittees : [];
       const channelName = `organization_committees_${orgId}_${orgVersionId}`;
       publishToChannel(channelName, committeesArray);
-      console.log(`�️ [ARCHIVE-COMMITTEE] Published to ${channelName} - ${committeesArray.length} committees remaining`);
+      broadcastToPage('manage-roles', 'roles:committee-updated', {}, Number(orgId));
+      console.log(`🗄️ [ARCHIVE-COMMITTEE] Published to ${channelName} - ${committeesArray.length} committees remaining`);
     } catch (publishError) {
       console.error('❌ [ARCHIVE-COMMITTEE] Failed to publish:', publishError);
     }
+
+    const actingName = `${req.user.f_name ?? ''} ${req.user.l_name ?? ''}`.trim() || req.user.email;
+    logActivity({
+      userId: req.user.user_id,
+      userEmail: req.user.email,
+      fullName: actingName,
+      action: `Archived committee: ${result?.name ?? committee_id}`,
+      actionType: 'committee_archived',
+      entityType: 'organization',
+      entityId: orgId ? Number(orgId) : null,
+      organizationId: orgId ? Number(orgId) : null,
+    });
 
     res.status(200).json({
       message: 'Committee archived successfully.',
@@ -2472,10 +2487,23 @@ async function updateCommitteePermissions(req, res) {
       const updatedCommitteeRoles = await organizationsModel.getOrganizationCommitteeRoles(organization_id, organization_version_id);
       const committeeRolesArray = Array.isArray(updatedCommitteeRoles) ? updatedCommitteeRoles : [];
       publishToChannel(`committee_roles_${organization_id}_${organization_version_id}`, committeeRolesArray);
+      broadcastToPage('manage-roles', 'roles:committee-updated', {}, Number(organization_id));
       console.log(`Published updated committee roles to SSE channel: ${committeeRolesArray.length} roles`);
     } catch (publishError) {
       console.error('Failed to publish committee roles updates:', publishError);
     }
+
+    const actingName = `${req.user.f_name ?? ''} ${req.user.l_name ?? ''}`.trim() || req.user.email;
+    logActivity({
+      userId: req.user.user_id,
+      userEmail: req.user.email,
+      fullName: actingName,
+      action: `Updated ${role_type} committee permissions`,
+      actionType: 'committee_permissions_updated',
+      entityType: 'organization',
+      entityId: organization_id ? Number(organization_id) : null,
+      organizationId: organization_id ? Number(organization_id) : null,
+    });
 
     res.json({
       success: true,
@@ -2510,13 +2538,26 @@ async function updateExecutivePermissions(req, res) {
 
     // Publish updated executive roles for real-time updates  
     try {
-      const updatedExecutiveRoles = await organizationsModel.getOrganizationExecutivesRoles(organization_id, organization_version_id);
+      const updatedExecutiveRoles = await organizationsModel.getOrganizationExecutives(organization_id, organization_version_id);
       const executiveRolesArray = Array.isArray(updatedExecutiveRoles) ? updatedExecutiveRoles : [];
       publishToChannel(`executives_${organization_id}_${organization_version_id}`, executiveRolesArray);
+      broadcastToPage('manage-roles', 'roles:executive-updated', {}, Number(organization_id));
       console.log(`Published updated executive roles to SSE channel: ${executiveRolesArray.length} roles`);
     } catch (publishError) {
       console.error('Failed to publish executive roles updates:', publishError);
     }
+
+    const actingName = `${req.user.f_name ?? ''} ${req.user.l_name ?? ''}`.trim() || req.user.email;
+    logActivity({
+      userId: req.user.user_id,
+      userEmail: req.user.email,
+      fullName: actingName,
+      action: `Updated executive role permissions`,
+      actionType: 'executive_permissions_updated',
+      entityType: 'organization',
+      entityId: organization_id ? Number(organization_id) : null,
+      organizationId: organization_id ? Number(organization_id) : null,
+    });
 
     res.json({
       success: true,
@@ -2613,6 +2654,19 @@ async function addMemberPermissionOverride(req, res) {
       data: result,
       legacyChannel: `member_permission_${organization_id}_${organization_version_id}`
     });
+    try { broadcastToPage('manage-roles', 'roles:member-overrides-updated', {}, Number(organization_id)); } catch (_) {}
+
+    const actingName = `${req.user.f_name ?? ''} ${req.user.l_name ?? ''}`.trim() || req.user.email;
+    logActivity({
+      userId: req.user.user_id,
+      userEmail: req.user.email,
+      fullName: actingName,
+      action: `Added member permission override for ${email}`,
+      actionType: 'member_override_added',
+      entityType: 'organization',
+      entityId: organization_id ? Number(organization_id) : null,
+      organizationId: organization_id ? Number(organization_id) : null,
+    });
 
     res.json({
       success: true,
@@ -2667,6 +2721,19 @@ async function updateMemberPermissionOverride(req, res) {
       data: result,
       legacyChannel: `member_permission_${organization_id}_${organization_version_id}`
     });
+    try { broadcastToPage('manage-roles', 'roles:member-overrides-updated', {}, Number(organization_id)); } catch (_) {}
+
+    const actingName = `${req.user.f_name ?? ''} ${req.user.l_name ?? ''}`.trim() || req.user.email;
+    logActivity({
+      userId: req.user.user_id,
+      userEmail: req.user.email,
+      fullName: actingName,
+      action: `Updated member permission override for member ID ${member_id}`,
+      actionType: 'member_override_updated',
+      entityType: 'organization',
+      entityId: organization_id ? Number(organization_id) : null,
+      organizationId: organization_id ? Number(organization_id) : null,
+    });
 
     res.json({
       success: true,
@@ -2711,6 +2778,19 @@ async function removeMemberPermissionOverride(req, res) {
       operation: 'DELETE',
       data: result,
       legacyChannel: `member_permission_${organization_id}_${organization_version_id}`
+    });
+    try { broadcastToPage('manage-roles', 'roles:member-overrides-updated', {}, Number(organization_id)); } catch (_) {}
+
+    const actingName = `${req.user.f_name ?? ''} ${req.user.l_name ?? ''}`.trim() || req.user.email;
+    logActivity({
+      userId: req.user.user_id,
+      userEmail: req.user.email,
+      fullName: actingName,
+      action: `Removed member permission override for member ID ${member_id}`,
+      actionType: 'member_override_removed',
+      entityType: 'organization',
+      entityId: organization_id ? Number(organization_id) : null,
+      organizationId: organization_id ? Number(organization_id) : null,
     });
 
     res.json({
@@ -3066,10 +3146,11 @@ async function getUserOrganizations(req, res) {
         
         // Query for approved applications where user is the applicant
         const [approvedApps] = await connection.query(`
-          SELECT o.name, o.logo, o.status, o.organization_id, o.current_org_version_id, 
+          SELECT o.name, ov.logo_path AS logo, o.status, o.organization_id, o.current_org_version_id, 
                  rc.cycle_number, 'Applicant' AS position
           FROM tbl_application a
           JOIN tbl_organization o ON a.organization_id = o.organization_id
+          JOIN tbl_organization_version ov ON ov.org_version_id = o.current_org_version_id
           JOIN tbl_renewal_cycle rc ON o.organization_id = rc.organization_id 
               AND rc.org_version_id = o.current_org_version_id
           WHERE a.applicant_user_id = ? 

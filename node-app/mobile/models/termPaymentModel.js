@@ -160,8 +160,8 @@ class MobileTermPaymentModel {
                     o.organization_id,
                     o.name as organization_name,
                     o.current_org_version_id,
-                    o.membership_fee_amount,
-                    o.membership_fee_type,
+                    ov.membership_fee_amount,
+                    ov.membership_fee_type,
                     o.status as org_status,
                     ov.org_version_id,
                     -- Default exclusion policy if column doesn't exist yet
@@ -659,12 +659,12 @@ class MobileTermPaymentModel {
                     DATE(?) BETWEEN at.start_date AND at.end_date as is_current_term,
                     CASE WHEN at.term_id IS NOT NULL THEN 1 ELSE 0 END as term_exists,
                     
-                    -- Organization information (get fee from main organization table)
+                    -- Organization information (get fee from current version snapshot)
                     o.organization_id,
                     o.name as organization_name,
                     o.current_org_version_id,
-                    o.membership_fee_amount,
-                    o.membership_fee_type,
+                    ov.membership_fee_amount,
+                    ov.membership_fee_type,
                     
                     -- Payment information (will be NULL if no payment exists)
                     tp.payment_id,
@@ -1217,13 +1217,14 @@ class MobileTermPaymentModel {
         try {
             const [rows] = await connection.query(`
                 SELECT 
-                    organization_id,
-                    name as organization_name,
-                    membership_fee_amount,
-                    membership_fee_type,
-                    current_org_version_id
-                FROM tbl_organization 
-                WHERE organization_id = ?
+                    o.organization_id,
+                    o.name as organization_name,
+                    ov.membership_fee_amount,
+                    ov.membership_fee_type,
+                    o.current_org_version_id
+                FROM tbl_organization o
+                JOIN tbl_organization_version ov ON ov.org_version_id = o.current_org_version_id
+                WHERE o.organization_id = ?
             `, [organizationId]);
             
             return rows[0] || null;
@@ -1306,7 +1307,7 @@ class MobileTermPaymentModel {
                     t.proof_image as image_path,
                     t.payment_description as notes,
                     o.name as organization_name,
-                    o.membership_fee_amount,
+                    ov.membership_fee_amount,
                     at.term_name,
                     at.start_date,
                     at.end_date
@@ -1314,6 +1315,7 @@ class MobileTermPaymentModel {
                 LEFT JOIN tbl_transaction t ON tp.transaction_id = t.transaction_id
                 LEFT JOIN tbl_payment_type pt ON t.payment_type_id = pt.payment_type_id
                 LEFT JOIN tbl_organization o ON tp.organization_id = o.organization_id
+                LEFT JOIN tbl_organization_version ov ON ov.org_version_id = o.current_org_version_id
                 LEFT JOIN tbl_academic_term at ON tp.term_id = at.term_id
                 WHERE tp.payment_id = ?
             `, [paymentId]);
@@ -1366,9 +1368,10 @@ class MobileTermPaymentModel {
                     tp.created_at as payment_date,
                     at.term_name,
                     o.name as organization_name,
-                    o.membership_fee_amount
+                    ov.membership_fee_amount
                 FROM tbl_term_payments tp
                 JOIN tbl_organization o ON tp.organization_id = o.organization_id
+                JOIN tbl_organization_version ov ON ov.org_version_id = o.current_org_version_id
                 JOIN tbl_academic_term at ON tp.term_id = at.term_id
                 WHERE tp.user_id = ? 
                 AND tp.organization_id = ? 

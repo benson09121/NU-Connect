@@ -8,6 +8,7 @@ const { get } = require('http');
 const Docxtemplater = require('docxtemplater');
 const PizZip = require('pizzip');
 const e = require('express');
+const { broadcastToPage } = require('../../services/websocketService');
 
 function parseCollaboratorsField(event) {
   if (event && typeof event.collaborators === 'string') {
@@ -102,12 +103,17 @@ async function getEvents(req, res) {
 }
 
 async function getaddEventStatus(req, res){
-  const { orgName, sessionId } = req.query;
+  const { orgName, org_id, sessionId } = req.query;
   try {
-    const status = await eventModel.getaddEventStatus(orgName);
+    let status;
+    if (org_id) {
+      status = await eventModel.getaddEventStatusById(Number(org_id));
+    } else {
+      status = await eventModel.getaddEventStatus(orgName);
+    }
 
     if (sessionId) {
-      const ch = `addEvent_${orgName}`;
+      const ch = `addEvent_${org_id ?? orgName}`;
       subscribeToChannel(sessionId, ch);
       publishToChannel(ch, {
         channel: ch,
@@ -223,6 +229,7 @@ async function updateEvent(req, res) {
       data: [updatedEvent]
     });
 
+    try { broadcastToPage('events', 'event:updated', { event_id }); } catch (_) {}
     res.status(200).json({ message: 'Event updated successfully' });
   } catch (error) {
     res.status(500).json({
@@ -246,6 +253,7 @@ async function deleteEvent(req, res) {
       data: Array.isArray(allEvents) ? allEvents : []
     });
 
+    try { broadcastToPage('events', 'event:deleted', { event_id }); } catch (_) {}
     res.status(200).json({ message: 'Event deleted successfully' });
   } catch (error) {
     res.status(500).json({
@@ -1241,6 +1249,7 @@ async function createEvent(req, res) {
     } catch (sseError) {
       console.error(`[createEvent] Failed to publish SSE update:`, sseError);
     }
+    try { broadcastToPage('events', 'event:created', { event_id: eventId }); } catch (_) {}
 
     // Send success response
     res.status(201).json({ 
@@ -2198,6 +2207,7 @@ async function archiveEvent(req, res) {
             return res.status(400).json({ message: "event_id, user_id (or user_email), and reason are required." });
         }
         const result = await eventModel.archiveEvent(event_id, user_id, reason);
+        try { broadcastToPage('events', 'event:archived', { event_id }); } catch (_) {}
         res.status(200).json(result);
     } catch (error) {
         console.error('[archiveEvent] Error:', error);
@@ -2222,6 +2232,7 @@ async function unarchiveEvent(req, res) {
             return res.status(400).json({ message: "event_id and user_id (or user_email) are required." });
         }
         const result = await eventModel.unarchiveEvent(event_id, user_id, reason || null);
+        try { broadcastToPage('events', 'event:unarchived', { event_id }); } catch (_) {}
         res.status(200).json(result);
     } catch (error) {
         console.error('[unarchiveEvent] Error:', error);
@@ -2366,6 +2377,7 @@ async function updateEventSDAO(req, res) {
     } catch (sseError) {
       console.error('[updateEventSDAO] Failed to publish SSE update:', sseError);
     }
+    try { broadcastToPage('events', 'event:updated', { event_id }); } catch (_) {}
 
     res.status(200).json({ success: true, message: 'Event updated successfully', event: result, data: result, event_id });
   } catch (error) {
@@ -2446,6 +2458,7 @@ async function deleteEventSDAO(req, res) {
     } catch (e) {
       console.error('[deleteEventSDAO] SSE publish failed', { error: e?.message });
     }
+    try { broadcastToPage('events', 'event:deleted', { event_id }); } catch (_) {}
 
     const durationMs = Date.now() - start;
 

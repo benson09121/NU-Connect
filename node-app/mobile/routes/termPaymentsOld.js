@@ -688,8 +688,8 @@ router.get('/term-payments/check-payment-status/:organizationId',
                         mtp.payment_status,
                         mtp.created_at,
                         mtp.updated_at,
-                        o.membership_fee_amount,
-                        o.membership_fee_type,
+                        ov.membership_fee_amount,
+                        ov.membership_fee_type,
                         t.amount as transaction_amount,
                         t.payment_method,
                         t.transaction_id,
@@ -699,6 +699,7 @@ router.get('/term-payments/check-payment-status/:organizationId',
                         at.end_date
                     FROM tbl_membership_term_payment mtp
                     JOIN tbl_organization o ON mtp.organization_id = o.organization_id
+                    JOIN tbl_organization_version ov ON ov.org_version_id = o.current_org_version_id
                     JOIN tbl_academic_term at ON mtp.term_id = at.term_id
                     LEFT JOIN tbl_transaction t ON mtp.payment_id = t.payment_id
                     WHERE mtp.user_id = ? 
@@ -715,11 +716,12 @@ router.get('/term-payments/check-payment-status/:organizationId',
                     // Get organization fee details
                     const [orgResult] = await connection.query(`
                         SELECT 
-                            membership_fee_amount,
-                            membership_fee_type,
-                            organization_name
-                        FROM tbl_organization 
-                        WHERE organization_id = ?
+                            ov.membership_fee_amount,
+                            ov.membership_fee_type,
+                            o.name as organization_name
+                        FROM tbl_organization o
+                        JOIN tbl_organization_version ov ON ov.org_version_id = o.current_org_version_id
+                        WHERE o.organization_id = ?
                     `, [organizationId]);
 
                     const orgFee = orgResult[0] || {};

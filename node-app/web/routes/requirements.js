@@ -34,7 +34,8 @@ router.get(
   requirementController.getRequirements
 );
 
-router.get('/requirement-event-template', middleware.validateAzureJWT, requirementController.getEventRequirementTemplate);
+// /requirement-event-template is now handled by the TypeScript eventsRoutes.ts
+// router.get('/requirement-event-template', middleware.validateAzureJWT, requirementController.getEventRequirementTemplate);
 router.get('/requirement-periods-applications', middleware.validateAzureJWT, middleware.hasPermission("MANAGE_REQUIREMENTS"), requirementController.getAllPeriodsWithApplications);
 // Test route without auth
 router.get('/test-simple', (req, res) => {
@@ -51,7 +52,8 @@ router.post('/requirement-period', middleware.validateAzureJWT, middleware.hasPe
 router.post('/requirement-period/terminate', middleware.validateAzureJWT, middleware.hasPermission("MANAGE_REQUIREMENTS"), requirementController.terminateActiveApplicationPeriod);
 router.post('/requirements', middleware.validateAzureJWT, middleware.hasPermission("MANAGE_REQUIREMENTS"), requirementController.addRequirement);
 router.post('/requirements/add-event', middleware.validateAzureJWT, middleware.hasPermission("MANAGE_REQUIREMENTS"), requirementController.addEventRequirement);
-router.post('/requirements/batch-update-event', middleware.validateAzureJWT, middleware.hasPermission("MANAGE_REQUIREMENTS"), requirementController.batchUpdateEventRequirements);
+// /requirements/batch-update-event is now handled by the TypeScript eventsRoutes.ts
+// router.post('/requirements/batch-update-event', middleware.validateAzureJWT, middleware.hasPermission("MANAGE_REQUIREMENTS"), requirementController.batchUpdateEventRequirements);
 router.put('/requirements', middleware.validateAzureJWT, middleware.hasPermission("MANAGE_REQUIREMENTS"), requirementController.updateRequirement);
 router.put('/requirement-period', middleware.validateAzureJWT, middleware.hasPermission("MANAGE_REQUIREMENTS"), requirementController.updateApplicationPeriod);
 router.delete('/requirements/', middleware.validateAzureJWT, middleware.hasPermission("MANAGE_REQUIREMENTS"), requirementController.deleteRequirement);

@@ -59,11 +59,11 @@ router.get(
     organizationsController.getOrganizations
 );
 
-// 🆕 Real-time user organizations endpoint
-router.get('/user-organizations', 
-    middleware.validateAzureJWT, 
-    organizationsController.getUserOrganizations
-);
+// /user-organizations is now handled by the TypeScript eventsRoutes.ts (Prisma-based)
+// router.get('/user-organizations', 
+//     middleware.validateAzureJWT, 
+//     organizationsController.getUserOrganizations
+// );
 
 router.get('/organizations-by-status', middleware.validateAzureJWT, middleware.hasPermission("VIEW_ORGANIZATION"), organizationsController.getOrganizationsByStatus);
 router.post('/organizations', middleware.validateAzureJWT, organizationsController.createOrganizationApplication);
@@ -315,11 +315,12 @@ router.get(
     organizationsController.getOrganizationDashboardOverview
 );
 
-router.get(
-    '/all-organizations',
-    middleware.validateAzureJWT, // or remove if you want public access
-    organizationsController.getAllOrganizations
-);
+// /all-organizations is now handled by the TypeScript eventsRoutes.ts (Prisma-based)
+// router.get(
+//     '/all-organizations',
+//     middleware.validateAzureJWT,
+//     organizationsController.getAllOrganizations
+// );
 
 router.get(
     '/all-applications-by-organization',

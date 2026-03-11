@@ -22,35 +22,40 @@ router.use(validateAzureJWT);
  * @desc    Get current active term
  * @access  Private (All authenticated users)
  */
-router.get('/terms/current', TermPaymentController.getCurrentActiveTerm);
+// /terms/current is now handled by TypeScript termsRoutes.ts
+// router.get('/terms/current', TermPaymentController.getCurrentActiveTerm);
 
 /**
  * @route   GET /api/web/term-payments/terms
  * @desc    Get all terms
  * @access  Private (All authenticated users)
  */
-router.get('/terms', TermPaymentController.getAllTerms);
+// /terms is now handled by TypeScript termsRoutes.ts
+// router.get('/terms', TermPaymentController.getAllTerms);
 
 /**
  * @route   POST /api/web/term-payments/terms
  * @desc    Create new term
  * @access  Private (Admin only) - TEMPORARILY DISABLED PERMISSION CHECK
  */
-router.post('/terms', TermPaymentController.createTerm);
+// /terms POST is now handled by TypeScript termsRoutes.ts
+// router.post('/terms', TermPaymentController.createTerm);
 
 /**
  * @route   PUT /api/web/term-payments/terms/:termId
  * @desc    Update term
  * @access  Private (Admin only) - TEMPORARILY DISABLED PERMISSION CHECK
  */
-router.put('/terms/:termId', TermPaymentController.updateTerm);
+// /terms/:termId PUT is now handled by TypeScript termsRoutes.ts
+// router.put('/terms/:termId', TermPaymentController.updateTerm);
 
 /**
  * @route   DELETE /api/web/term-payments/terms/:termId
  * @desc    Delete term
  * @access  Private (Admin only) - TEMPORARILY DISABLED PERMISSION CHECK
  */
-router.delete('/terms/:termId', TermPaymentController.deleteTerm);
+// /terms/:termId DELETE is now handled by TypeScript termsRoutes.ts
+// router.delete('/terms/:termId', TermPaymentController.deleteTerm);
 
 // ===================
 // PAYMENT MANAGEMENT ROUTES

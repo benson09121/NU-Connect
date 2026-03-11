@@ -12,3 +12,4 @@ facebook-session.json
 
 # Crawlee storage
 storage/
+/lib/generated/prisma
