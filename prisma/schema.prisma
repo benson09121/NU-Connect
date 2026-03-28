@@ -1,0 +1,1596 @@
+generator client {
+  provider = "prisma-client"
+  output = "../lib/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model tbl_academic_term {
+  term_id                  Int                        @id @default(autoincrement())
+  term_name                String                     @unique @db.VarChar(100)
+  term_description         String?
+  academic_year            String?                    @db.VarChar(20)
+  start_date               DateTime                   @db.Date
+  end_date                 DateTime                   @db.Date
+  created_at               DateTime?                  @default(now()) @db.Timestamp(6)
+  updated_at               DateTime?                  @default(now()) @db.Timestamp(6)
+  created_by               String?                    @db.VarChar(200)
+  tbl_user                 tbl_user?                  @relation(fields: [created_by], references: [user_id], onDelete: NoAction)
+  tbl_organization_members tbl_organization_members[]
+  tbl_term_payments        tbl_term_payments[]
+}
+
+model tbl_ai_conversation {
+  conversation_id         BigInt           @id @default(autoincrement())
+  owner_id                String           @db.VarChar(200)
+  title                   String?          @db.VarChar(255)
+  system_prompt           String?
+  model                   String?          @default("deepseek-chat") @db.VarChar(100)
+  temperature             Decimal?         @default(0.7) @db.Decimal(3, 2)
+  top_p                   Decimal?         @default(1.0) @db.Decimal(3, 2)
+  entity_type             ai_entity_type?  @default(general)
+  entity_id               Int?
+  summary                 String?
+  is_global               Boolean?         @default(true)
+  last_summary_message_id BigInt?
+  is_archived             Boolean?         @default(false)
+  created_at              DateTime?        @default(now()) @db.Timestamp(6)
+  updated_at              DateTime?        @default(now()) @db.Timestamp(6)
+  tbl_user                tbl_user         @relation(fields: [owner_id], references: [user_id], onDelete: NoAction)
+  tbl_ai_message          tbl_ai_message[]
+
+  @@index([owner_id, updated_at(sort: Desc)], map: "idx_owner_updated")
+  @@index([entity_type, entity_id], map: "idx_scope")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+model tbl_ai_message {
+  message_id            BigInt              @id @default(autoincrement())
+  conversation_id       BigInt
+  role                  ai_role
+  user_id               String?             @db.VarChar(200)
+  content               String
+  model                 String?             @db.VarChar(100)
+  context_organizations Json?
+  message_scope         ai_message_scope?   @default(current_view)
+  meta                  Json?
+  created_at            DateTime?           @default(now()) @db.Timestamp(6)
+  tbl_ai_conversation   tbl_ai_conversation @relation(fields: [conversation_id], references: [conversation_id], onDelete: Cascade, onUpdate: NoAction)
+  tbl_user              tbl_user?           @relation(fields: [user_id], references: [user_id], onDelete: NoAction)
+
+  @@index([conversation_id, message_id], map: "idx_conv_msg")
+  @@index([conversation_id, created_at], map: "idx_conv_time")
+  @@index([conversation_id, message_scope], map: "idx_message_scope")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model tbl_application {
+  application_id                                       Int                                       @id @default(autoincrement())
+  organization_id                                      Int?
+  cycle_number                                         Int?
+  org_version_id                                       Int?
+  submitted_org_name                                   String?                                   @db.VarChar(255)
+  submitted_org_logo                                   String?                                   @db.VarChar(500)
+  description                                          String?
+  category                                             org_category?
+  base_program_id                                      Int?
+  student_id                                           String?                                   @db.VarChar(200)
+  submitter_contact_no                                 String?                                   @db.VarChar(20)
+  application_type                                     application_type
+  period_id                                            Int
+  applicant_user_id                                    String                                    @db.VarChar(200)
+  status                                               status_pending_approved_rejected?         @default(Pending)
+  docx_path                                            String?                                   @db.VarChar(500)
+  pdf_path                                             String?                                   @db.VarChar(500)
+  docx_generated_at                                    DateTime?                                 @db.Timestamp(6)
+  pdf_generated_at                                     DateTime?                                 @db.Timestamp(6)
+  document_generation_status                           String?                                   @default("pending")
+  created_at                                           DateTime?                                 @default(now()) @db.Timestamp(6)
+  updated_at                                           DateTime?                                 @default(now()) @db.Timestamp(6)
+  tbl_user_tbl_application_applicant_user_idTotbl_user tbl_user                                  @relation("tbl_application_applicant_user_idTotbl_user", fields: [applicant_user_id], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_program                                          tbl_program?                              @relation(fields: [base_program_id], references: [program_id], onUpdate: NoAction)
+  tbl_organization_version                             tbl_organization_version?                 @relation(fields: [org_version_id], references: [org_version_id], onUpdate: NoAction)
+  tbl_renewal_cycle                                    tbl_renewal_cycle?                        @relation(fields: [organization_id, cycle_number], references: [organization_id, cycle_number], onUpdate: NoAction)
+  tbl_application_period                                tbl_application_period                    @relation(fields: [period_id], references: [period_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_user_tbl_application_student_idTotbl_user        tbl_user?                                 @relation("tbl_application_student_idTotbl_user", fields: [student_id], references: [user_id], onUpdate: NoAction)
+  tbl_application_approval                             tbl_application_approval[]
+  tbl_application_executives                           tbl_application_executives[]
+  tbl_approval_process                                 tbl_approval_process[]
+  tbl_organization_requirement_submission              tbl_organization_requirement_submission[]
+  tbl_application_approval_chain                       tbl_application_approval_chain[]
+
+  @@index([document_generation_status], map: "idx_document_status")
+}
+
+model tbl_application_approval {
+  application_id       Int
+  approval_id          Int
+  tbl_application      tbl_application      @relation(fields: [application_id], references: [application_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_approval_process tbl_approval_process @relation(fields: [approval_id], references: [approval_id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@id([application_id, approval_id])
+}
+
+model tbl_application_executives {
+  app_exec_id              Int                       @id @default(autoincrement())
+  application_id           Int
+  org_version_id           Int?
+  proposed_name            String?                   @db.VarChar(255)
+  proposed_email           String?                   @db.VarChar(255)
+  proposed_title           String?                   @db.VarChar(100)
+  proposed_rank_id         Int?
+  created_at               DateTime?                 @default(now()) @db.Timestamp(6)
+  tbl_application          tbl_application           @relation(fields: [application_id], references: [application_id], onDelete: Cascade, onUpdate: NoAction)
+  tbl_organization_version tbl_organization_version? @relation(fields: [org_version_id], references: [org_version_id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model tbl_application_requirement {
+  requirement_id                          Int                                       @id @default(autoincrement())
+  requirement_name                        String                                    @db.VarChar(255)
+  is_applicable_to                        is_applicable_to_new_renew?               @default(new)
+  file_path                               String?                                   @db.VarChar(255)
+  is_archived                             Boolean                                   @default(false)
+  created_by                              String?                                   @db.VarChar(200)
+  created_at                              DateTime?                                 @default(now()) @db.Timestamp(6)
+  updated_at                              DateTime?                                 @default(now()) @db.Timestamp(6)
+  tbl_user                                tbl_user?                                 @relation(fields: [created_by], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_organization_requirement_submission tbl_organization_requirement_submission[]
+  tbl_application_period_requirement      tbl_application_period_requirement[]
+}
+
+model tbl_approval_process {
+  approval_id              Int                               @id @default(autoincrement())
+  application_id           Int
+  period_id                Int?
+  approver_id              String                            @db.VarChar(200)
+  approval_role_id         Int
+  application_type         application_type                  @default(new)
+  status                   status_pending_approved_rejected? @default(Pending)
+  comment                  String?
+  step                     Int
+  timestamp                DateTime?                         @default(now()) @db.Timestamp(6)
+  tbl_application_approval tbl_application_approval[]
+  tbl_application          tbl_application                   @relation(fields: [application_id], references: [application_id], onDelete: Cascade, onUpdate: NoAction)
+  tbl_role                 tbl_role                          @relation(fields: [approval_role_id], references: [role_id], onDelete: Cascade, onUpdate: NoAction)
+  tbl_user                 tbl_user                          @relation(fields: [approver_id], references: [user_id], onDelete: NoAction)
+  tbl_application_period    tbl_application_period?           @relation(fields: [period_id], references: [period_id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model tbl_archived_committees {
+  archive_id            Int               @id @default(autoincrement())
+  original_committee_id Int
+  organization_id       Int
+  cycle_number          Int
+  name                  String            @db.VarChar(100)
+  description           String?
+  created_at            DateTime          @db.Timestamp(6)
+  archived_at           DateTime?         @default(now()) @db.Timestamp(6)
+  archived_by           String            @db.VarChar(200)
+  reason                String?           @db.VarChar(255)
+  tbl_user              tbl_user          @relation(fields: [archived_by], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_renewal_cycle     tbl_renewal_cycle @relation(fields: [organization_id, cycle_number], references: [organization_id, cycle_number], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model tbl_archived_organization_members {
+  archived_id        Int                  @id @default(autoincrement())
+  member_id          Int
+  organization_id    Int
+  cycle_number       Int
+  user_id            String               @db.VarChar(200)
+  member_type        member_type
+  executive_role_id  Int?
+  committee_id       Int?
+  committee_role     committee_role_enum?
+  archived_at        DateTime?            @default(now()) @db.Timestamp(6)
+  archived_by        String               @db.VarChar(200)
+  tbl_renewal_cycle  tbl_renewal_cycle    @relation(fields: [organization_id, cycle_number], references: [organization_id, cycle_number], onDelete: NoAction, onUpdate: NoAction, map: "tbl_archived_organization_mem_organization_id_cycle_number_fkey")
+  tbl_executive_role tbl_executive_role?  @relation(fields: [executive_role_id], references: [executive_role_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_user           tbl_user             @relation(fields: [user_id], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model tbl_blocked_period {
+  blocked_period_id                                   Int       @id @default(autoincrement())
+  start_date                                          DateTime  @db.Date
+  end_date                                            DateTime  @db.Date
+  reason                                              String    @db.VarChar(255)
+  created_by                                          String    @db.VarChar(200)
+  created_at                                          DateTime? @default(now()) @db.Timestamp(6)
+  archived_at                                         DateTime? @db.Timestamp(6)
+  archived_by                                         String?   @db.VarChar(200)
+  archived_reason                                     String?   @db.VarChar(255)
+  unarchived_at                                       DateTime? @db.Timestamp(6)
+  unarchived_by                                       String?   @db.VarChar(200)
+  unarchived_reason                                   String?   @db.VarChar(255)
+  tbl_user_tbl_blocked_period_archived_byTotbl_user   tbl_user? @relation("tbl_blocked_period_archived_byTotbl_user", fields: [archived_by], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_user_tbl_blocked_period_created_byTotbl_user    tbl_user  @relation("tbl_blocked_period_created_byTotbl_user", fields: [created_by], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_user_tbl_blocked_period_unarchived_byTotbl_user tbl_user? @relation("tbl_blocked_period_unarchived_byTotbl_user", fields: [unarchived_by], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model tbl_certificate_template {
+  template_id           Int                     @id @default(autoincrement())
+  event_id              Int                     @unique
+  template_path         String                  @db.VarChar(255)
+  uploaded_by           String                  @db.VarChar(200)
+  created_at            DateTime?               @default(now()) @db.Timestamp(6)
+  tbl_event             tbl_event               @relation(fields: [event_id], references: [event_id], onDelete: Cascade, onUpdate: NoAction)
+  tbl_user              tbl_user                @relation(fields: [uploaded_by], references: [user_id], onDelete: NoAction)
+  tbl_event_certificate tbl_event_certificate[]
+}
+
+model tbl_college {
+  college_id      Int                    @id @default(autoincrement())
+  name            String                 @unique @db.VarChar(100)
+  abbreviation    String                 @unique @db.VarChar(20)
+  status          status_active_archived @default(Active)
+  created_at      DateTime?              @default(now()) @db.Timestamp(6)
+  archived_at     DateTime?              @db.Timestamp(6)
+  archived_by     String?                @db.VarChar(200)
+  archived_reason String?                @db.VarChar(255)
+  tbl_user        tbl_user?              @relation(fields: [archived_by], references: [user_id], onDelete: NoAction, map: "fk_college_archived_by")
+  tbl_college_dean tbl_college_dean[]
+  tbl_program     tbl_program[]
+}
+
+model tbl_committee {
+  committee_id          Int                     @id @default(autoincrement())
+  organization_id       Int
+  cycle_number          Int
+  name                  String                  @db.VarChar(100)
+  description           String?
+  created_at            DateTime?               @default(now()) @db.Timestamp(6)
+  tbl_renewal_cycle     tbl_renewal_cycle       @relation(fields: [organization_id, cycle_number], references: [organization_id, cycle_number], onDelete: Cascade, onUpdate: NoAction)
+  tbl_committee_members tbl_committee_members[]
+  tbl_committee_role    tbl_committee_role[]
+}
+
+model tbl_committee_members {
+  committee_member_id Int                 @id @default(autoincrement())
+  committee_id        Int
+  user_id             String              @db.VarChar(200)
+  committee_role_id   Int?
+  created_at          DateTime?           @default(now()) @db.Timestamp(6)
+  tbl_committee       tbl_committee       @relation(fields: [committee_id], references: [committee_id], onDelete: Cascade, onUpdate: NoAction)
+  tbl_committee_role  tbl_committee_role? @relation(fields: [committee_role_id], references: [committee_role_id], onUpdate: NoAction)
+  tbl_user            tbl_user            @relation(fields: [user_id], references: [user_id], onDelete: NoAction)
+}
+
+model tbl_committee_role {
+  committee_role_id             Int                             @id @default(autoincrement())
+  committee_id                  Int
+  role_name                     role_name_committee?            @default(Committee_Officer)
+  created_at                    DateTime?                       @default(now()) @db.Timestamp(6)
+  tbl_committee_members         tbl_committee_members[]
+  tbl_committee                 tbl_committee                   @relation(fields: [committee_id], references: [committee_id], onDelete: Cascade, onUpdate: NoAction)
+  tbl_committee_role_permission tbl_committee_role_permission[]
+
+  @@unique([committee_id, role_name], map: "unique_committee_head")
+}
+
+model tbl_committee_role_permission {
+  committee_role_permission_id Int                @id @default(autoincrement())
+  committee_role_id            Int
+  permission_id                Int
+  created_at                   DateTime?          @default(now()) @db.Timestamp(6)
+  tbl_committee_role           tbl_committee_role @relation(fields: [committee_role_id], references: [committee_role_id], onDelete: Cascade, onUpdate: NoAction)
+  tbl_permission               tbl_permission     @relation(fields: [permission_id], references: [permission_id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model tbl_evaluation {
+  evaluation_id           Int                       @id @default(autoincrement())
+  event_id                Int
+  user_id                 String                    @db.VarChar(200)
+  submitted_at            DateTime?                 @default(now()) @db.Timestamp(6)
+  duration_seconds        Int?
+  tbl_event               tbl_event                 @relation(fields: [event_id], references: [event_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_user                tbl_user                  @relation(fields: [user_id], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_evaluation_response tbl_evaluation_response[]
+}
+
+model tbl_evaluation_question {
+  question_id                   Int                           @id @default(autoincrement())
+  group_id                      Int
+  question_text                 String
+  question_type                 question_type_evaluation
+  is_required                   Boolean?                      @default(true)
+  tbl_evaluation_question_group tbl_evaluation_question_group @relation(fields: [group_id], references: [group_id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model tbl_evaluation_question_group {
+  group_id                    Int                           @id @default(autoincrement())
+  group_title                 String                        @db.VarChar(255)
+  group_description           String?
+  is_active                   Boolean?                      @default(true)
+  tbl_evaluation_question     tbl_evaluation_question[]
+  tbl_event_evaluation_config tbl_event_evaluation_config[]
+}
+
+model tbl_evaluation_response {
+  response_id    Int            @id @default(autoincrement())
+  evaluation_id  Int
+  question_id    Int
+  response_value String
+  created_at     DateTime?      @default(now()) @db.Timestamp(6)
+  tbl_evaluation tbl_evaluation @relation(fields: [evaluation_id], references: [evaluation_id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model tbl_event {
+  event_id                          Int                                 @id @default(autoincrement())
+  organization_id                   Int?
+  cycle_number                      Int?
+  event_type                        event_type?                         @default(Organization)
+  user_id                           String                              @db.VarChar(200)
+  title                             String                              @db.VarChar(300)
+  description                       String
+  image                             String?
+  venue_type                        venue_type?                         @default(Face_to_face)
+  venue                             String?                             @db.VarChar(200)
+  start_date                        DateTime                            @db.Date
+  end_date                          DateTime                            @db.Date
+  status                            event_status?                       @default(Pending)
+  type                              event_fee_type?
+  is_open_to                        event_open_to?                      @default(Members_only)
+  fee                               Int?
+  capacity                          Int?
+  created_at                        DateTime?                           @default(now()) @db.Timestamp(6)
+  certificate                       String?                             @db.VarChar(1000)
+  tbl_certificate_template          tbl_certificate_template?
+  tbl_evaluation                    tbl_evaluation[]
+  tbl_organization                  tbl_organization?                   @relation(fields: [organization_id], references: [organization_id], onUpdate: NoAction)
+  tbl_user                          tbl_user                            @relation(fields: [user_id], references: [user_id], onDelete: NoAction)
+  tbl_event_application             tbl_event_application[]
+  tbl_event_attendance              tbl_event_attendance[]
+  tbl_event_certificate             tbl_event_certificate[]
+  tbl_event_collaborator            tbl_event_collaborator[]
+  tbl_event_course                  tbl_event_course[]
+  tbl_event_evaluation_config       tbl_event_evaluation_config[]
+  tbl_event_evaluation_settings     tbl_event_evaluation_settings?
+  tbl_event_reminder_log            tbl_event_reminder_log[]
+  tbl_event_requirement_submissions tbl_event_requirement_submissions[]
+  tbl_event_schedule                tbl_event_schedule[]
+  tbl_event_venue                   tbl_event_venue[]
+  tbl_project_heads                 tbl_project_heads[]
+  tbl_transaction_event             tbl_transaction_event[]
+
+  @@index([start_date, end_date], map: "idx_dates")
+  @@index([event_type], map: "idx_event_type")
+  @@index([organization_id, cycle_number], map: "idx_org_cycle")
+  @@index([status], map: "idx_status")
+}
+
+model tbl_event_application {
+  event_application_id              Int                                        @id @default(autoincrement())
+  organization_id                   Int
+  cycle_number                      Int
+  proposed_event_id                 Int?
+  applicant_user_id                 String                                     @db.VarChar(200)
+  status                            status_pending_approved_rejected_revision? @default(Pending)
+  created_at                        DateTime?                                  @default(now()) @db.Timestamp(6)
+  updated_at                        DateTime?                                  @default(now()) @db.Timestamp(6)
+  tbl_user                          tbl_user                                   @relation(fields: [applicant_user_id], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_renewal_cycle                 tbl_renewal_cycle                          @relation(fields: [organization_id, cycle_number], references: [organization_id, cycle_number], onDelete: NoAction, onUpdate: NoAction)
+  tbl_event                         tbl_event?                                 @relation(fields: [proposed_event_id], references: [event_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_event_approval_process        tbl_event_approval_process[]
+  tbl_event_requirement_submissions tbl_event_requirement_submissions[]
+}
+
+model tbl_event_application_requirement {
+  requirement_id                    Int                                 @id @default(autoincrement())
+  requirement_name                  String                              @db.VarChar(255)
+  is_applicable_to                  is_applicable_to_pre_post?          @default(pre_event)
+  file_path                         String?                             @db.VarChar(255)
+  status                            requirement_status?                 @default(active)
+  created_by                        String?                             @db.VarChar(200)
+  created_at                        DateTime?                           @default(now()) @db.Timestamp(6)
+  updated_at                        DateTime?                           @default(now()) @db.Timestamp(6)
+  tbl_user                          tbl_user?                           @relation(fields: [created_by], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_event_requirement_submissions tbl_event_requirement_submissions[]
+}
+
+model tbl_event_approval_process {
+  event_approval_id     Int                               @id @default(autoincrement())
+  event_application_id  Int
+  approver_id           String                            @db.VarChar(200)
+  approval_role_id      Int
+  status                status_pending_approved_rejected? @default(Pending)
+  comment               String?
+  step_number           Int
+  approved_at           DateTime?                         @db.Timestamp(6)
+  tbl_role              tbl_role                          @relation(fields: [approval_role_id], references: [role_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_user              tbl_user                          @relation(fields: [approver_id], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_event_application tbl_event_application             @relation(fields: [event_application_id], references: [event_application_id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model tbl_event_attendance {
+  attendance_id   Int                                                   @id @default(autoincrement())
+  event_id        Int
+  user_id         String                                                @db.VarChar(200)
+  transaction_id  Int?
+  status          status_pending_registered_evaluated_attended_rejected
+  time_in         DateTime?                                             @db.Timestamp(6)
+  time_out        DateTime?                                             @db.Timestamp(6)
+  created_at      DateTime?                                             @default(now()) @db.Timestamp(6)
+  updated_at      DateTime?                                             @default(now()) @db.Timestamp(6)
+  deleted_at      DateTime?                                             @db.Timestamp(6)
+  tbl_event       tbl_event                                             @relation(fields: [event_id], references: [event_id], onDelete: Cascade, onUpdate: NoAction)
+  tbl_transaction tbl_transaction?                                      @relation(fields: [transaction_id], references: [transaction_id], onUpdate: NoAction)
+  tbl_user        tbl_user                                              @relation(fields: [user_id], references: [user_id], onDelete: NoAction)
+}
+
+model tbl_event_certificate {
+  certificate_id           Int                      @id @default(autoincrement())
+  event_id                 Int
+  user_id                  String                   @db.VarChar(200)
+  template_id              Int
+  certificate_path         String                   @db.VarChar(255)
+  verification_code        String                   @unique @db.VarChar(36)
+  issued_at                DateTime?                @default(now()) @db.Timestamp(6)
+  tbl_event                tbl_event                @relation(fields: [event_id], references: [event_id], onDelete: Cascade, onUpdate: NoAction)
+  tbl_certificate_template tbl_certificate_template @relation(fields: [template_id], references: [template_id], onDelete: Cascade, onUpdate: NoAction)
+  tbl_user                 tbl_user                 @relation(fields: [user_id], references: [user_id], onDelete: NoAction)
+
+  @@unique([event_id, user_id])
+}
+
+model tbl_event_collaborator {
+  event_id         Int
+  organization_id  Int
+  tbl_event        tbl_event        @relation(fields: [event_id], references: [event_id], onDelete: Cascade, onUpdate: NoAction)
+  tbl_organization tbl_organization @relation(fields: [organization_id], references: [organization_id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([event_id, organization_id])
+}
+
+model tbl_event_course {
+  event_id    Int
+  program_id  Int
+  tbl_event   tbl_event   @relation(fields: [event_id], references: [event_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_program tbl_program @relation(fields: [program_id], references: [program_id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@id([event_id, program_id])
+}
+
+model tbl_event_evaluation_config {
+  event_id                      Int
+  group_id                      Int
+  tbl_event                     tbl_event                     @relation(fields: [event_id], references: [event_id], onDelete: Cascade, onUpdate: NoAction)
+  tbl_evaluation_question_group tbl_evaluation_question_group @relation(fields: [group_id], references: [group_id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@id([event_id, group_id])
+}
+
+model tbl_event_evaluation_settings {
+  event_id   Int       @id
+  start_date DateTime  @db.Date
+  end_date   DateTime? @db.Date
+  start_time DateTime  @db.Time(6)
+  end_time   DateTime? @db.Time(6)
+  is_active  Boolean?  @default(true)
+  tbl_event  tbl_event @relation(fields: [event_id], references: [event_id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model tbl_event_reminder_log {
+  log_id          Int           @id @default(autoincrement())
+  event_id        Int
+  user_id         String        @db.VarChar(200)
+  reminder_type   reminder_type
+  sent_at         DateTime?     @default(now()) @db.Timestamp(6)
+  recipient_email String        @db.VarChar(255)
+  tbl_event       tbl_event     @relation(fields: [event_id], references: [event_id], onDelete: Cascade, onUpdate: NoAction, map: "fk_reminder_event")
+  tbl_user        tbl_user      @relation(fields: [user_id], references: [user_id], onDelete: Cascade, map: "fk_reminder_user")
+
+  @@unique([event_id, user_id, reminder_type], map: "unique_reminder")
+  @@index([event_id, user_id], map: "idx_event_user")
+  @@index([reminder_type], map: "idx_reminder_type")
+  @@index([sent_at], map: "idx_sent_at")
+}
+
+model tbl_event_requirement_submissions {
+  submission_id                                                     Int                               @id @default(autoincrement())
+  event_id                                                          Int?
+  event_application_id                                              Int?
+  requirement_id                                                    Int
+  cycle_number                                                      Int
+  status                                                            submission_status?                @default(Pending)
+  organization_id                                                   Int
+  file_path                                                         String                            @db.VarChar(255)
+  submitted_by                                                      String                            @db.VarChar(200)
+  submitted_at                                                      DateTime?                         @default(now()) @db.Timestamp(6)
+  updated_at                                                        DateTime?                         @default(now()) @db.Timestamp(6)
+  reviewed_by_email                                                 String?                           @db.VarChar(255)
+  reviewed_at                                                       DateTime?                         @db.Timestamp(6)
+  remarks                                                           String?
+  viewed_by                                                         String?                           @db.VarChar(200)
+  viewed_at                                                         DateTime?                         @db.Timestamp(6)
+  tbl_renewal_cycle                                                 tbl_renewal_cycle                 @relation(fields: [organization_id, cycle_number], references: [organization_id, cycle_number], onDelete: Cascade, onUpdate: NoAction, map: "tbl_event_requirement_submiss_organization_id_cycle_number_fkey")
+  tbl_event_application                                             tbl_event_application?            @relation(fields: [event_application_id], references: [event_application_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_event                                                         tbl_event?                        @relation(fields: [event_id], references: [event_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_event_application_requirement                                 tbl_event_application_requirement @relation(fields: [requirement_id], references: [requirement_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_user_tbl_event_requirement_submissions_submitted_byTotbl_user tbl_user                          @relation("tbl_event_requirement_submissions_submitted_byTotbl_user", fields: [submitted_by], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_user_tbl_event_requirement_submissions_viewed_byTotbl_user    tbl_user?                         @relation("tbl_event_requirement_submissions_viewed_byTotbl_user", fields: [viewed_by], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model tbl_executive_member_permission {
+  executive_permission_id  Int                      @id @default(autoincrement())
+  member_id                Int
+  organization_id          Int?
+  permission_id            Int
+  created_at               DateTime?                @default(now()) @db.Timestamp(6)
+  tbl_organization_members tbl_organization_members @relation(fields: [member_id], references: [member_id], onDelete: Cascade, onUpdate: NoAction)
+  tbl_permission           tbl_permission           @relation(fields: [permission_id], references: [permission_id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model tbl_executive_rank {
+  rank_id             Int                   @id @default(autoincrement())
+  rank_level          Int                   @unique
+  default_title       String                @db.VarChar(50)
+  description         String?               @db.VarChar(255)
+  created_at          DateTime?             @default(now()) @db.Timestamp(6)
+  tbl_executive_role  tbl_executive_role[]
+  tbl_rank_permission tbl_rank_permission[]
+}
+
+model tbl_executive_role {
+  executive_role_id                 Int                                 @id @default(autoincrement())
+  organization_id                   Int
+  cycle_number                      Int
+  role_title                        String                              @db.VarChar(100)
+  rank_id                           Int
+  created_at                        DateTime?                           @default(now()) @db.Timestamp(6)
+  tbl_archived_organization_members tbl_archived_organization_members[]
+  tbl_renewal_cycle                 tbl_renewal_cycle                   @relation(fields: [organization_id, cycle_number], references: [organization_id, cycle_number], onDelete: Cascade, onUpdate: NoAction)
+  tbl_executive_rank                tbl_executive_rank                  @relation(fields: [rank_id], references: [rank_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_organization_members          tbl_organization_members[]
+}
+
+model tbl_financial_category {
+  category_id                   Int                             @id @default(autoincrement())
+  code                          String                          @unique @db.VarChar(50)
+  label                         String                          @db.VarChar(100)
+  kind                          financial_kind
+  parent_category_id            Int?
+  active                        Boolean                         @default(true)
+  tbl_financial_category        tbl_financial_category?         @relation("tbl_financial_categoryTotbl_financial_category", fields: [parent_category_id], references: [category_id], onUpdate: NoAction)
+  other_tbl_financial_category  tbl_financial_category[]        @relation("tbl_financial_categoryTotbl_financial_category")
+  tbl_transaction               tbl_transaction[]
+  tbl_transaction_type_category tbl_transaction_type_category[]
+}
+
+model tbl_logs {
+  log_id          Int       @id @default(autoincrement())
+  user_id         String    @db.VarChar(200)
+  user_email      String    @db.VarChar(255)
+  full_name       String    @db.VarChar(255)
+  action          String
+  action_type     String    @db.VarChar(50)
+  entity_type     String?   @db.VarChar(50)
+  entity_id       Int?
+  organization_id Int?
+  redirect_url    String?   @db.VarChar(500)
+  meta_data       Json?
+  created_at      DateTime? @default(now()) @db.Timestamp(6)
+
+  tbl_user         tbl_user          @relation(fields: [user_id], references: [user_id], onDelete: NoAction)
+  tbl_organization tbl_organization? @relation(fields: [organization_id], references: [organization_id], onDelete: SetNull, onUpdate: NoAction)
+
+  @@index([user_id])
+  @@index([action_type])
+  @@index([created_at(sort: Desc)])
+  @@index([organization_id])
+  @@index([entity_type, entity_id])
+}
+
+model tbl_member_permission_override {
+  override_id              Int                      @id @default(autoincrement())
+  member_id                Int
+  permission_id            Int
+  is_allowed               Boolean
+  tbl_organization_members tbl_organization_members @relation(fields: [member_id], references: [member_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_permission           tbl_permission           @relation(fields: [permission_id], references: [permission_id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model tbl_membership_application {
+  application_id                                            Int                               @id @default(autoincrement())
+  organization_id                                           Int
+  cycle_number                                              Int
+  user_id                                                   String                            @db.VarChar(200)
+  status                                                    status_pending_approved_rejected? @default(Pending)
+  applied_at                                                DateTime?                         @default(now()) @db.Timestamp(6)
+  reviewed_by                                               String?                           @db.VarChar(200)
+  reviewed_at                                               DateTime?                         @db.Timestamp(6)
+  remarks                                                   String?
+  tbl_renewal_cycle                                         tbl_renewal_cycle                 @relation(fields: [organization_id, cycle_number], references: [organization_id, cycle_number], onDelete: NoAction, onUpdate: NoAction)
+  tbl_user_tbl_membership_application_reviewed_byTotbl_user tbl_user?                         @relation("tbl_membership_application_reviewed_byTotbl_user", fields: [reviewed_by], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_user_tbl_membership_application_user_idTotbl_user     tbl_user                          @relation("tbl_membership_application_user_idTotbl_user", fields: [user_id], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_membership_response                                   tbl_membership_response[]
+}
+
+model tbl_membership_leave_application {
+  leave_application_id                                            Int                               @id @default(autoincrement())
+  organization_id                                                 Int
+  cycle_number                                                    Int
+  user_id                                                         String                            @db.VarChar(200)
+  leave_reason                                                    String
+  effective_date                                                  DateTime?                         @db.Date
+  status                                                          status_pending_approved_rejected? @default(Pending)
+  applied_at                                                      DateTime?                         @default(now()) @db.Timestamp(6)
+  reviewed_by                                                     String?                           @db.VarChar(200)
+  reviewed_at                                                     DateTime?                         @db.Timestamp(6)
+  remarks                                                         String?
+  tbl_renewal_cycle                                               tbl_renewal_cycle                 @relation(fields: [organization_id, cycle_number], references: [organization_id, cycle_number], onDelete: NoAction, onUpdate: NoAction, map: "tbl_membership_leave_applicat_organization_id_cycle_number_fkey")
+  tbl_user_tbl_membership_leave_application_reviewed_byTotbl_user tbl_user?                         @relation("tbl_membership_leave_application_reviewed_byTotbl_user", fields: [reviewed_by], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_user_tbl_membership_leave_application_user_idTotbl_user     tbl_user                          @relation("tbl_membership_leave_application_user_idTotbl_user", fields: [user_id], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model tbl_membership_question {
+  question_id             Int                       @id @default(autoincrement())
+  organization_id         Int
+  cycle_number            Int
+  question_text           String
+  question_type           question_type_membership? @default(text)
+  is_required             Boolean?                  @default(true)
+  options                 Json?
+  tbl_renewal_cycle       tbl_renewal_cycle         @relation(fields: [organization_id, cycle_number], references: [organization_id, cycle_number], onDelete: NoAction, onUpdate: NoAction)
+  tbl_membership_response tbl_membership_response[]
+}
+
+model tbl_membership_response {
+  response_id                Int                        @id @default(autoincrement())
+  application_id             Int
+  question_id                Int
+  response_value             String
+  tbl_membership_application tbl_membership_application @relation(fields: [application_id], references: [application_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_membership_question    tbl_membership_question    @relation(fields: [question_id], references: [question_id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model tbl_notification {
+  notification_id            Int                          @id @default(autoincrement())
+  sender_id                  String?                      @db.VarChar(200)
+  sender_name                String?                      @db.VarChar(255)
+  type                       String                       @default("general") @db.VarChar(50)
+  entity_type                notification_entity_type
+  entity_id                  Int?
+  title                      String                       @db.VarChar(255)
+  message                    String
+  redirect_url               String?                      @db.VarChar(500)
+  created_at                 DateTime?                    @default(now()) @db.Timestamp(6)
+
+  tbl_user_notification_sender tbl_user?                    @relation("tbl_notification_sender_idTotbl_user", fields: [sender_id], references: [user_id], onDelete: SetNull, onUpdate: NoAction)
+  tbl_notification_recipient   tbl_notification_recipient[]
+
+  @@index([created_at(sort: Desc)])
+}
+
+model tbl_notification_recipient {
+  notification_recipient_id Int              @id @default(autoincrement())
+  notification_id           Int
+  recipient_id              String           @db.VarChar(200)
+  is_read                   Boolean          @default(false)
+  read_at                   DateTime?        @db.Timestamp(6)
+  created_at                DateTime?        @default(now()) @db.Timestamp(6)
+
+  tbl_notification tbl_notification @relation(fields: [notification_id], references: [notification_id], onDelete: Cascade, onUpdate: NoAction)
+  tbl_user         tbl_user         @relation(fields: [recipient_id], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([recipient_id, is_read])
+  @@index([recipient_id])
+}
+
+model tbl_organization {
+  organization_id                                                                            Int                                                @id @default(autoincrement())
+  adviser_id                                                                                 String                                             @db.VarChar(200)
+  current_org_version_id                                                                     Int
+  name                                                                                       String                                             @unique @db.VarChar(100)
+  slug                                                                                       String?                                            @unique @db.VarChar(150)
+  status                                                                                     status_pending_approved_rejected_renewal_archived? @default(Pending)
+  term_option                                                                                Boolean?
+  term_exclusion_policy                                                                      term_exclusion_policy?                             @default(CURRENT_TERM)
+  payment_calculation_rules                                                                  Json?
+  created_at                                                                                 DateTime?                                          @default(now()) @db.Timestamp(6)
+  archived_at                                                                                DateTime?                                          @db.Timestamp(6)
+  archived_by                                                                                String?                                            @db.VarChar(200)
+  archived_reason                                                                            String?                                            @db.VarChar(255)
+  tbl_event                                                                                  tbl_event[]
+  tbl_event_collaborator                                                                     tbl_event_collaborator[]
+  tbl_organization_version_tbl_organization_current_org_version_idTotbl_organization_version tbl_organization_version                           @relation("tbl_organization_current_org_version_idTotbl_organization_version", fields: [current_org_version_id], references: [org_version_id], onDelete: NoAction, map: "fk_org_current_version")
+  tbl_user_tbl_organization_adviser_idTotbl_user                                             tbl_user                                           @relation("tbl_organization_adviser_idTotbl_user", fields: [adviser_id], references: [user_id], onDelete: NoAction)
+  tbl_user_tbl_organization_archived_byTotbl_user                                            tbl_user?                                          @relation("tbl_organization_archived_byTotbl_user", fields: [archived_by], references: [user_id], onDelete: NoAction)
+  tbl_organization_course                                                                    tbl_organization_course[]
+  tbl_organization_version_tbl_organization_version_organization_idTotbl_organization        tbl_organization_version[]                         @relation("tbl_organization_version_organization_idTotbl_organization")
+  tbl_project_heads                                                                          tbl_project_heads[]
+  tbl_renewal_cycle                                                                          tbl_renewal_cycle[]
+  tbl_term_payments                                                                          tbl_term_payments[]
+  tbl_logs                                                                                   tbl_logs[]
+}
+
+model tbl_organization_course {
+  organization_id  Int
+  program_id       Int
+  tbl_organization tbl_organization @relation(fields: [organization_id], references: [organization_id], onDelete: Cascade, onUpdate: NoAction)
+  tbl_program      tbl_program      @relation(fields: [program_id], references: [program_id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([organization_id, program_id])
+}
+
+model tbl_organization_members {
+  member_id                       Int                               @id @default(autoincrement())
+  organization_id                 Int
+  cycle_number                    Int
+  user_id                         String                            @db.VarChar(200)
+  org_version_id                  Int?
+  member_type                     member_type?                      @default(Member)
+  status                          status_active_pending_archive?    @default(Active)
+  executive_role_id               Int?
+  joined_at                       DateTime?                         @default(now()) @db.Timestamp(6)
+  payment_start_term_id           Int?
+  excluded_terms                  Json?
+  tbl_executive_member_permission tbl_executive_member_permission[]
+  tbl_member_permission_override  tbl_member_permission_override[]
+  tbl_executive_role              tbl_executive_role?               @relation(fields: [executive_role_id], references: [executive_role_id], onUpdate: NoAction)
+  tbl_organization_version        tbl_organization_version?         @relation(fields: [org_version_id], references: [org_version_id], onUpdate: NoAction)
+  tbl_renewal_cycle               tbl_renewal_cycle                 @relation(fields: [organization_id, cycle_number], references: [organization_id, cycle_number], onDelete: Cascade, onUpdate: NoAction)
+  tbl_academic_term               tbl_academic_term?                @relation(fields: [payment_start_term_id], references: [term_id], onUpdate: NoAction)
+  tbl_user                        tbl_user                          @relation(fields: [user_id], references: [user_id], onDelete: NoAction)
+}
+
+model tbl_organization_requirement_submission {
+  submission_id               Int                               @id @default(autoincrement())
+  application_id              Int?
+  requirement_id              Int
+  cycle_number                Int?
+  organization_id             Int?
+  org_version_id              Int?
+  file_path                   String                            @db.VarChar(255)
+  submitted_by                String                            @db.VarChar(200)
+  submitted_at                DateTime?                         @default(now()) @db.Timestamp(6)
+  status                      status_pending_approved_rejected? @default(Pending)
+  submitted_requirement_title String?                           @db.VarChar(255)
+  submitted_requirement_hash  String?                           @db.VarChar(64)
+  tbl_organization_version    tbl_organization_version?         @relation(fields: [org_version_id], references: [org_version_id], onUpdate: NoAction, map: "fk_org_req_sub_version")
+  tbl_renewal_cycle           tbl_renewal_cycle?                @relation(fields: [organization_id, cycle_number], references: [organization_id, cycle_number], onDelete: Cascade, onUpdate: NoAction, map: "tbl_organization_requirement__organization_id_cycle_number_fkey")
+  tbl_application             tbl_application?                  @relation(fields: [application_id], references: [application_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_application_requirement tbl_application_requirement       @relation(fields: [requirement_id], references: [requirement_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_user                    tbl_user                          @relation(fields: [submitted_by], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model tbl_organization_version {
+  org_version_id                                                                     Int                                       @id @default(autoincrement())
+  organization_id                                                                    Int?
+  name                                                                               String                                    @db.VarChar(255)
+  status                                                                             org_version_status?                       @default(Pending)
+  logo_path                                                                          String?                                   @db.VarChar(500)
+  description                                                                        String?
+  base_program_id                                                                    Int?
+  membership_fee_type                                                                membership_fee_type?                      @default(Free)
+  category                                                                           org_category?                             @default(Co_Curricular_Organization)
+  membership_fee_amount                                                              Decimal?                                  @db.Decimal(10, 2)
+  is_recruiting                                                                      Boolean?                                  @default(true)
+  is_open_to_all_courses                                                             Boolean?                                  @default(false)
+  created_by                                                                         String                                    @db.VarChar(200)
+  created_at                                                                         DateTime?                                 @default(now()) @db.Timestamp(6)
+  valid_from                                                                         DateTime?                                 @db.Date
+  valid_to                                                                           DateTime?                                 @db.Date
+  archived_at                                                                        DateTime?                                 @db.Timestamp(6)
+  archived_by                                                                        String?                                   @db.VarChar(200)
+  archived_reason                                                                    String?                                   @db.VarChar(255)
+  tbl_application                                                                    tbl_application[]
+  tbl_application_executives                                                         tbl_application_executives[]
+  tbl_organization_tbl_organization_current_org_version_idTotbl_organization_version tbl_organization[]                        @relation("tbl_organization_current_org_version_idTotbl_organization_version")
+  tbl_organization_members                                                           tbl_organization_members[]
+  tbl_organization_requirement_submission                                            tbl_organization_requirement_submission[]
+  tbl_organization_tbl_organization_version_organization_idTotbl_organization        tbl_organization?                         @relation("tbl_organization_version_organization_idTotbl_organization", fields: [organization_id], references: [organization_id], onUpdate: NoAction, map: "fk_org_version_org")
+  tbl_user_tbl_organization_version_archived_byTotbl_user                            tbl_user?                                 @relation("tbl_organization_version_archived_byTotbl_user", fields: [archived_by], references: [user_id], onDelete: NoAction)
+  tbl_user_tbl_organization_version_created_byTotbl_user                             tbl_user                                  @relation("tbl_organization_version_created_byTotbl_user", fields: [created_by], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_organization_version_course                                                    tbl_organization_version_course[]
+  tbl_renewal_cycle                                                                  tbl_renewal_cycle[]
+  tbl_term_payments                                                                  tbl_term_payments[]
+  tbl_transaction                                                                    tbl_transaction[]
+}
+
+model tbl_organization_version_course {
+  org_version_course_id    Int                      @id @default(autoincrement())
+  org_version_id           Int
+  program_id               Int
+  created_at               DateTime?                @default(now()) @db.Timestamp(6)
+  tbl_organization_version tbl_organization_version @relation(fields: [org_version_id], references: [org_version_id], onDelete: Cascade, onUpdate: NoAction)
+  tbl_program              tbl_program              @relation(fields: [program_id], references: [program_id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([org_version_id, program_id])
+}
+
+model tbl_payment_type {
+  payment_type_id Int               @id @default(autoincrement())
+  code            String            @unique @db.VarChar(50)
+  label           String            @db.VarChar(100)
+  method_group    String            @db.VarChar(50)
+  tbl_transaction tbl_transaction[]
+}
+
+model tbl_application_period {
+  period_id            Int                    @id @default(autoincrement())
+  start_date           DateTime               @db.Date
+  end_date             DateTime               @db.Date
+  start_time           DateTime               @db.Time(6)
+  end_time             DateTime               @db.Time(6)
+  is_active            Boolean?               @default(true)
+  created_by           String                 @db.VarChar(200)
+  created_at           DateTime?              @default(now()) @db.Timestamp(6)
+  updated_at           DateTime?              @default(now()) @db.Timestamp(6)
+  tbl_application                  tbl_application[]
+  tbl_approval_process             tbl_approval_process[]
+  tbl_application_period_requirement tbl_application_period_requirement[]
+  tbl_application_approval_chain   tbl_application_approval_chain[]
+  tbl_user                         tbl_user               @relation(fields: [created_by], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model tbl_application_period_requirement {
+  period_id      Int
+  requirement_id Int
+  assigned_at    DateTime? @default(now()) @db.Timestamp(6)
+  tbl_application_period      tbl_application_period      @relation(fields: [period_id], references: [period_id], onDelete: Cascade)
+  tbl_application_requirement tbl_application_requirement @relation(fields: [requirement_id], references: [requirement_id], onDelete: Restrict)
+
+  @@id([period_id, requirement_id])
+}
+
+model tbl_permission {
+  permission_id                   Int                               @id @default(autoincrement())
+  permission_name                 String                            @unique @db.VarChar(200)
+  scope                           permission_scope?                 @default(Global)
+  created_at                      DateTime?                         @default(now()) @db.Timestamp(6)
+  tbl_committee_role_permission   tbl_committee_role_permission[]
+  tbl_executive_member_permission tbl_executive_member_permission[]
+  tbl_member_permission_override  tbl_member_permission_override[]
+  tbl_rank_permission             tbl_rank_permission[]
+  tbl_role_permission             tbl_role_permission[]
+}
+
+model tbl_program {
+  program_id                                 Int                               @id @default(autoincrement())
+  college_id                                 Int
+  name                                       String?                           @unique @db.VarChar(200)
+  abbreviation                               String?                           @unique @db.VarChar(20)
+  status                                     status_active_archived            @default(Active)
+  created_at                                 DateTime?                         @default(now()) @db.Timestamp(6)
+  archived_at                                DateTime?                         @db.Timestamp(6)
+  archived_by                                String?                           @db.VarChar(200)
+  archived_reason                            String?                           @db.VarChar(255)
+  tbl_application                            tbl_application[]
+  tbl_event_course                           tbl_event_course[]
+  tbl_organization_course                    tbl_organization_course[]
+  tbl_organization_version_course            tbl_organization_version_course[]
+  tbl_user_tbl_program_archived_byTotbl_user tbl_user?                         @relation("tbl_program_archived_byTotbl_user", fields: [archived_by], references: [user_id], onDelete: NoAction, map: "fk_program_archived_by")
+  tbl_college                                tbl_college                       @relation(fields: [college_id], references: [college_id], onDelete: Cascade, onUpdate: NoAction, map: "fk_program_college")
+  tbl_section                                tbl_section[]
+  tbl_user_tbl_user_program_idTotbl_program  tbl_user[]                        @relation("tbl_user_program_idTotbl_program")
+  tbl_user_application                       tbl_user_application[]
+}
+
+model tbl_project_heads {
+  project_head_id  Int                      @id @default(autoincrement())
+  organization_id  Int
+  user_id          String                   @db.VarChar(200)
+  event_id         Int
+  role_type        role_type_exec_committee
+  project_name     String                   @db.VarChar(255)
+  created_at       DateTime?                @default(now()) @db.Timestamp(6)
+  tbl_event        tbl_event                @relation(fields: [event_id], references: [event_id], onDelete: Cascade, onUpdate: NoAction)
+  tbl_organization tbl_organization         @relation(fields: [organization_id], references: [organization_id], onDelete: Cascade, onUpdate: NoAction)
+  tbl_user         tbl_user                 @relation(fields: [user_id], references: [user_id], onDelete: NoAction)
+}
+
+model tbl_rank_permission {
+  rank_id            Int
+  permission_id      Int
+  tbl_permission     tbl_permission     @relation(fields: [permission_id], references: [permission_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_executive_rank tbl_executive_rank @relation(fields: [rank_id], references: [rank_id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@id([rank_id, permission_id])
+}
+
+model tbl_receipt_sequence {
+  series_key    String    @id @db.VarChar(100)
+  prefix        String    @db.VarChar(50)
+  pad_length    Int       @default(6) @db.SmallInt
+  current_value Int       @default(0)
+  updated_at    DateTime? @default(now()) @db.Timestamp(6)
+}
+
+model tbl_renewal_cycle {
+  organization_id                         Int
+  cycle_number                            Int
+  start_date                              DateTime                                  @default(dbgenerated("CURRENT_DATE")) @db.Date
+  president_id                            String                                    @db.VarChar(200)
+  org_version_id                          Int?
+  created_at                              DateTime                                  @default(now()) @db.Timestamp(6)
+  tbl_application                         tbl_application[]
+  tbl_archived_committees                 tbl_archived_committees[]
+  tbl_archived_organization_members       tbl_archived_organization_members[]
+  tbl_committee                           tbl_committee[]
+  tbl_event_application                   tbl_event_application[]
+  tbl_event_requirement_submissions       tbl_event_requirement_submissions[]
+  tbl_executive_role                      tbl_executive_role[]
+  tbl_membership_application              tbl_membership_application[]
+  tbl_membership_leave_application        tbl_membership_leave_application[]
+  tbl_membership_question                 tbl_membership_question[]
+  tbl_organization_members                tbl_organization_members[]
+  tbl_organization_requirement_submission tbl_organization_requirement_submission[]
+  tbl_organization_version                tbl_organization_version?                 @relation(fields: [org_version_id], references: [org_version_id], onUpdate: NoAction)
+  tbl_organization                        tbl_organization                          @relation(fields: [organization_id], references: [organization_id], onDelete: Cascade, onUpdate: NoAction)
+  tbl_user                                tbl_user                                  @relation(fields: [president_id], references: [user_id], onDelete: NoAction)
+  tbl_transaction_membership              tbl_transaction_membership[]
+
+  @@id([organization_id, cycle_number])
+}
+
+model tbl_role {
+  role_id                    Int                          @id @default(autoincrement())
+  role_name                  String                       @unique @db.VarChar(100)
+  is_approver                Boolean?                     @default(false)
+  hierarchy_order            Int?                         @unique
+  created_at                 DateTime?                    @default(now()) @db.Timestamp(6)
+  tbl_approval_process       tbl_approval_process[]
+  tbl_event_approval_process tbl_event_approval_process[]
+  tbl_application_approval_chain  tbl_application_approval_chain[]
+  tbl_role_permission        tbl_role_permission[]
+  tbl_user                   tbl_user[]
+  tbl_user_application       tbl_user_application[]
+}
+
+model tbl_role_permission {
+  role_permission_id Int            @id @default(autoincrement())
+  role_id            Int
+  permission_id      Int
+  created_at         DateTime?      @default(now()) @db.Timestamp(6)
+  tbl_permission     tbl_permission @relation(fields: [permission_id], references: [permission_id], onDelete: Cascade, onUpdate: NoAction)
+  tbl_role           tbl_role       @relation(fields: [role_id], references: [role_id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model tbl_sdao_approver {
+  user_id    String    @id @db.VarChar(200)
+  sdao_rank  Int       @unique
+  created_at DateTime? @default(now()) @db.Timestamp(6)
+  updated_at DateTime? @default(now()) @db.Timestamp(6)
+  tbl_user   tbl_user  @relation(fields: [user_id], references: [user_id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model tbl_section {
+  section_id   Int         @id @default(autoincrement())
+  section_name String      @db.VarChar(100)
+  program_id   Int
+  year_level   Int?
+  is_active    Boolean?    @default(true)
+  created_at   DateTime?   @default(now()) @db.Timestamp(6)
+  updated_at   DateTime?   @default(now()) @db.Timestamp(6)
+  tbl_program  tbl_program @relation(fields: [program_id], references: [program_id], map: "fk_section_program")
+  tbl_user     tbl_user[]
+
+  @@unique([program_id, section_name], map: "uk_section_program_name")
+  @@index([is_active], map: "idx_section_active")
+  @@index([program_id], map: "idx_section_program")
+  @@index([year_level], map: "idx_section_year")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+model tbl_transaction {
+  transaction_id                                 Int                            @id @default(autoincrement())
+  user_id                                        String?                        @db.VarChar(200)
+  payer_name                                     String?                        @db.VarChar(255)
+  payee_name                                     String?                        @db.VarChar(255)
+  payment_description                            String                         @db.VarChar(255)
+  amount                                         Decimal                        @db.Decimal(10, 2)
+  transaction_type_id                            Int
+  payment_type_id                                Int
+  category_id                                    Int?
+  org_version_id                                 Int?
+  status                                         transaction_status?            @default(Pending)
+  transaction_date                               DateTime                       @db.Timestamp(6)
+  receipt_no                                     String?                        @unique(map: "uq_transaction_receipt_no") @db.VarChar(100)
+  proof_image                                    String?                        @db.VarChar(500)
+  remarks                                        String?
+  qr_token                                       String?                        @db.VarChar(500)
+  qr_enabled                                     Boolean?                       @default(true)
+  created_at                                     DateTime?                      @default(now()) @db.Timestamp(6)
+  updated_at                                     DateTime?                      @default(now()) @db.Timestamp(6)
+  archived_at                                    DateTime?                      @db.Timestamp(6)
+  archived_by                                    String?                        @db.VarChar(200)
+  archived_reason                                String?                        @db.VarChar(255)
+  tbl_event_attendance                           tbl_event_attendance[]
+  tbl_term_payments                              tbl_term_payments[]
+  tbl_transaction_type_category                  tbl_transaction_type_category? @relation(fields: [transaction_type_id, category_id], references: [transaction_type_id, category_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_txn_type_category")
+  tbl_user_tbl_transaction_archived_byTotbl_user tbl_user?                      @relation("tbl_transaction_archived_byTotbl_user", fields: [archived_by], references: [user_id])
+  tbl_financial_category                         tbl_financial_category?        @relation(fields: [category_id], references: [category_id], onUpdate: NoAction)
+  tbl_organization_version                       tbl_organization_version?      @relation(fields: [org_version_id], references: [org_version_id], onUpdate: NoAction)
+  tbl_payment_type                               tbl_payment_type               @relation(fields: [payment_type_id], references: [payment_type_id])
+  tbl_transaction_type                           tbl_transaction_type           @relation(fields: [transaction_type_id], references: [transaction_type_id])
+  tbl_user_tbl_transaction_user_idTotbl_user     tbl_user?                      @relation("tbl_transaction_user_idTotbl_user", fields: [user_id], references: [user_id], onDelete: NoAction)
+  tbl_transaction_audit_trail                    tbl_transaction_audit_trail[]
+  tbl_transaction_event                          tbl_transaction_event?
+  tbl_transaction_membership                     tbl_transaction_membership?
+  tbl_transaction_verification                   tbl_transaction_verification[]
+
+  @@index([qr_token], map: "idx_qr_token")
+  @@index([org_version_id], map: "idx_txn_org_version")
+  @@index([org_version_id, transaction_date], map: "idx_txn_org_version_date")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+model tbl_transaction_audit_trail {
+  audit_id            BigInt              @id @default(autoincrement())
+  transaction_id      Int
+  action_type         audit_action_type
+  changed_by          String?             @db.VarChar(200)
+  changed_at          DateTime?           @default(now()) @db.Timestamp(6)
+  old_status          transaction_status?
+  new_status          transaction_status?
+  old_amount          Decimal?            @db.Decimal(10, 2)
+  new_amount          Decimal?            @db.Decimal(10, 2)
+  old_payment_type_id Int?
+  new_payment_type_id Int?
+  old_category_id     Int?
+  new_category_id     Int?
+  old_proof_image     String?             @db.VarChar(500)
+  new_proof_image     String?             @db.VarChar(500)
+  changes_json        Json?
+  reason              String?             @db.VarChar(500)
+  ip_address          String?             @db.VarChar(45)
+  user_agent          String?             @db.VarChar(255)
+  tbl_user            tbl_user?           @relation(fields: [changed_by], references: [user_id], onDelete: NoAction)
+  tbl_transaction     tbl_transaction     @relation(fields: [transaction_id], references: [transaction_id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([action_type], map: "idx_action_type")
+  @@index([changed_by], map: "idx_changed_by")
+  @@index([transaction_id, changed_at], map: "idx_transaction_audit")
+}
+
+model tbl_transaction_event {
+  transaction_id      Int             @id
+  event_id            Int
+  remarks             String?         @db.VarChar(255)
+  payer_name_override String?         @db.VarChar(255)
+  tbl_event           tbl_event       @relation(fields: [event_id], references: [event_id], onUpdate: NoAction)
+  tbl_transaction     tbl_transaction @relation(fields: [transaction_id], references: [transaction_id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model tbl_transaction_membership {
+  transaction_id    Int               @id
+  organization_id   Int
+  cycle_number      Int
+  tbl_renewal_cycle tbl_renewal_cycle @relation(fields: [organization_id, cycle_number], references: [organization_id, cycle_number], onUpdate: NoAction)
+  tbl_transaction   tbl_transaction   @relation(fields: [transaction_id], references: [transaction_id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model tbl_transaction_type {
+  transaction_type_id           Int                             @id @default(autoincrement())
+  code                          String                          @unique @db.VarChar(50)
+  label                         String                          @db.VarChar(100)
+  tbl_transaction               tbl_transaction[]
+  tbl_transaction_type_category tbl_transaction_type_category[]
+}
+
+model tbl_transaction_type_category {
+  transaction_type_id    Int
+  category_id            Int
+  tbl_transaction        tbl_transaction[]
+  tbl_financial_category tbl_financial_category @relation(fields: [category_id], references: [category_id], onDelete: Cascade, onUpdate: NoAction)
+  tbl_transaction_type   tbl_transaction_type   @relation(fields: [transaction_type_id], references: [transaction_type_id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([transaction_type_id, category_id])
+}
+
+model tbl_transaction_verification {
+  verification_id                                              Int             @id @default(autoincrement())
+  transaction_id                                               Int
+  jwt_token_id                                                 String          @unique @db.VarChar(255)
+  token_hash                                                   String          @db.VarChar(255)
+  generated_by                                                 String          @db.VarChar(200)
+  generated_at                                                 DateTime?       @default(now()) @db.Timestamp(6)
+  expires_at                                                   DateTime        @db.Timestamp(6)
+  verification_count                                           Int?            @default(0)
+  last_verified_at                                             DateTime?       @db.Timestamp(6)
+  last_verified_ip                                             String?         @db.VarChar(45)
+  last_verified_user_agent                                     String?
+  is_revoked                                                   Boolean?        @default(false)
+  revoked_at                                                   DateTime?       @db.Timestamp(6)
+  revoked_by                                                   String?         @db.VarChar(200)
+  revoke_reason                                                String?         @db.VarChar(255)
+  tbl_user_tbl_transaction_verification_generated_byTotbl_user tbl_user        @relation("tbl_transaction_verification_generated_byTotbl_user", fields: [generated_by], references: [user_id], onDelete: NoAction)
+  tbl_user_tbl_transaction_verification_revoked_byTotbl_user   tbl_user?       @relation("tbl_transaction_verification_revoked_byTotbl_user", fields: [revoked_by], references: [user_id], onDelete: NoAction)
+  tbl_transaction                                              tbl_transaction @relation(fields: [transaction_id], references: [transaction_id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([expires_at], map: "idx_expires_at")
+  @@index([generated_by], map: "idx_generated_by")
+  @@index([jwt_token_id], map: "idx_jwt_id")
+  @@index([token_hash], map: "idx_token_hash")
+  @@index([transaction_id], map: "idx_transaction_id")
+  @@index([verification_count], map: "idx_verification_count")
+}
+
+// ---------------------------------------------------------------------------
+// Venue management — physical event locations
+// ---------------------------------------------------------------------------
+
+model tbl_venue {
+  venue_id         Int                @id @default(autoincrement())
+  name             String             @unique @db.VarChar(200)
+  description      String?
+  capacity         Int?
+  status           status_active_archived @default(Active)
+  created_by       String?            @db.VarChar(200)
+  created_at       DateTime?          @default(now()) @db.Timestamp(6)
+  archived_at      DateTime?          @db.Timestamp(6)
+  archived_by      String?            @db.VarChar(200)
+  archived_reason  String?            @db.VarChar(255)
+  tbl_event_schedule_venue tbl_event_schedule_venue[]
+  tbl_event_venue          tbl_event_venue[]
+  tbl_user_created         tbl_user?                  @relation("tbl_venue_created_byTotbl_user", fields: [created_by], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_user_archived        tbl_user?                  @relation("tbl_venue_archived_byTotbl_user", fields: [archived_by], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model tbl_event_venue {
+  event_id   Int
+  venue_id   Int
+  tbl_event  tbl_event  @relation(fields: [event_id], references: [event_id], onDelete: Cascade, onUpdate: NoAction)
+  tbl_venue  tbl_venue  @relation(fields: [venue_id], references: [venue_id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([event_id, venue_id])
+}
+
+/// One day-block within a multi-day event. Each block owns its own time window and venues.
+model tbl_event_schedule {
+  schedule_id              Int                        @id @default(autoincrement())
+  event_id                 Int
+  date                     DateTime                   @db.Date
+  start_time               DateTime                   @db.Time(6)
+  end_time                 DateTime                   @db.Time(6)
+  note                     String?                    @db.VarChar(255)
+  created_at               DateTime?                  @default(now()) @db.Timestamp(6)
+  tbl_event                tbl_event                  @relation(fields: [event_id], references: [event_id], onDelete: Cascade, onUpdate: NoAction)
+  tbl_event_schedule_venue tbl_event_schedule_venue[]
+
+  @@index([event_id, date])
+}
+
+/// Junction: which venue(s) are used during a specific schedule slot.
+model tbl_event_schedule_venue {
+  schedule_id        Int
+  venue_id           Int
+  tbl_event_schedule tbl_event_schedule @relation(fields: [schedule_id], references: [schedule_id], onDelete: Cascade, onUpdate: NoAction)
+  tbl_venue          tbl_venue          @relation(fields: [venue_id], references: [venue_id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([schedule_id, venue_id])
+}
+
+model tbl_user {
+  user_id                                                                                    String                                    @id @default(dbgenerated("gen_random_uuid()::text")) @db.VarChar(200)
+  f_name                                                                                     String?                                   @db.VarChar(50)
+  l_name                                                                                     String?                                   @db.VarChar(50)
+  email                                                                                      String                                    @unique @db.VarChar(100)
+  program_id                                                                                 Int?
+  section_id                                                                                 Int?
+  role_id                                                                                    Int
+  profile_picture                                                                            String?                                   @db.VarChar(255)
+  status                                                                                     status_active_pending_archive?            @default(Active)
+  created_at                                                                                 DateTime?                                 @default(now()) @db.Timestamp(6)
+  updated_at                                                                                 DateTime?                                 @default(now()) @db.Timestamp(6)
+  archived_at                                                                                DateTime?                                 @db.Timestamp(6)
+  archived_by                                                                                String?                                   @db.VarChar(200)
+  archived_reason                                                                            String?                                   @db.VarChar(255)
+  tbl_academic_term                                                                          tbl_academic_term[]
+  tbl_ai_conversation                                                                        tbl_ai_conversation[]
+  tbl_ai_message                                                                             tbl_ai_message[]
+  tbl_application_tbl_application_applicant_user_idTotbl_user                                tbl_application[]                         @relation("tbl_application_applicant_user_idTotbl_user")
+  tbl_application_tbl_application_student_idTotbl_user                                       tbl_application[]                         @relation("tbl_application_student_idTotbl_user")
+  tbl_application_requirement                                                                tbl_application_requirement[]
+  tbl_approval_process                                                                       tbl_approval_process[]
+  tbl_archived_committees                                                                    tbl_archived_committees[]
+  tbl_archived_organization_members                                                          tbl_archived_organization_members[]
+  tbl_blocked_period_tbl_blocked_period_archived_byTotbl_user                                tbl_blocked_period[]                      @relation("tbl_blocked_period_archived_byTotbl_user")
+  tbl_blocked_period_tbl_blocked_period_created_byTotbl_user                                 tbl_blocked_period[]                      @relation("tbl_blocked_period_created_byTotbl_user")
+  tbl_blocked_period_tbl_blocked_period_unarchived_byTotbl_user                              tbl_blocked_period[]                      @relation("tbl_blocked_period_unarchived_byTotbl_user")
+  tbl_certificate_template                                                                   tbl_certificate_template[]
+  tbl_college                                                                                tbl_college[]
+  tbl_committee_members                                                                      tbl_committee_members[]
+  tbl_evaluation                                                                             tbl_evaluation[]
+  tbl_event                                                                                  tbl_event[]
+  tbl_event_application                                                                      tbl_event_application[]
+  tbl_event_application_requirement                                                          tbl_event_application_requirement[]
+  tbl_event_approval_process                                                                 tbl_event_approval_process[]
+  tbl_event_attendance                                                                       tbl_event_attendance[]
+  tbl_event_certificate                                                                      tbl_event_certificate[]
+  tbl_event_reminder_log                                                                     tbl_event_reminder_log[]
+  tbl_event_requirement_submissions_tbl_event_requirement_submissions_submitted_byTotbl_user tbl_event_requirement_submissions[]       @relation("tbl_event_requirement_submissions_submitted_byTotbl_user")
+  tbl_event_requirement_submissions_tbl_event_requirement_submissions_viewed_byTotbl_user    tbl_event_requirement_submissions[]       @relation("tbl_event_requirement_submissions_viewed_byTotbl_user")
+  tbl_venue_created                                                                          tbl_venue[]                               @relation("tbl_venue_created_byTotbl_user")
+  tbl_venue_archived                                                                         tbl_venue[]                               @relation("tbl_venue_archived_byTotbl_user")
+  tbl_logs                                                                                   tbl_logs[]
+  tbl_membership_application_tbl_membership_application_reviewed_byTotbl_user                tbl_membership_application[]              @relation("tbl_membership_application_reviewed_byTotbl_user")
+  tbl_membership_application_tbl_membership_application_user_idTotbl_user                    tbl_membership_application[]              @relation("tbl_membership_application_user_idTotbl_user")
+  tbl_membership_leave_application_tbl_membership_leave_application_reviewed_byTotbl_user    tbl_membership_leave_application[]        @relation("tbl_membership_leave_application_reviewed_byTotbl_user")
+  tbl_membership_leave_application_tbl_membership_leave_application_user_idTotbl_user        tbl_membership_leave_application[]        @relation("tbl_membership_leave_application_user_idTotbl_user")
+  tbl_organization_tbl_organization_adviser_idTotbl_user                                     tbl_organization[]                        @relation("tbl_organization_adviser_idTotbl_user")
+  tbl_organization_tbl_organization_archived_byTotbl_user                                    tbl_organization[]                        @relation("tbl_organization_archived_byTotbl_user")
+  tbl_organization_members                                                                   tbl_organization_members[]
+  tbl_organization_requirement_submission                                                    tbl_organization_requirement_submission[]
+  tbl_organization_version_tbl_organization_version_archived_byTotbl_user                    tbl_organization_version[]                @relation("tbl_organization_version_archived_byTotbl_user")
+  tbl_organization_version_tbl_organization_version_created_byTotbl_user                     tbl_organization_version[]                @relation("tbl_organization_version_created_byTotbl_user")
+  tbl_application_period                                                                     tbl_application_period[]
+  tbl_program_tbl_program_archived_byTotbl_user                                              tbl_program[]                             @relation("tbl_program_archived_byTotbl_user")
+  tbl_project_heads                                                                          tbl_project_heads[]
+  tbl_renewal_cycle                                                                          tbl_renewal_cycle[]
+  tbl_sdao_approver                                                                          tbl_sdao_approver?
+  tbl_term_payments_tbl_term_payments_user_idTotbl_user                                      tbl_term_payments[]                       @relation("tbl_term_payments_user_idTotbl_user")
+  tbl_term_payments_tbl_term_payments_verified_byTotbl_user                                  tbl_term_payments[]                       @relation("tbl_term_payments_verified_byTotbl_user")
+  tbl_transaction_tbl_transaction_archived_byTotbl_user                                      tbl_transaction[]                         @relation("tbl_transaction_archived_byTotbl_user")
+  tbl_transaction_tbl_transaction_user_idTotbl_user                                          tbl_transaction[]                         @relation("tbl_transaction_user_idTotbl_user")
+  tbl_transaction_audit_trail                                                                tbl_transaction_audit_trail[]
+  tbl_transaction_verification_tbl_transaction_verification_generated_byTotbl_user           tbl_transaction_verification[]            @relation("tbl_transaction_verification_generated_byTotbl_user")
+  tbl_transaction_verification_tbl_transaction_verification_revoked_byTotbl_user             tbl_transaction_verification[]            @relation("tbl_transaction_verification_revoked_byTotbl_user")
+  tbl_application_approval_chain                                                             tbl_application_approval_chain[]
+  tbl_user_esignature                                                                        tbl_user_esignature?
+  tbl_college_dean                                                                           tbl_college_dean[]
+  tbl_notification_tbl_notification_sender_idTotbl_user                                      tbl_notification[]                        @relation("tbl_notification_sender_idTotbl_user")
+  tbl_notification_recipient                                                                 tbl_notification_recipient[]
+  tbl_user                                                                                   tbl_user?                                 @relation("tbl_userTotbl_user", fields: [archived_by], references: [user_id], onDelete: NoAction)
+  other_tbl_user                                                                             tbl_user[]                                @relation("tbl_userTotbl_user")
+  tbl_program_tbl_user_program_idTotbl_program                                               tbl_program?                              @relation("tbl_user_program_idTotbl_program", fields: [program_id], references: [program_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_role                                                                                   tbl_role                                  @relation(fields: [role_id], references: [role_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_section                                                                                tbl_section?                              @relation(fields: [section_id], references: [section_id])
+  tbl_user_application_tbl_user_application_archived_byTotbl_user                            tbl_user_application[]                    @relation("tbl_user_application_archived_byTotbl_user")
+  tbl_user_application_tbl_user_application_rejected_byTotbl_user                            tbl_user_application[]                    @relation("tbl_user_application_rejected_byTotbl_user")
+
+  @@index([section_id], map: "idx_user_section")
+}
+
+model tbl_user_application {
+  application_id                                      Int                               @id @default(autoincrement())
+  email                                               String                            @db.VarChar(100)
+  role_id                                             Int
+  program_id                                          Int?
+  reason                                              String
+  status                                              status_pending_approved_rejected? @default(Pending)
+  created_at                                          DateTime?                         @default(now()) @db.Timestamp(6)
+  rejected_reason                                     String?
+  rejected_at                                         DateTime?                         @db.Timestamp(6)
+  rejected_by                                         String?                           @db.VarChar(200)
+  college                                             String?                           @db.VarChar(255)
+  archived_at                                         DateTime?                         @db.Timestamp(6)
+  archived_by                                         String?                           @db.VarChar(200)
+  transferred_at                                      DateTime?                         @db.Timestamp(6)
+  tbl_user_tbl_user_application_archived_byTotbl_user tbl_user?                         @relation("tbl_user_application_archived_byTotbl_user", fields: [archived_by], references: [user_id], onDelete: NoAction)
+  tbl_program                                         tbl_program?                      @relation(fields: [program_id], references: [program_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_user_tbl_user_application_rejected_byTotbl_user tbl_user?                         @relation("tbl_user_application_rejected_byTotbl_user", fields: [rejected_by], references: [user_id], onDelete: NoAction)
+  tbl_role                                            tbl_role                          @relation(fields: [role_id], references: [role_id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model tbl_term_payments {
+  payment_id                                       Int                      @id @default(autoincrement())
+  user_id                                          String                   @db.VarChar(200)
+  organization_id                                  Int
+  organization_version_id                          Int
+  term_id                                          Int
+  transaction_id                                   Int
+  payment_status                                   String?                  @default("Pending")
+  verified_by                                      String?                  @db.VarChar(200)
+  verified_at                                      DateTime?                @db.Timestamp(6)
+  notes                                            String?
+  created_at                                       DateTime?                @default(now()) @db.Timestamp(6)
+  updated_at                                       DateTime?                @default(now()) @db.Timestamp(6)
+  tbl_organization                                 tbl_organization         @relation(fields: [organization_id], references: [organization_id], onDelete: Cascade, onUpdate: NoAction)
+  tbl_organization_version                         tbl_organization_version @relation(fields: [organization_version_id], references: [org_version_id], onDelete: Cascade, onUpdate: NoAction)
+  tbl_academic_term                                tbl_academic_term        @relation(fields: [term_id], references: [term_id], onDelete: Cascade, onUpdate: NoAction)
+  tbl_transaction                                  tbl_transaction          @relation(fields: [transaction_id], references: [transaction_id], onDelete: Cascade, onUpdate: NoAction)
+  tbl_user_tbl_term_payments_user_idTotbl_user     tbl_user                 @relation("tbl_term_payments_user_idTotbl_user", fields: [user_id], references: [user_id], onDelete: NoAction)
+  tbl_user_tbl_term_payments_verified_byTotbl_user tbl_user?                @relation("tbl_term_payments_verified_byTotbl_user", fields: [verified_by], references: [user_id], onDelete: NoAction)
+}
+
+enum ai_entity_type {
+  general
+  user
+  organization
+  event
+  application
+  approval
+  system
+}
+
+enum ai_message_scope {
+  current_view
+  multi_org
+  global
+}
+
+enum ai_role {
+  system
+  user
+  assistant
+  tool
+}
+
+enum application_type {
+  new
+  renewal
+}
+
+enum audit_action_type {
+  CREATE
+  UPDATE
+  ARCHIVE
+  UNARCHIVE
+  COMPLETE
+  CANCEL
+  DELETE
+}
+
+enum committee_role_enum {
+  Committee_Head    @map("Committee Head")
+  Committee_Officer @map("Committee Officer")
+}
+
+enum event_fee_type {
+  Paid
+  Free
+}
+
+enum event_open_to {
+  Members_only     @map("Members only")
+  Open_to_all      @map("Open to all")
+  NU_Students_only @map("NU Students only")
+}
+
+enum event_status {
+  Pending
+  Approved
+  Rejected
+  Archived
+}
+
+enum event_type {
+  Organization
+  SDAO
+  System
+}
+
+enum financial_kind {
+  INCOME
+  EXPENSE
+}
+
+enum is_applicable_to_new_renew {
+  new
+  renew
+  both
+}
+
+enum is_applicable_to_pre_post {
+  pre_event  @map("pre-event")
+  post_event @map("post-event")
+}
+
+enum member_type {
+  Member
+  Executive
+  Committee
+}
+
+enum membership_fee_type {
+  Per_Term            @map("Per Term")
+  Whole_Academic_Year @map("Whole Academic Year")
+  Free
+}
+
+enum notification_entity_type {
+  user
+  organization
+  event
+  transaction
+  system
+  approval
+  general
+  application
+  period
+  requirement
+}
+
+enum org_category {
+  Co_Curricular_Organization    @map("Co-Curricular Organization")
+  Extra_Curricular_Organization @map("Extra Curricular Organization")
+}
+
+enum org_version_status {
+  Pending
+  Approved
+  Rejected
+  Archived
+}
+
+enum permission_scope {
+  Global
+  SDAO
+  Organization
+  Approver
+}
+
+enum question_type_evaluation {
+  textbox
+  likert_4
+}
+
+enum question_type_membership {
+  text
+  multiple_choice
+  checkbox
+  file_upload
+}
+
+enum reminder_type {
+  week_before
+  day_before
+  day_of
+}
+
+enum requirement_status {
+  active
+  archived
+}
+
+enum role_name_committee {
+  Committee_Head    @map("Committee Head")
+  Committee_Officer @map("Committee Officer")
+}
+
+enum role_type_exec_committee {
+  Executive
+  Committee
+}
+
+enum status_active_archived {
+  Active
+  Archived
+}
+
+enum status_active_pending_archive {
+  Active
+  Pending
+  Archive
+}
+
+enum status_pending_approved_rejected {
+  Pending
+  Approved
+  Rejected
+}
+
+enum status_pending_approved_rejected_archived {
+  Pending
+  Approved
+  Rejected
+  Archived
+}
+
+enum status_pending_approved_rejected_renewal_archived {
+  Pending
+  Approved
+  Rejected
+  Renewal
+  Archived
+}
+
+enum status_pending_approved_rejected_revision {
+  Pending
+  Approved
+  Rejected
+  Revision
+}
+
+enum status_pending_completed_failed_cancelled {
+  Pending
+  Completed
+  Failed
+  Cancelled
+}
+
+enum status_pending_registered_evaluated_attended_rejected {
+  Pending
+  Registered
+  Evaluated
+  Attended
+  Rejected
+}
+
+enum submission_status {
+  Pending
+  Approved
+  Rejected
+  Viewed
+}
+
+enum term_exclusion_policy {
+  NONE
+  CURRENT_TERM
+  PRORATED
+}
+
+enum transaction_status {
+  Pending
+  Completed
+  Failed
+  Cancelled
+}
+
+enum venue_type {
+  Face_to_face @map("Face to face")
+  Online
+}
+
+enum payment_status_enum {
+  Pending
+  Paid
+  Rejected
+  Cancelled
+}
+
+enum approval_chain_status {
+  Pending
+  Endorsed
+  Received
+  Signed
+  Approved
+  Rejected
+}
+
+model tbl_application_approval_chain {
+  chain_id         Int                    @id @default(autoincrement())
+  application_id   Int
+  period_id        Int?
+  approver_user_id String                 @db.VarChar(200)
+  approver_role_id Int
+  approval_order   Int
+  is_final_approval Boolean              @default(false)
+  uses_endorsed    Boolean                @default(false)
+  status           approval_chain_status  @default(Pending)
+  signature_path   String?                @db.VarChar(255)
+  remarks          String?
+  endorsed_at      DateTime?              @db.Timestamp(6)
+  received_at      DateTime?              @db.Timestamp(6)
+  signed_at        DateTime?              @db.Timestamp(6)
+  approved_at      DateTime?              @db.Timestamp(6)
+  created_at       DateTime?              @default(now()) @db.Timestamp(6)
+
+  tbl_application       tbl_application       @relation(fields: [application_id], references: [application_id], onDelete: Cascade, onUpdate: NoAction)
+  tbl_application_period tbl_application_period? @relation(fields: [period_id], references: [period_id], onDelete: SetNull, onUpdate: NoAction)
+  tbl_user              tbl_user              @relation(fields: [approver_user_id], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_role              tbl_role              @relation(fields: [approver_role_id], references: [role_id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([application_id, approval_order])
+  @@index([approver_user_id, status])
+
+  @@map("tbl_organization_approval_chain")
+}
+
+model tbl_user_esignature {
+  user_id        String    @id @db.VarChar(200)
+  signature_path String    @db.VarChar(255)
+  created_at     DateTime? @default(now()) @db.Timestamp(6)
+  updated_at     DateTime? @default(now()) @db.Timestamp(6)
+
+  tbl_user tbl_user @relation(fields: [user_id], references: [user_id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model tbl_college_dean {
+  id            Int       @id @default(autoincrement())
+  college_id    Int
+  dean_user_id  String    @db.VarChar(200)
+  is_active     Boolean   @default(true)
+  created_at    DateTime? @default(now()) @db.Timestamp(6)
+  updated_at    DateTime? @default(now()) @db.Timestamp(6)
+
+  tbl_college tbl_college @relation(fields: [college_id], references: [college_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_user    tbl_user    @relation(fields: [dean_user_id], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([college_id, is_active])
+}

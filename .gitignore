@@ -1,0 +1,27 @@
+node_modules
+*.env
+.env
+
+# Facebook Scraper Authentication (SECURITY: Never commit these!)
+.auth/
+facebook-cookies.json
+facebook-session.json
+
+# Playwright cache
+.playwright/
+old_database
+to_frontend
+nucocnnect-files
+docs_from_mobile
+from_frontend
+docs
+dist
+.auth
+scripts
+context.md
+requirements
+
+
+# Crawlee storage
+storage/
+/lib/generated/prisma

@@ -1,0 +1,44 @@
+{
+  "watch": [
+    "server.ts",
+    "config/",
+    "middlewares/",
+    "mobile/",
+    "web/",
+    "services/",
+    "utils/",
+    "jobs/",
+    "types/"
+  ],
+  "ignore": [
+    "node_modules/",
+    "certificates/",
+    "requirements/",
+    "organizations/",
+    "applications/",
+    "events/",
+    "fonts/",
+    "public/",
+    "logs/",
+    "*.log",
+    "tmp/",
+    "temp/",
+    ".git/",
+    ".storage/",
+    "crawlee_storage/",
+    "playwright_storage/",
+    "*.tmp",
+    "*.temp",
+    "*.swp",
+    "*~",
+    ".DS_Store",
+    "Thumbs.db"
+  ],
+  "ext": "ts,js,json",
+  "legacyWatch": false,
+  "verbose": false,
+  "execMap": {
+    "ts": "ts-node"
+  },
+  "delay": 2000
+}
