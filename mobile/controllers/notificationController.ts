@@ -1,15 +1,15 @@
-// @ts-nocheck
-const notificationModel = require('../models/notificationModel');
-const { broadcastToUser } = require('../../services/websocketService');
+import { Request, Response } from 'express';
+import * as notificationModel from '../models/notificationModel';
+import { broadcastToUser } from '../../services/websocketService';
 
-async function getNotifications(req, res) {
+export async function getNotifications(req: Request, res: Response): Promise<void> {
     try {
         const notifications = await notificationModel.getNotifications(req.user.email);
         res.status(200).json({
             notifications: Array.isArray(notifications) ? notifications : [],
             code: 'OK',
         });
-    } catch (error) {
+    } catch (error: any) {
         res.status(500).json({
             code: 'INTERNAL_SERVER_ERROR',
             message: error.message,
@@ -17,7 +17,7 @@ async function getNotifications(req, res) {
     }
 }
 
-async function markNotificationsAsRead(req, res) {
+export async function markNotificationsAsRead(req: Request, res: Response): Promise<void> {
     try {
         await notificationModel.markAllAsRead(req.user.email);
 
@@ -33,7 +33,7 @@ async function markNotificationsAsRead(req, res) {
             message: 'All notifications marked as read',
             count: unreadCount,
         });
-    } catch (error) {
+    } catch (error: any) {
         res.status(500).json({
             code: 'INTERNAL_SERVER_ERROR',
             message: error.message,
@@ -41,15 +41,16 @@ async function markNotificationsAsRead(req, res) {
     }
 }
 
-async function markSingleNotificationAsRead(req, res) {
+export async function markSingleNotificationAsRead(req: Request, res: Response): Promise<void> {
     try {
         const updated = await notificationModel.markSingleAsRead(req.user.email, req.params.id);
         if (!updated) {
-            return res.status(404).json({
+            res.status(404).json({
                 code: 'NOT_FOUND',
                 message: 'Notification not found',
                 notification_id: Number(req.params.id),
             });
+            return;
         }
 
         const unread = await notificationModel.getNewNotificationCount(req.user.email);
@@ -72,7 +73,7 @@ async function markSingleNotificationAsRead(req, res) {
             notification_recipient_id: updated.notification_recipient_id,
             already_read: Boolean(updated.already_read),
         });
-    } catch (error) {
+    } catch (error: any) {
         res.status(500).json({
             code: 'INTERNAL_SERVER_ERROR',
             message: error.message,
@@ -80,7 +81,7 @@ async function markSingleNotificationAsRead(req, res) {
     }
 }
 
-async function getNewNotifications(req, res) {
+export async function getNewNotifications(req: Request, res: Response): Promise<void> {
     try {
         const count = await notificationModel.getNewNotificationCount(req.user.email);
 
@@ -89,17 +90,10 @@ async function getNewNotifications(req, res) {
             count: unreadCount,
             code: 'OK',
         });
-    } catch (error) {
+    } catch (error: any) {
         res.status(500).json({
             code: 'INTERNAL_SERVER_ERROR',
             message: error.message,
         });
     }
 }
-
-module.exports = {
-    getNotifications,
-    markNotificationsAsRead,
-    markSingleNotificationAsRead,
-    getNewNotifications,
-};
