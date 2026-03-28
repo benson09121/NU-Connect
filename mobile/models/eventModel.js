@@ -618,7 +618,6 @@ async function getAllEventCertificates(user_id) {
             organization_version_id: row.tbl_event?.tbl_organization?.current_org_version_id ?? null,
         },
     })));
-    });
 }
 
 async function scanTicket(email, event_id,  user_id) {
