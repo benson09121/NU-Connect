@@ -349,12 +349,18 @@ async function getSpecificEvent(eventId, userId) {
     return mapSpecificEventForMobile(row, userId);
 }
 
-async function getTickets(user_id) {
+async function getTickets(user_id, event_id = null) {
+    const where = {
+        user_id,
+        deleted_at: null,
+    };
+
+    if (event_id != null) {
+        where.event_id = Number(event_id);
+    }
+
     const rows = await prisma.tbl_event_attendance.findMany({
-        where: {
-            user_id,
-            deleted_at: null,
-        },
+        where,
         orderBy: { created_at: 'desc' },
         select: {
             attendance_id: true,
@@ -595,9 +601,23 @@ async function getAllEventCertificates(user_id) {
                 select: {
                     title: true,
                     start_date: true,
+                    organization_id: true,
+                    image: true,
+                    tbl_organization: {
+                        select: {
+                            current_org_version_id: true,
+                        },
+                    },
                 },
             },
         },
+    }).then((rows) => rows.map((row) => ({
+        ...row,
+        tbl_event: {
+            ...row.tbl_event,
+            organization_version_id: row.tbl_event?.tbl_organization?.current_org_version_id ?? null,
+        },
+    })));
     });
 }
 

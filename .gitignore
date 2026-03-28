@@ -9,19 +9,19 @@ facebook-session.json
 
 # Playwright cache
 .playwright/
-old_database
-to_frontend
-nucocnnect-files
-docs_from_mobile
-from_frontend
-docs
-dist
-.auth
-scripts
-context.md
-requirements
-
 
 # Crawlee storage
 storage/
 /lib/generated/prisma
+docs
+docs_from_mobile
+from_frontend
+to_frontend
+.agents
+requirements
+old_database
+nuconnect-files
+dist
+approval-signatures
+.auth
+context.md

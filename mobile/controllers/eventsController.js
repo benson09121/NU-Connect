@@ -286,7 +286,17 @@ async function getSpecificEvent(req, res) {
 async function getTickets(req, res) {
     try {
         const user = await userModel.getUser(req.user.email);
-        const getTicket = await eventModel.getTickets(user.user_id);
+        const rawEventId = req.query.eventId || req.params.eventId;
+        const eventId = rawEventId != null ? Number(rawEventId) : null;
+
+        if (rawEventId != null && (!Number.isInteger(eventId) || eventId <= 0)) {
+            return res.status(400).json({
+                error: 'VALIDATION_ERROR',
+                message: 'eventId must be a positive integer',
+            });
+        }
+
+        const getTicket = await eventModel.getTickets(user.user_id, eventId);
         res.json(getTicket);
     } catch (error) {
         res.status(500).json({ message: error.message });
@@ -443,7 +453,20 @@ async function getAllEventCertificates(req, res) {
         if (!certificates || certificates.length === 0) {
             return res.status(404).json({ message: 'No certificates found for this event' });
         }
-        res.json(certificates);
+
+        const normalized = certificates.map((row) => ({
+            certificate_id: row.certificate_id,
+            certificate_type: 'event',
+            event_title: row.tbl_event?.title || '',
+            issued_at: row.issued_at || null,
+            certificate_path: row.certificate_path || null,
+            event_id: row.event_id,
+            organization_id: row.tbl_event?.organization_id ?? null,
+            organization_version_id: row.tbl_event?.organization_version_id ?? null,
+            image: row.tbl_event?.image || null,
+        }));
+
+        res.json(normalized);
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
