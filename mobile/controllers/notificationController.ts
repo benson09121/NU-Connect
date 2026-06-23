@@ -22,7 +22,7 @@ export async function markNotificationsAsRead(req: Request, res: Response): Prom
         await notificationModel.markAllAsRead(req.user.email);
 
         const unread = await notificationModel.getNewNotificationCount(req.user.email);
-        const unreadCount = Number(unread?.count ?? unread?.new_count ?? 0) || 0;
+        const unreadCount = Number(unread?.count ?? 0) || 0;
 
         // Push realtime updates to the mobile user room
         broadcastToUser(req.user.email, 'notification:unread-count', { count: unreadCount });
@@ -43,7 +43,7 @@ export async function markNotificationsAsRead(req: Request, res: Response): Prom
 
 export async function markSingleNotificationAsRead(req: Request, res: Response): Promise<void> {
     try {
-        const updated = await notificationModel.markSingleAsRead(req.user.email, req.params.id);
+        const updated = await notificationModel.markSingleAsRead(req.user.email, String(req.params.id));
         if (!updated) {
             res.status(404).json({
                 code: 'NOT_FOUND',
@@ -54,7 +54,7 @@ export async function markSingleNotificationAsRead(req: Request, res: Response):
         }
 
         const unread = await notificationModel.getNewNotificationCount(req.user.email);
-        const unreadCount = Number(unread?.count ?? unread?.new_count ?? 0) || 0;
+        const unreadCount = Number(unread?.count ?? 0) || 0;
 
         broadcastToUser(req.user.email, 'notification:unread-count', { count: unreadCount });
         broadcastToUser(req.user.email, 'notification:marked-read', {
@@ -85,7 +85,7 @@ export async function getNewNotifications(req: Request, res: Response): Promise<
     try {
         const count = await notificationModel.getNewNotificationCount(req.user.email);
 
-        const unreadCount = Number(count?.count ?? count?.new_count ?? 0) || 0;
+        const unreadCount = Number(count?.count ?? 0) || 0;
         res.status(200).json({
             count: unreadCount,
             code: 'OK',

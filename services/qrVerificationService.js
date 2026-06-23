@@ -1,1 +1,1 @@
-module.exports = require('./qrVerificationService.ts');
+module.exports = require('./qrVerificationService');

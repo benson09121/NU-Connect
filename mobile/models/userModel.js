@@ -1,6 +1,6 @@
 const { prisma } = require('../../config/db');
 const jwt = require('jsonwebtoken');
-const { getAllUserPermissions } = require('../../web/models/permissionModel.ts');
+const { getAllUserPermissions } = require('../../web/models/permissionModel');
 require('dotenv').config();
 
 function mapUserForMobile(user) {

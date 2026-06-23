@@ -1,7 +1,7 @@
 // @ts-nocheck
-const eventModel = require('../models/eventModel.ts');
+const eventModel = require('../models/eventModel');
 const webEventModel = require('../../web/models/eventModel');
-const userModel = require('../models/userModel.ts');
+const userModel = require('../models/userModel');
 const { redisClient, redisSubscriber } = require('../../config/redis');
 const path = require('path');
 const fs = require('fs');

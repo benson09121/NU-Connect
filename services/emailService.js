@@ -1,1 +1,1 @@
-module.exports = require('./emailService.ts');
+module.exports = require('./emailService');
