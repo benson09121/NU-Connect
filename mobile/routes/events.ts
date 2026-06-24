@@ -17,6 +17,8 @@ router.get('/events/getAllCertificates', validateAzureJWTMobile, eventsControlle
 router.get('/events/certificates', validateAzureJWTMobile, eventsController.getAllEventCertificates);
 // router.get('/events/:eventId', middleware.authMiddleware, eventsController.sseEventAttendees);
 router.get('/events/specific', validateAzureJWTMobile, eventsController.getSpecificEvent);
+router.get('/events/publication-image', eventsController.getEventPublicationImage);
+router.get('/events/qrpermission', validateAzureJWTMobile, eventsController.getQRPermission);
 router.get('/events/:id', validateAzureJWTMobile, eventsController.getSpecificEvent);
 router.get('/events/evaluation/:eventId', validateAzureJWTMobile, eventsController.getEvaluation);
 router.post('/events/evaluation/submit', validateAzureJWTMobile, requireMobileStudentWriteAccess, eventsController.submitEvaluation);
@@ -24,7 +26,4 @@ router.post('/events/scan', validateAzureJWTMobile, requireMobileStudentWriteAcc
 router.post('/events/register', validateAzureJWTMobile, requireMobileStudentWriteAccess, eventsController.registerEvent);
 router.post('/events/unregister', validateAzureJWTMobile, requireMobileStudentWriteAccess, eventsController.unregisterEvent);
 router.post('/events/generateCertificate', validateAzureJWTMobile, requireMobileStudentWriteAccess, eventsController.addGeneratedCertificate);
-router.get('/events/publication-image', eventsController.getEventPublicationImage);
-router.get('/events/qrpermission', validateAzureJWTMobile, eventsController.getQRPermission);
-module.exports = router;
 export default router;

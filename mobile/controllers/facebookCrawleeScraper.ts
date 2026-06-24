@@ -1,3 +1,4 @@
+// @ts-nocheck
 const { PlaywrightCrawler, Dataset } = require('crawlee');
 const cron = require('node-cron');
 const fs = require('fs').promises;

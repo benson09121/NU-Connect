@@ -51,7 +51,7 @@ async function getAccessToken(cca: msal.ConfidentialClientApplication): Promise<
   return response!.accessToken;
 }
 
-async function buildSessionPayload(email: string) {
+export async function buildSessionPayload(email: string) {
   const user = await prisma.tbl_user.findUnique({
     where: { email },
     include: {
@@ -59,6 +59,11 @@ async function buildSessionPayload(email: string) {
         select: {
           role_name: true,
           role_id: true,
+        },
+      },
+      tbl_program_tbl_user_program_idTotbl_program: {
+        select: {
+          name: true,
         },
       },
     },
@@ -89,6 +94,7 @@ async function buildSessionPayload(email: string) {
       role_id: user.role_id,
       role_name: user.tbl_role?.role_name || '',
       program_id: user.program_id,
+      program_name: user.tbl_program_tbl_user_program_idTotbl_program?.name || '',
       status: asString(user.status, 'Active'),
     },
     access: resolveMobileAccess(user.tbl_role?.role_name),

@@ -1,3 +1,4 @@
+// @ts-nocheck
 const Auth = {
   userId: null,
   firstname: null,

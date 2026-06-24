@@ -5,6 +5,7 @@ import type { UploadedFile } from 'express-fileupload';
 import * as model from '../models/transactionsModel';
 import { storage } from '../../config/storage';
 import { broadcastToUser } from '../../services/websocketService';
+import { notify, logActivity } from '../../services/notificationAndLogService';
 const qrVerificationService = require('../../services/qrVerificationService');
 
 function txBaseDir(): string {
@@ -592,6 +593,8 @@ export async function approveTransaction(req: Request, res: Response): Promise<v
         };
 
         const targetUserId = String((row as any)?.user_email || (row as any)?.user_id || '').trim();
+        const targetAppUserId = String((row as any)?.user_id || '').trim();
+
         if (targetUserId) {
           broadcastToUser(targetUserId, 'events:payment-status:changed', payload);
           broadcastToUser(targetUserId, 'events:registration:changed', {
@@ -600,6 +603,19 @@ export async function approveTransaction(req: Request, res: Response): Promise<v
             user_id: targetUserId,
             status: payload.studentStatus,
             transaction_id: transactionId,
+          });
+        }
+
+        if (targetAppUserId && targetAppUserId !== 'undefined' && targetAppUserId !== 'null') {
+          await notify({
+            recipientIds: [targetAppUserId],
+            title: isApproved ? 'Payment Approved' : 'Payment Disapproved',
+            message: isApproved 
+              ? `Your payment for the event has been approved. You are now registered and can view your ticket.`
+              : `Your payment for the event was disapproved. Please check with the organization.`,
+            type: 'event_payment',
+            entityType: 'event',
+            entityId: Number((row as any)?.event_id)
           });
         }
       } catch (emitErr: any) {

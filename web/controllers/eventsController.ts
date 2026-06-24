@@ -1243,6 +1243,13 @@ export async function createEventApplication(req: Request, res: Response): Promi
       cycle_number = cycle.cycle_number;
     }
 
+    // Ensure the organization is allowed to propose a new event
+    const addStatus = await model.getAddEventStatusById(organization_id);
+    if (!addStatus.can_add_event) {
+      res.status(403).json({ error: 'FORBIDDEN', message: 'You cannot propose new events because your organization has pending or unapproved post-event requirements.' });
+      return;
+    }
+
     // Required event fields
     const { title, description, venue_type, start_date } = eventBody;
     if (!title || !description || !venue_type || !start_date) {

@@ -1,3 +1,4 @@
+// @ts-nocheck
 const { prisma } = require('../../config/db');
 const jwt = require('jsonwebtoken');
 const { getAllUserPermissions } = require('../../web/models/permissionModel');

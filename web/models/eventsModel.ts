@@ -348,19 +348,21 @@ export async function getAddEventStatusById(orgId: number): Promise<AddEventStat
     },
   });
 
-  // Count DISTINCT post-event requirements that have been submitted for this event
-  const submittedGroups = await prisma.tbl_event_requirement_submissions.groupBy({
+  // Count distinct post-event requirements submitted AND APPROVED for this event
+  const approvedGroups = await prisma.tbl_event_requirement_submissions.groupBy({
     by: ['requirement_id'],
     where: {
       event_id: lastEvent.event_id,
+      status: 'Approved',
       tbl_event_application_requirement: {
         is_applicable_to: 'post_event',
         status: 'active',
       },
     },
   });
+  const approvedCount = approvedGroups.length;
 
-  const canAdd = lastEvent.status === 'Rejected' || postReqCount === submittedGroups.length;
+  const canAdd = lastEvent.status === 'Rejected' || postReqCount === approvedCount;
   return { id: lastEvent.event_id, cycle_number: lastEvent.cycle_number, can_add_event: canAdd };
 }
 
@@ -1611,12 +1613,12 @@ export interface CreateApplicationInput {
 
 /** Create an event application (student org event): creates tbl_event + tbl_event_application rows. */
 export async function createEventApplicationRecord(input: CreateApplicationInput) {
-  // Guard: reject duplicate submissions (Pending or Approved application already exists)
+  // Guard: reject duplicate submissions (Pending or Revision application already exists)
   const existing = await prisma.tbl_event_application.findFirst({
     where: {
       organization_id: input.organization_id,
       cycle_number: input.cycle_number,
-      status: { in: ['Pending', 'Approved'] },
+      status: { in: ['Pending', 'Revision'] },
     },
     select: { event_application_id: true, status: true },
   });

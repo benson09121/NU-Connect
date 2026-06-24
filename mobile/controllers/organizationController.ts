@@ -1,6 +1,8 @@
+// @ts-nocheck
 const fs = require('fs');
 const path = require('path');
 const { publishToChannel, publishOrgHub } = require('../../web/controllers/sseController');
+const { broadcastToPage } = require('../../services/websocketService');
 const organizationModel = require('../models/organizationModel'); 
 const userModel = require('../models/userModel');
 const webOrganizationsModel = require('../../web/models/organizationsModel'); // Import web model for getPendingOrganizationMembers
@@ -87,8 +89,8 @@ async function submitOrganizationApplication(req, res) {
         paymentData = bodyData.paymentData;
     }
 
-    if (!org_id || answers.length === 0) {
-        return res.status(400).json({ message: 'Missing required data' });
+    if (!org_id) {
+        return res.status(400).json({ message: 'Missing required data: organization_id' });
     }
 
     console.log('Organization ID:', org_id);
@@ -193,10 +195,11 @@ async function submitOrganizationApplication(req, res) {
                 organization_version_id
             );
             
-            publishToChannel('transactions', { type: 'created', data: transactionResult });
-            if (transactionResult && transactionResult.transaction_id) {
-                publishToChannel(`transactions:${transactionResult.transaction_id}`, { type: 'created', data: transactionResult });
-            }
+            // Global broadcast for admins
+            broadcastToPage('transactions', 'transactions:updated', { type: 'created', data: transactionResult });
+            
+            // Org-specific broadcast
+            broadcastToPage('transactions', 'transactions:updated', { type: 'created', data: transactionResult }, org_id);
         }
 
         // Apply for membership - create one application with all answers

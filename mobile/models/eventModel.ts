@@ -1,3 +1,6 @@
+// @ts-nocheck
+const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
 const { prisma } = require('../../config/db');
 const { redisClient } = require('../../config/redis');
 
@@ -170,7 +173,7 @@ function mapSpecificEventForMobile(row, userId) {
     const paymentRemarks = tx?.remarks || null;
     const proofImage = tx?.proof_image || null;
     const transactionId = attendee?.transaction_id ?? null;
-    const studentStatus = mapAttendanceStatus(attendee?.status);
+    const studentStatus = attendee ? mapAttendanceStatus(attendee.status) : '';
 
     return {
         event_id: row.event_id,
@@ -379,17 +382,30 @@ async function getTickets(user_id, event_id = null) {
         },
     });
 
-    return rows.map((row) => ({
-        attendance_id: row.attendance_id,
-        event_id: row.event_id,
-        status: row.status,
-        transaction_id: row.transaction_id,
-        created_at: row.created_at,
-        title: row.tbl_event?.title || '',
-        start_date: row.tbl_event?.start_date || null,
-        end_date: row.tbl_event?.end_date || null,
-        image: row.tbl_event?.image || null,
-    }));
+    return rows.map((row) => {
+        const qr_token = jwt.sign(
+            { 
+                eid: row.event_id, 
+                uid: user_id, 
+                typ: 'evt_tix' 
+            }, 
+            process.env.JWT_SECRET_KEY || 'default_secret', 
+            { expiresIn: '30d' }
+        );
+
+        return {
+            attendance_id: row.attendance_id,
+            event_id: row.event_id,
+            status: row.status,
+            transaction_id: row.transaction_id,
+            created_at: row.created_at,
+            title: row.tbl_event?.title || '',
+            start_date: row.tbl_event?.start_date || null,
+            end_date: row.tbl_event?.end_date || null,
+            image: row.tbl_event?.image || null,
+            qr_token,
+        };
+    });
 }
 async function getUpcomingEvents(organizations) {
     const organizationIds = extractOrganizationIds(organizations);

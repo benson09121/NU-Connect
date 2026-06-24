@@ -1,8 +1,9 @@
-import { Router } from 'express';
-import * as notificationController from '../../mobile/controllers/notificationController';
-import { validateAzureJWTMobile } from '../../middlewares/middleWare';
+// @ts-nocheck
+const express = require('express');
+const router = express.Router();
+const notificationController = require('../../mobile/controllers/notificationController');
+const { validateAzureJWTMobile } = require('../../middlewares/middleWare');
 
-const router = Router();
 
 router.get('/notifications', validateAzureJWTMobile, notificationController.getNotifications);
 router.get('/notifications/mark-read', validateAzureJWTMobile, notificationController.markNotificationsAsRead);
