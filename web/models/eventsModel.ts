@@ -379,6 +379,12 @@ export interface EventAttendee {
   transaction_id: number | null;
   transaction_status: string | null;
   registration_date: Date | null;
+  time_in: Date | null;
+  time_out: Date | null;
+  proof_image: string | null;
+  amount: number | null;
+  transaction_type: string | null;
+  transaction_created_at: Date | null;
 }
 
 export interface EventStats {
@@ -561,8 +567,15 @@ export async function getEventById(eventId: number): Promise<EventDetail | null>
     full_name: `${a.tbl_user?.f_name ?? ''} ${a.tbl_user?.l_name ?? ''}`.trim(),
     email: a.tbl_user?.email ?? '',
     attendance_status: a.status,
+    transaction_id: a.tbl_transaction?.transaction_id ?? null,
     transaction_status: a.tbl_transaction?.status ?? null,
     registration_date: a.created_at,
+    time_in: a.time_in,
+    time_out: a.time_out,
+    proof_image: a.tbl_transaction?.proof_image ?? null,
+    amount: a.tbl_transaction?.amount ? Number(a.tbl_transaction.amount) : null,
+    transaction_type: a.tbl_transaction?.tbl_transaction_type?.label ?? null,
+    transaction_created_at: a.tbl_transaction?.created_at ?? null,
   }));
 
   // Build stats

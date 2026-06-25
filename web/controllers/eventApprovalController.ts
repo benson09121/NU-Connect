@@ -482,7 +482,7 @@ export async function getPublicationImage(req: Request, res: Response): Promise<
 
     // Sanitise — prevent path traversal
     const safeFilename = path.basename(String(image_name));
-    const physicalPath = path.join(
+    let physicalPath = path.join(
       getEventsStorageDir(),
       String(organization_id),
       'events',
@@ -492,8 +492,21 @@ export async function getPublicationImage(req: Request, res: Response): Promise<
     );
 
     if (!fs.existsSync(physicalPath)) {
-      res.status(404).json({ error: 'Image not found' });
-      return;
+      // Fallback: check if the image was uploaded as a requirement instead of publication_image
+      const reqPath = path.join(
+        getEventsStorageDir(),
+        String(organization_id),
+        'events',
+        String(event_id),
+        'requirements',
+        safeFilename,
+      );
+      if (fs.existsSync(reqPath)) {
+        physicalPath = reqPath;
+      } else {
+        res.status(404).json({ error: 'Image not found' });
+        return;
+      }
     }
 
     const ext = path.extname(safeFilename).toLowerCase();

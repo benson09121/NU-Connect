@@ -483,37 +483,45 @@ async function addGeneratedCertificate(req) {
         console.log('addGeneratedCertificate: Fetching certificate template for event_id:', event_id);
         const template = await eventModel.getCertificateTemplate(event_id);
         if (!template || !template[0]) throw new Error('No template found for this event');
-        const templatePath = `/app/certificates/templates/${template[0].template_path}`;
+        const templatePath = path.join(__dirname, '..', '..', 'nuconnect-files', 'certificates', 'templates', template[0].template_path);
         console.log('addGeneratedCertificate: Template path:', templatePath);
         console.log('addGeneratedCertificate: Reading template file:', templatePath);
-        const templateContent = await fs.promises.readFile(templatePath);
-        if (!templateContent || templateContent.length === 0) {
-            throw new Error('Template file is empty or corrupted');
-        }
+        
+        // Read template
+        const content = fs.readFileSync(templatePath, 'binary');
+        
+        // Initialize docxtemplater
+        const zip = new PizZip(content);
+        const doc = new Docxtemplater(zip, {
+            paragraphLoop: true,
+            linebreaks: true,
+        });
 
-        const data = {
-            name: `${user.f_name} ${user.l_name}`,
-        };
+        const fullName = `${user.f_name} ${user.l_name}`;
+        // Render document
+        doc.render({ name: fullName });
 
-        // Generate filenames
-        const safeFirstName = user.f_name.replace(/[^a-z0-9]/g, '_').toLowerCase();
+        // Generate temporary docx
+        const buf = doc.getZip().generate({ type: 'nodebuffer' });
+        
+        const safeFirstName = user.f_name.replace(/[^a-z0-9]/gi, '_').toLowerCase();
         const safeLastName = user.l_name.replace(/[^a-z0-9]/gi, '_').toLowerCase();
         const baseFilename = `Certificate_${safeFirstName}_${safeLastName}`;
-        const docxPath = path.join("/app/certificates/templates", `${baseFilename}_${verification_code}.docx`);
+        const docxPath = path.join("/tmp", `${baseFilename}_${verification_code}.docx`);
         const pdfFilename = `${baseFilename}_${verification_code}.pdf`;
-        const pdfPath = `/app/certificates/generated/${pdfFilename}`;
+        
+        const generatedDir = path.join(__dirname, '..', '..', 'nuconnect-files', 'certificates', 'generated');
+        if (!fs.existsSync(generatedDir)) {
+            fs.mkdirSync(generatedDir, { recursive: true });
+        }
+        const pdfPath = path.join(generatedDir, pdfFilename);
         console.log(pdfFilename);
 
-        // Use default TemplateHandler (no explicit delimiter configuration)
-        const handler = new TemplateHandler();
-        const doc = await handler.process(templateContent, data);
 
 
-        await fs.promises.writeFile(docxPath, doc);
+        await fs.promises.writeFile(docxPath, buf);
 
-
-        await convertDocxToPdf(docxPath, pdfPath);
-
+        await convertDocxToPdf(docxPath, pdfPath, { name: fullName });
 
         await fs.promises.unlink(docxPath);
 
@@ -525,6 +533,7 @@ async function addGeneratedCertificate(req) {
             template_id,
             pdfFilename,
             verification_code,
+            user_id: user.user_id,
         });
 
         console.log('addGeneratedCertificate: Certificate generation complete:', pdfPath);
@@ -635,16 +644,18 @@ async function getAllEventCertificates(req, res) {
 async function getEventCertificate(req, res) {
     const certificate_name  = req.query.certificate_name;
     try {
-        res.setHeader('X-Accel-Redirect', `/protected-certificates/generated/${certificate_name}`);
+        const path = require('path');
+        const fs = require('fs');
+        const filePath = path.join(__dirname, '..', '..', 'nuconnect-files', 'certificates', 'generated', certificate_name);
+        
+        if (!fs.existsSync(filePath)) {
+            return res.status(404).json({ error: 'Certificate not found' });
+        }
 
-        // Use the original filename if available, fallback to template_name
-        res.setHeader('Content-Disposition', `attachment; filename="hulu"`);
-        // Optionally, send a short message for debugging (remove in production)
-        // res.end('File download triggered');
-        res.end();
+        res.download(filePath, certificate_name);
     } catch (error) {
         res.status(500).json({
-            error: error.message || "An error occurred while fetching the requirements.",
+            error: error.message || "An error occurred while fetching the certificate.",
         });
     }
 }

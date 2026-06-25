@@ -29,7 +29,8 @@ async function getOrganizations(user_id) {
         if (!version) return null;
 
         const allMembers = version.tbl_organization_members || [];
-        const userMember = allMembers.find(m => m.user_id === user_id);
+        const userMembers = allMembers.filter(m => m.user_id === user_id);
+        const userMember = userMembers.find(m => m.status === 'Active') || userMembers[0];
         const membershipStatus = userMember ? userMember.status : 'Not Member';
         const activeMembers = allMembers.filter(m => m.status === 'Active');
 

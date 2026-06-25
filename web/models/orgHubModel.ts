@@ -800,14 +800,7 @@ export async function approveMembershipApplication(params: {
   remarks?: string;
   reviewedBy: string;
 }) {
-  const {
-    applicationId,
-    orgId,
-    orgVersionId,
-    cycleNumber,
-    remarks,
-    reviewedBy,
-  } = params;
+  const { applicationId, orgId, orgVersionId, cycleNumber, remarks, reviewedBy } = params;
 
   const app = await prisma.tbl_membership_application.findUnique({
     where: { application_id: applicationId },
@@ -816,7 +809,16 @@ export async function approveMembershipApplication(params: {
   if (!app) throw new Error('APPLICATION_NOT_FOUND');
   if (app.status !== 'Pending') throw new Error('APPLICATION_NOT_PENDING');
 
-  await prisma.$transaction([
+  const existingMember = await prisma.tbl_organization_members.findFirst({
+    where: {
+      organization_id: orgId,
+      cycle_number: cycleNumber,
+      user_id: app.user_id,
+      status: 'Pending',
+    },
+  });
+
+  const txOps: any[] = [
     prisma.tbl_membership_application.update({
       where: { application_id: applicationId },
       data: {
@@ -826,17 +828,34 @@ export async function approveMembershipApplication(params: {
         reviewed_at: new Date(),
       },
     }),
-    prisma.tbl_organization_members.create({
-      data: {
-        organization_id: orgId,
-        cycle_number: cycleNumber,
-        user_id: app.user_id,
-        org_version_id: orgVersionId,
-        member_type: 'Member',
-        status: 'Active',
-      },
-    }),
-  ]);
+  ];
+
+  if (existingMember) {
+    txOps.push(
+      prisma.tbl_organization_members.update({
+        where: { member_id: existingMember.member_id },
+        data: {
+          org_version_id: orgVersionId,
+          status: 'Active',
+        },
+      })
+    );
+  } else {
+    txOps.push(
+      prisma.tbl_organization_members.create({
+        data: {
+          organization_id: orgId,
+          cycle_number: cycleNumber,
+          user_id: app.user_id,
+          org_version_id: orgVersionId,
+          member_type: 'Member',
+          status: 'Active',
+        },
+      })
+    );
+  }
+
+  await prisma.$transaction(txOps);
 }
 
 // ---------------------------------------------------------------------------
@@ -852,19 +871,40 @@ export async function rejectMembershipApplication(params: {
 
   const app = await prisma.tbl_membership_application.findUnique({
     where: { application_id: applicationId },
-    select: { status: true },
+    select: { status: true, user_id: true, organization_id: true, cycle_number: true },
   });
   if (!app) throw new Error('APPLICATION_NOT_FOUND');
   if (app.status !== 'Pending') throw new Error('APPLICATION_NOT_PENDING');
 
-  return prisma.tbl_membership_application.update({
-    where: { application_id: applicationId },
-    data: {
-      status: 'Rejected',
-      remarks: remarks ?? null,
-      reviewed_by: reviewedBy,
-      reviewed_at: new Date(),
+  const existingMember = await prisma.tbl_organization_members.findFirst({
+    where: {
+      organization_id: app.organization_id,
+      user_id: app.user_id,
+      cycle_number: app.cycle_number,
+      status: 'Pending',
     },
-    select: { application_id: true },
   });
+
+  const txOps: any[] = [
+    prisma.tbl_membership_application.update({
+      where: { application_id: applicationId },
+      data: {
+        status: 'Rejected',
+        remarks: remarks ?? null,
+        reviewed_by: reviewedBy,
+        reviewed_at: new Date(),
+      },
+    }),
+  ];
+
+  if (existingMember) {
+    txOps.push(
+      prisma.tbl_organization_members.delete({
+        where: { member_id: existingMember.member_id },
+      })
+    );
+  }
+
+  const results = await prisma.$transaction(txOps);
+  return results[0]; // Return the updated application
 }

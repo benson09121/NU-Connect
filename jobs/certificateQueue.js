@@ -116,10 +116,10 @@ class CertificateQueue {
         
         console.log('generateCertificate: Starting for event_id:', event_id, 'email:', email);
         
-        const template = await webEeventModel.getCertificateTemplate(event_id);
+        const template = await eventModel.getCertificateTemplate(event_id);
         if (!template || !template[0]) throw new Error('No template found for this event');
         
-        const templatePath = `/app/certificates/templates/${template[0].template_path}`;
+        const templatePath = path.join(__dirname, '..', 'nuconnect-files', 'certificates', 'templates', template[0].template_path);
         console.log('generateCertificate: Template path:', templatePath);
 
         // Use exact logic from getSampleCertificate
@@ -145,7 +145,13 @@ class CertificateQueue {
         const baseFilename = `Certificate_${safeFirstName}_${safeLastName}`;
         const docxPath = path.join("/tmp", `${baseFilename}_${verification_code}.docx`);
         const pdfFilename = `${baseFilename}_${verification_code}.pdf`;
-        const pdfPath = `/app/certificates/generated/${pdfFilename}`;
+        
+        // Ensure generated directory exists
+        const generatedDir = path.join(__dirname, '..', 'nuconnect-files', 'certificates', 'generated');
+        if (!fs.existsSync(generatedDir)) {
+            fs.mkdirSync(generatedDir, { recursive: true });
+        }
+        const pdfPath = path.join(generatedDir, pdfFilename);
 
         // Write DOCX file (same as getSampleCertificate)
         fs.writeFileSync(docxPath, buf);

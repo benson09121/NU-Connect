@@ -1,1 +1,0 @@
-const { Client } = require('pg'); const client = new Client({ connectionString: 'postgresql://postgres:postgres@localhost:5432/db_nuconnect?schema=public' }); client.connect().then(() => client.query('SELECT COUNT(*) FROM tbl_logs').then(res => console.log('COUNT:', res.rows[0].count)).finally(() => client.end()));
