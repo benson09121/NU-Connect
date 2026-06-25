@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const { publishToChannel, publishOrgHub } = require('../../web/controllers/sseController');
-const { broadcastToPage } = require('../../services/websocketService');
+const { broadcastToPage, broadcastToOrgDetail } = require('../../services/websocketService');
 const organizationModel = require('../models/organizationModel'); 
 const userModel = require('../models/userModel');
 const webOrganizationsModel = require('../../web/models/organizationsModel'); // Import web model for getPendingOrganizationMembers
@@ -147,7 +147,8 @@ async function submitOrganizationApplication(req, res) {
                 }
                 
                 // Create directory if it doesn't exist
-                const uploadDir = `/app/organizations/${org_id}/${organization_version_id}/transactions`;
+                const baseStorage = process.env.STORAGE_BASE_PATH || path.resolve(__dirname, '../../nuconnect-files');
+                const uploadDir = path.join(baseStorage, 'organizations', String(org_id), String(organization_version_id), 'transactions');
                 if (!fs.existsSync(uploadDir)) {
                     fs.mkdirSync(uploadDir, { recursive: true });
                 }
@@ -220,16 +221,18 @@ async function submitOrganizationApplication(req, res) {
         try {
             const updatedPendingMembers = await webOrganizationsModel.getPendingOrganizationMembers(org_id, organization_version_id);
             const pendingMembersArray = Array.isArray(updatedPendingMembers) ? updatedPendingMembers : [];
-            publishOrgHub({
-                orgId: org_id,
-                orgVersionId: organization_version_id,
+            
+            // Broadcast the exact event React Query useOrgHubSocket expects
+            broadcastToOrgDetail(org_id, 'org:hub:updated', { 
+                org_id: org_id, 
+                org_version_id: organization_version_id,
                 entity: 'organization_pendingMembers',
                 operation: 'UPDATE',
                 data: pendingMembersArray
             });
-            console.log(`📱 [MOBILE] 📡 Published pending members to hub - ${pendingMembersArray.length} items`);
+            console.log(`📱 [MOBILE] 📡 Emitted org:hub:updated to org-detail room for ${pendingMembersArray.length} items`);
         } catch (publishError) {
-            console.error('❌ [MOBILE] Failed to publish pending members:', publishError);
+            console.error('❌ [MOBILE] Failed to broadcast org:hub:updated:', publishError);
         }
 
         console.log('Final membership result:', membershipResult);
@@ -277,12 +280,14 @@ async function leaveOrganization(req, res) {
         const result = await organizationModel.leaveOrganization(organization_id, organization_version_id, user.user_id, leave_reason);
         
         console.log('Leave application created:', result);
-        publishToChannel(`organization_leaveApplications_${organization_id}_${organization_version_id}`, {
-            operation: 'CREATE',
-            data: Array.isArray(result) ? result : [result],
-            timestamp: new Date()
+        
+        // Emitting 'leave:created' directly triggers Web's useOrgHubSocket
+        broadcastToOrgDetail(organization_id, 'leave:created', {
+            org_id: organization_id,
+            org_version_id: organization_version_id,
+            data: Array.isArray(result) ? result : [result]
         });
-        console.log(`📱 [MOBILE] 📡 Leave Application Published to channel - 1 item`);
+        console.log(`📱 [MOBILE] 📡 Emitted leave:created to org-detail room for 1 item`);
         
         res.status(200).json({ 
             success: true,

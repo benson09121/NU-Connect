@@ -328,7 +328,9 @@ export async function getOrganizationsList(email: string): Promise<Organizations
   const user = await resolveUser(email);
   const { scope, orgIds } = await resolveScope(user);
 
-  const whereFilter = orgIds !== null ? { organization_id: { in: orgIds } } : {};
+  const whereFilter = orgIds !== null 
+    ? { organization_id: { in: orgIds }, status: { not: 'Archived' as const } } 
+    : { status: { not: 'Archived' as const } };
 
   // Fetch orgs with adviser and course/program/college info
   const orgs = await prisma.tbl_organization.findMany({
@@ -1031,8 +1033,15 @@ export async function getOrgBySlug(slug: string): Promise<{
   slug: string;
   organization_status: string;
 } | null> {
+  const numericId = /^\d+$/.test(slug) ? parseInt(slug, 10) : undefined;
+
   const org = await prisma.tbl_organization.findFirst({
-    where: { slug },
+    where: {
+      OR: [
+        { slug },
+        ...(numericId ? [{ organization_id: numericId }] : [])
+      ]
+    },
     select: {
       organization_id: true,
       name: true,

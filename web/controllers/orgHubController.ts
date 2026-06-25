@@ -38,9 +38,9 @@ function broadcastOrg(
   broadcastToOrgDetail(orgId, 'org:hub:updated', { org_id: orgId, org_version_id: orgVersionId });
 }
 
-/** Return the caller's email from the middleware-attached user. */
-function callerEmail(req: Request): string {
-  return (req.user?.email as string | undefined) ?? 'system';
+/** Return the caller's user_id from the middleware-attached user. */
+function callerUserId(req: Request): string {
+  return (req.user?.user_id as string | undefined) ?? (req.user?.email as string | undefined) ?? 'system';
 }
 
 // ---------------------------------------------------------------------------
@@ -82,7 +82,7 @@ export async function getOrgHub(req: Request, res: Response): Promise<void> {
       model.getMembers(orgVersionId),
       model.getCommittees(orgId, cycleNumber),
       model.getCommitteeMembers(orgId, cycleNumber),
-      model.getPendingApplications(orgId, cycleNumber),
+      model.getPendingApplications(orgId, cycleNumber, orgVersionId),
       model.getArchivedMembers(orgId, cycleNumber),
       model.getLeaveApplications(orgId, cycleNumber),
       model.getTermPayments(orgId, orgVersionId),
@@ -261,7 +261,7 @@ export async function archiveExecutiveMember(req: Request, res: Response): Promi
 
     await model.archiveExecutiveMember({
       memberId: Number(member_id),
-      archivedBy: callerEmail(req),
+      archivedBy: callerUserId(req),
     });
 
     broadcastOrg(Number(orgId), Number(orgVersionId), 'officer:archived');
@@ -369,7 +369,7 @@ export async function archiveCommittee(req: Request, res: Response): Promise<voi
 
     await model.archiveCommittee({
       committeeId: Number(committee_id),
-      archivedBy: callerEmail(req),
+      archivedBy: callerUserId(req),
       reason,
     });
 
@@ -562,7 +562,7 @@ export async function archiveOrganizationMember(
 
     await model.archiveOrganizationMember({
       memberId: Number(member_id),
-      archivedBy: callerEmail(req),
+      archivedBy: callerUserId(req),
     });
 
     broadcastOrg(Number(orgId), Number(orgVersionId), 'member:archived');
@@ -622,7 +622,7 @@ export async function approveMembershipApplication(
       orgVersionId,
       cycleNumber,
       remarks,
-      reviewedBy: callerEmail(req),
+      reviewedBy: callerUserId(req),
     });
 
     broadcastOrg(orgId, orgVersionId, 'member:created');
@@ -666,7 +666,7 @@ export async function rejectMembershipApplication(
     await model.rejectMembershipApplication({
       applicationId: Number(application_id),
       remarks,
-      reviewedBy: callerEmail(req),
+      reviewedBy: callerUserId(req),
     });
 
     broadcastOrg(

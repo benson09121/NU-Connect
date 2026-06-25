@@ -376,8 +376,15 @@ export interface EventAttendee {
   full_name: string;
   email: string;
   attendance_status: string;
+  transaction_id: number | null;
   transaction_status: string | null;
-  registered_at: Date | null;
+  proof_image: string | null;
+  amount: number | null;
+  transaction_type: string | null;
+  transaction_created_at: Date | null;
+  registration_date: Date | null;
+  time_in: Date | null;
+  time_out: Date | null;
 }
 
 export interface EventStats {
@@ -502,9 +509,22 @@ export async function getEventById(eventId: number): Promise<EventDetail | null>
           user_id: true,
           status: true,
           created_at: true,
+          updated_at: true,
+          time_in: true,
+          time_out: true,
           tbl_user: { select: { f_name: true, l_name: true, email: true } },
           tbl_transaction: {
-            select: { status: true },
+            select: { 
+              transaction_id: true,
+              status: true,
+              proof_image: true,
+              amount: true,
+              tbl_transaction_type: {
+                select: { label: true }
+              },
+              created_at: true,
+              updated_at: true
+            },
           },
         },
       },
@@ -540,15 +560,30 @@ export async function getEventById(eventId: number): Promise<EventDetail | null>
       ?.tbl_organization_version_tbl_organization_current_org_version_idTotbl_organization_version;
 
   // Build attendees
-  const attendees: EventAttendee[] = event.tbl_event_attendance.map((a) => ({
-    attendance_id: a.attendance_id,
-    user_id: a.user_id,
-    full_name: `${a.tbl_user?.f_name ?? ''} ${a.tbl_user?.l_name ?? ''}`.trim(),
-    email: a.tbl_user?.email ?? '',
-    attendance_status: a.status,
-    transaction_status: a.tbl_transaction?.status ?? null,
-    registered_at: a.created_at,
-  }));
+  const attendees: EventAttendee[] = event.tbl_event_attendance.map((a) => {
+    // If it's a paid event with a transaction that has been processed (not Pending),
+    // the registration date is when the transaction was updated (approved).
+    // Otherwise, we use the attendance created_at.
+    const isProcessedTransaction = a.tbl_transaction && a.tbl_transaction.status !== 'Pending';
+    const registrationDate = isProcessedTransaction ? a.tbl_transaction.updated_at : a.created_at;
+
+    return {
+      attendance_id: a.attendance_id,
+      user_id: a.user_id,
+      full_name: `${a.tbl_user?.f_name ?? ''} ${a.tbl_user?.l_name ?? ''}`.trim(),
+      email: a.tbl_user?.email ?? '',
+      attendance_status: a.status,
+      transaction_id: a.tbl_transaction?.transaction_id ?? null,
+      transaction_status: a.tbl_transaction?.status ?? null,
+      proof_image: typeof a.tbl_transaction?.proof_image === 'string' ? a.tbl_transaction.proof_image : null,
+      amount: a.tbl_transaction?.amount ? Number(a.tbl_transaction.amount) : null,
+      transaction_type: a.tbl_transaction?.tbl_transaction_type?.label ?? null,
+      transaction_created_at: a.tbl_transaction?.created_at ?? null,
+      registration_date: registrationDate || a.created_at,
+      time_in: a.time_in ?? null,
+      time_out: a.time_out ?? null,
+    };
+  });
 
   // Build stats
   const totalRegistered = event.tbl_event_attendance.filter((a) =>

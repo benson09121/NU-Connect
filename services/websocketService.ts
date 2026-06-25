@@ -278,14 +278,8 @@ async function authenticateSocket(
       lastName:  (verified.name as string)?.split(',')[0]?.trim() ?? '',
     };
 
-    // ── WEB_ACCESS gate ────────────────────────────────────────────────────
-    // Checks Valkey cache first → falls back to Prisma if miss.
-    const hasWebAccess = await can(email, 'WEB_ACCESS');
-    if (!hasWebAccess) {
-      console.warn(`[WebSocket] WEB_ACCESS denied for: ${email}`);
-      return next(new Error('WEB_ACCESS_DENIED'));
-    }
-
+    // Mobile users also need websocket access for real-time notifications and payment statuses.
+    // Page-level subscriptions are protected by checkPageAccess in handlePageSubscribe.
     next();
   } catch (err) {
     console.warn('[WebSocket] Auth failed:', (err as Error).message);

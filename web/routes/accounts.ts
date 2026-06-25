@@ -105,7 +105,7 @@ router.post('/colleges/unarchive', requireAuth, requireManage, collegesControlle
 // ---------------------------------------------------------------------------
 
 // GET  /api/web/programs
-router.get('/programs', requireAuth, requireViewOrg, programsController.getAllPrograms);
+router.get('/programs', requireAuth, requireManage, programsController.getAllPrograms);
 
 // POST /api/web/programs
 router.post('/programs', requireAuth, requireManage, programsController.createProgram);
