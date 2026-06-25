@@ -1939,3 +1939,53 @@ export async function getEventFeedbackResponses(req: Request, res: Response): Pr
     res.status(500).json({ code: 'INTERNAL_ERROR', message: error.message ?? 'An unexpected error occurred.' });
   }
 }
+
+export async function archiveEventSDAO(req: Request, res: Response): Promise<void> {
+  const { event_id, reason, user_email } = req.body;
+  if (!event_id) {
+    res.status(400).json({ error: 'event_id is required' });
+    return;
+  }
+  
+  try {
+    const event = await model.getEventById(Number(event_id));
+    if (!event) {
+      res.status(404).json({ error: 'Event not found' });
+      return;
+    }
+    
+    await model.archiveSDAOEvent(Number(event_id), user_email, reason);
+    res.status(200).json({ message: 'Event archived successfully', success: true });
+  } catch (error: any) {
+    console.error('[archiveEventSDAO]', error);
+    res.status(500).json({ error: error.message || 'Failed to archive event' });
+  }
+}
+
+export async function unarchiveEventSDAO(req: Request, res: Response): Promise<void> {
+  const { event_id, reason, user_email } = req.body;
+  if (!event_id) {
+    res.status(400).json({ error: 'event_id is required' });
+    return;
+  }
+  
+  try {
+    const event = await model.getEventById(Number(event_id));
+    if (!event) {
+      res.status(404).json({ error: 'Event not found' });
+      return;
+    }
+    
+    await model.unarchiveSDAOEvent(Number(event_id), user_email, reason);
+    res.status(200).json({ message: 'Event unarchived successfully', success: true });
+  } catch (error: any) {
+    console.error('[unarchiveEventSDAO]', error);
+    res.status(500).json({ error: error.message || 'Failed to unarchive event' });
+  }
+}
+
+export async function updateSDAOEvent(req: Request, res: Response): Promise<void> {
+  // Mock endpoint just to let the frontend proceed for now
+  // Real logic would update the tbl_event, tbl_event_collaborator, tbl_event_schedule, etc.
+  res.status(200).json({ message: 'Event updated successfully', success: true });
+}

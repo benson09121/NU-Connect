@@ -1,0 +1,1 @@
+import { PrismaClient } from './lib/generated/prisma/client'; const prisma = new PrismaClient(); prisma.tbl_logs.count().then(c => console.log('COUNT:', c)).catch(console.error).finally(() => process.exit(0));
