@@ -301,7 +301,10 @@ export async function getSections(programId?: number) {
 
 export async function getPendingApplications() {
   const apps = await prisma.tbl_user_application.findMany({
-    where: { status: 'Pending' },
+    where: {
+      status: { in: ['Pending', 'Approved'] },
+      archived_at: null,
+    },
     include: {
       tbl_role: { select: { role_name: true } },
       tbl_program: { select: { name: true, abbreviation: true } },
@@ -309,13 +312,34 @@ export async function getPendingApplications() {
     orderBy: { created_at: 'desc' },
   });
 
+  const pendingUsers = await prisma.tbl_user.findMany({
+    where: { status: 'Pending' },
+    include: {
+      tbl_role: { select: { role_name: true } },
+      tbl_program_tbl_user_program_idTotbl_program: { select: { name: true, abbreviation: true } },
+    },
+    orderBy: { created_at: 'desc' },
+  });
+
   return {
-    users: apps.map((a) => ({
+    users: pendingUsers.map((u) => ({
+      user_id: u.user_id,
+      email: u.email,
+      f_name: u.f_name,
+      l_name: u.l_name,
+      role_name: u.tbl_role?.role_name ?? null,
+      program_name: u.tbl_program_tbl_user_program_idTotbl_program?.abbreviation ?? u.tbl_program_tbl_user_program_idTotbl_program?.name ?? null,
+      status: u.status,
+      created_at: u.created_at?.toISOString() ?? null,
+    })),
+    applications: apps.map((a) => ({
       user_id: a.application_id,
       application_id: a.application_id,
       email: a.email,
       f_name: null as string | null,
       l_name: null as string | null,
+      role_name: a.tbl_role?.role_name ?? null,
+      program_name: a.tbl_program?.abbreviation ?? a.tbl_program?.name ?? null,
       role: a.tbl_role?.role_name ?? null,
       program: a.tbl_program?.abbreviation ?? a.tbl_program?.name ?? null,
       college: a.college ?? null,
@@ -323,7 +347,6 @@ export async function getPendingApplications() {
       reason: a.reason,
       created_at: a.created_at?.toISOString() ?? null,
     })),
-    applications: [] as unknown[],
   };
 }
 

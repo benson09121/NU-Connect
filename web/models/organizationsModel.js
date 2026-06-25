@@ -1748,8 +1748,8 @@ async function addMemberPermissionOverride(email, permissions, organization_id, 
   });
   if (!member) throw new Error('User is not an active member of this organization');
 
-  const existing = await prisma.tbl_member_permission_override.count({ where: { member_id: member.member_id } });
-  if (existing > 0) throw new Error('User already has permission overrides');
+  // If user already has overrides, delete them so we can replace them (upsert behavior)
+  await prisma.tbl_member_permission_override.deleteMany({ where: { member_id: member.member_id } });
 
   const permNames = permissions.map(p => p.permission_name);
   const perms = await prisma.tbl_permission.findMany({ where: { permission_name: { in: permNames } } });

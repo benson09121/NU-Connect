@@ -1,4 +1,3 @@
-// @ts-nocheck
 #!/usr/bin/env node
 /**
  * Reset Tracked Pages to Only New Default Page

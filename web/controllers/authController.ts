@@ -9,7 +9,7 @@ import { broadcastToPage, broadcastToUser } from '../../services/websocketServic
 
 const userModel = require('../models/userModel') as any;
 const accountModel = require('../models/accountModel') as any;
-const { sendInvitationEmail } = require('../../services/emailService') as { sendInvitationEmail: (email: string, url: string) => Promise<void> };
+import { sendInvitationEmail } from '../../services/emailService';
 
 async function getAccessToken(cca: msal.ConfidentialClientApplication): Promise<string> {
   const response = await cca.acquireTokenByClientCredential({
@@ -61,7 +61,9 @@ export async function login(req: Request, res: Response): Promise<void> {
     const permissionResult = await userModel.handleLogin(req.user);
     console.log(userStatusBefore);
 
-    if (!wasActiveBefore && userStatusBefore?.status === 'Pending') {
+    const isFirstTimeLogin = !wasActiveBefore && (!userStatusBefore || userStatusBefore?.status === 'Pending');
+
+    if (isFirstTimeLogin) {
       console.log(`🎉 User ${req.user!.email} activated on first login!`);
 
       const user = await userModel.getUserByEmail(req.user!.email);
@@ -100,7 +102,7 @@ export async function login(req: Request, res: Response): Promise<void> {
       const userInfo = {
         ...permissionResult[0].user_info,
         activation_info: {
-          was_just_activated: !wasActiveBefore && userStatusBefore?.status === 'Pending',
+          was_just_activated: isFirstTimeLogin,
           activation_date: wasActiveBefore
             ? userStatusBefore?.updated_at
             : new Date().toISOString(),

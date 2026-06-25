@@ -1,4 +1,3 @@
-// @ts-nocheck
 #!/usr/bin/env node
 /**
  * Clear Facebook Scraper Cache (Puppeteer-based scraper)

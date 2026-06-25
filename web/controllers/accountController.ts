@@ -4,8 +4,7 @@ import axios from 'axios';
 import * as accountModel from '../models/accountModel';
 import { broadcastToPage } from '../../services/websocketService';
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const emailService = require('../../services/emailService');
+import * as emailService from '../../services/emailService';
 
 // ---------------------------------------------------------------------------
 // Azure B2B invitation helper
@@ -401,7 +400,8 @@ export async function resendInvitation(req: Request, res: Response): Promise<voi
     if (result?.success) {
       res.json({ success: true, message: 'Invitation email resent successfully.' });
     } else {
-      res.status(500).json({ success: false, error: result?.error ?? 'Failed to resend invitation.' });
+      const errorMsg = (result as any)?.error || (result as any)?.message || 'Failed to resend invitation.';
+      res.status(500).json({ success: false, error: errorMsg });
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Failed to resend invitation.';

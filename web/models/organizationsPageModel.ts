@@ -63,6 +63,7 @@ interface ResolvedScope {
 
 export interface OrganizationItem {
   id: number;
+  version_id: number;
   name: string;
   slug: string | null;
   acronym: string | null;
@@ -427,6 +428,7 @@ export async function getOrganizationsList(email: string): Promise<Organizations
 
     return {
       id: org.organization_id,
+      version_id: org.current_org_version_id,
       name: org.name,
       slug: org.slug ?? null,
       acronym: rawAcronym || null,

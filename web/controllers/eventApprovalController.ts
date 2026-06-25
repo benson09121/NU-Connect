@@ -16,7 +16,7 @@ import { Request, Response } from 'express';
 import path from 'path';
 import fs from 'fs';
 import * as model from '../models/eventApprovalModel';
-import { broadcastToPage } from '../../services/websocketService';
+import { broadcastToPage, broadcastGlobal } from '../../services/websocketService';
 import { notify, logActivity } from '../../services/notificationAndLogService';
 
 // ---------------------------------------------------------------------------
@@ -254,6 +254,10 @@ export async function approveEventApplicationStep(req: Request, res: Response): 
             entityId: eventApplicationId,
             redirectUrl: `/events/event-approval/${proposedEventId}/${encodeURIComponent(eventTitle)}`,
           });
+          
+          try {
+            broadcastGlobal('upcoming-events:updated', { eventApplicationId });
+          } catch (_) {}
         } else if (nextPendingStep) {
           // Notify president — step approved, moving to next reviewer
           await notify({

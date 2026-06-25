@@ -1,11 +1,11 @@
 // @ts-nocheck
-export {};
-const nodemailer = require('nodemailer');
-const msal = require('@azure/msal-node');
-const axios = require('axios');
-const userModel = require('../web/models/userModel');
-const fs = require('fs');
-const path = require('path');
+import nodemailer from 'nodemailer';
+import * as msal from '@azure/msal-node';
+import axios from 'axios';
+import * as userModel from '../web/models/userModel';
+import { prisma } from '../config/db';
+import fs from 'fs';
+import path from 'path';
 
 // Load NU Connect logo as base64 for email embedding
 // Try multiple potential paths for the logo
@@ -15,23 +15,11 @@ const LOGO_PATHS = [
   path.join(__dirname, '../../node-app/public/images/NU-Connect.png')
 ];
 
+// Disable Base64 logo embedding as it causes severe deliverability issues and spam filtering
 let NU_CONNECT_LOGO_BASE64 = '';
 
-for (const logoPath of LOGO_PATHS) {
-  try {
-    if (fs.existsSync(logoPath)) {
-      const logoBuffer = fs.readFileSync(logoPath);
-      NU_CONNECT_LOGO_BASE64 = `data:image/png;base64,${logoBuffer.toString('base64')}`;
-      console.log(`✅ NU Connect logo loaded from: ${logoPath}`);
-      break;
-    }
-  } catch (error) {
-    continue; // Try next path
-  }
-}
-
 if (!NU_CONNECT_LOGO_BASE64) {
-  console.warn('⚠️ Could not load NU Connect logo from any path. Using text-only header.');
+  console.log('💡 Using text-only header for maximum email deliverability.');
 }
 
 // Validate environment variables
@@ -59,41 +47,51 @@ if (!isEmailConfigured()) {
   console.log('📧 Gmail credentials configured for:', process.env.GMAIL_USER);
 }
 
-const transporter = isEmailConfigured() ? 
-  nodemailer.createTransport({
-    service: 'gmail',
-    auth: {
-      user: process.env.GMAIL_USER,
-      pass: process.env.GMAIL_APP_PASS.replace(/\s/g, '') // Remove all spaces
-    },
-    // Enhanced delivery settings for better inbox placement
-    secure: true,
-    port: 465,
-    pool: true, // Use connection pooling
-    maxConnections: 3, // Reduced for better reputation
-    maxMessages: 50, // Reduced for better reputation
-    rateDelta: 2000, // 2 seconds between emails (slower = better reputation)
-    rateLimit: 3, // Max 3 emails per rateDelta (more conservative)
-    tls: {
-      rejectUnauthorized: false,
-      ciphers: 'SSLv3' // Better compatibility
-    },
-    // DKIM and reputation settings
-    dkim: {
-      domainName: 'gmail.com',
-      keySelector: 'default',
-      privateKey: false // Let Gmail handle DKIM
-    },
-    // Additional authentication
-    connectionTimeout: 60000, // 1 minute timeout
-    greetingTimeout: 30000,
-    socketTimeout: 60000
-  }) : null;
+let transporter: any = null;
+let isTransporterInitialized = false;
+
+const getTransporter = () => {
+  if (isTransporterInitialized) return transporter;
+  
+  if (isEmailConfigured()) {
+    transporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        user: process.env.GMAIL_USER,
+        pass: (process.env.GMAIL_APP_PASS || '').replace(/\s/g, '') // Remove all spaces
+      },
+      secure: true,
+      port: 465,
+      pool: true,
+      maxConnections: 3,
+      maxMessages: 50,
+      rateDelta: 2000,
+      rateLimit: 3,
+      tls: {
+        rejectUnauthorized: false,
+        ciphers: 'SSLv3'
+      },
+      dkim: {
+        domainName: 'gmail.com',
+        keySelector: 'default',
+        privateKey: false
+      },
+      connectionTimeout: 60000,
+      greetingTimeout: 30000,
+      socketTimeout: 60000
+    });
+  }
+  
+  isTransporterInitialized = true;
+  return transporter;
+};
 
 // Test connection on startup with enhanced diagnostics
-if (transporter) {
-  transporter.verify()
-    .then(() => {
+setTimeout(() => {
+  const tp = getTransporter();
+  if (tp) {
+    tp.verify()
+      .then(() => {
       console.log('✅ Gmail SMTP connection verified successfully');
       // Additional deliverability checks
       console.log('📧 Email Deliverability Status:');
@@ -113,7 +111,8 @@ if (transporter) {
       console.error('❌ Gmail SMTP verification failed:', err.message);
       console.error('💡 Please check your Gmail App Password in .env file');
     });
-}
+  }
+}, 100);
 
 // Function to send a warm-up email to improve sender reputation
 // DISABLED: Use "Send Test Email" button in Manage Accounts interface instead
@@ -175,31 +174,6 @@ async function sendInvitationEmail(recipient, redemptionUrl, isResend = false) {
     subject: subject,
     html: generateInvitationTemplate(redemptionUrl, isResend),
     text: `You've been invited to join NU Connect! Visit: ${redemptionUrl}`,
-    // Enhanced headers for better delivery
-    headers: {
-      'X-Priority': '3', // Normal priority (1=high, 3=normal, 5=low)
-      'X-MSMail-Priority': 'Normal',
-      'Importance': 'normal',
-      'X-Mailer': 'NU Connect System',
-      'Reply-To': process.env.SUPPORT_EMAIL || process.env.GMAIL_USER,
-      'Return-Path': process.env.FROM_EMAIL || 'nuconnect2026@gmail.com',
-      'X-Auto-Response-Suppress': 'All',
-      'List-Unsubscribe': `<mailto:${process.env.FROM_EMAIL || 'nuconnect2026@gmail.com'}?subject=unsubscribe>`,
-      // Add organization identification
-      'X-Organization': 'National University - Dasmariñas',
-      'X-System': 'NU Connect',
-      // Prevent auto-forwarding issues
-      'Precedence': 'bulk',
-      'X-Bulk': 'no'
-    },
-    // Add envelope settings for better delivery
-    envelope: {
-      from: process.env.FROM_EMAIL || 'nuconnect2026@gmail.com',
-      to: recipient
-    },
-    // Add message settings
-    messageId: false, // Let Gmail generate message ID
-    date: new Date()
   };
 
   try {
@@ -238,27 +212,6 @@ async function sendRejectionEmail(recipient, rejectionReason, canReapply = true)
     subject: 'Application Status Update - NU Connect',
     html: generateRejectionTemplate(rejectionReason, canReapply),
     text: `Your application to NU Connect has been reviewed. Reason: ${rejectionReason}. ${canReapply ? 'You may reapply after addressing the feedback.' : ''}`,
-    // Enhanced headers for better delivery
-    headers: {
-      'X-Priority': '3',
-      'X-MSMail-Priority': 'Normal',
-      'Importance': 'normal',
-      'X-Mailer': 'NU Connect System',
-      'Reply-To': process.env.SUPPORT_EMAIL || process.env.GMAIL_USER,
-      'Return-Path': process.env.FROM_EMAIL || 'nuconnect2026@gmail.com',
-      'X-Auto-Response-Suppress': 'All',
-      'List-Unsubscribe': `<mailto:${process.env.FROM_EMAIL || 'nuconnect2026@gmail.com'}?subject=unsubscribe>`,
-      'X-Organization': 'National University - Dasmariñas',
-      'X-System': 'NU Connect',
-      'Precedence': 'bulk',
-      'X-Bulk': 'no'
-    },
-    envelope: {
-      from: process.env.FROM_EMAIL || 'nuconnect2026@gmail.com',
-      to: recipient
-    },
-    messageId: false,
-    date: new Date()
   };
 
   try {
@@ -1453,14 +1406,18 @@ async function resendInvitationEmail(email) {
   const cca = new msal.ConfidentialClientApplication(msalConfig);
 
   try {
-    // Check if user exists (allow pending users)
+    // Check if user exists (allow pending users) or is an approved application
     const user = await userModel.getUserByEmail(email);
-    if (!user) {
-      throw new Error('User not found in the system');
+    const approvedApplication = await prisma.tbl_user_application.findFirst({
+      where: { email, status: 'Approved', archived_at: null }
+    });
+
+    if (!user && !approvedApplication) {
+      throw new Error('User not found in the system or no approved application exists');
     }
     
-    // Allow resending to pending users specifically
-    if (user.status !== 'Pending') {
+    // Allow resending to pending users specifically or approved applications
+    if (user && user.status !== 'Pending') {
       throw new Error('Can only resend invitations to users with Pending status');
     }
 
@@ -3966,7 +3923,7 @@ function generateEventRejectionTemplate(rejectionDetails) {
   `;
 }
 
-module.exports = {
+export {
   sendInvitationEmail,
   sendRejectionEmail,
   diagnoseEmailDelivery,

@@ -41,6 +41,7 @@ import analyticsRoutesWeb from './web/routes/analyticsRoutes';
 import novaRoutesWeb from './web/routes/novaRoutes';
 import qrVerificationRoutesWeb from './web/routes/qrVerification';
 import { initDashboardBridge } from './services/dashboardBroadcastService';
+import manageRolesRoutesWeb from './web/routes/manageRolesRoutes';
 
 const app: Application = express();
 const server = http.createServer(app);
@@ -118,6 +119,7 @@ app.use('/api/web/logs', logRoutesWeb);
 app.use('/api/web', accountRoutesWeb);
 app.use('/api/web', orgHubRoutesWeb);
 app.use('/api/web', emailSuggestionsRoutesWeb);
+app.use('/api/web', manageRolesRoutesWeb);
 // app.use('/api/web', manageAccountsRoutesWeb);
 // app.use('/api/web', RequirementsRoutesWeb);
 app.use('/api/web', eventsRoutesWeb);         // TypeScript refactored — takes precedence for its routes

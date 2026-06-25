@@ -1025,6 +1025,110 @@ function getEventsStorageDir(): string {
   return path.join(base, 'events');
 }
 
+export async function getSDAOPublicationImage(req: Request, res: Response): Promise<void> {
+  try {
+    const eventId = parseInt(req.params.eventId as string, 10);
+    if (!eventId || isNaN(eventId)) {
+      res.status(400).json({ error: 'eventId is required' });
+      return;
+    }
+
+    const event = await model.getEventById(eventId);
+    if (!event || !event.image) {
+      res.status(404).json({ error: 'Image not found' });
+      return;
+    }
+
+    const safeFilename = path.basename(event.image);
+    const physicalPath = path.join(
+      getEventsStorageDir(),
+      'SDAO',
+      String(eventId),
+      'publication_images',
+      safeFilename
+    );
+
+    if (!fs.existsSync(physicalPath)) {
+      res.status(404).json({ error: 'Image not found on disk' });
+      return;
+    }
+
+    const ext = path.extname(safeFilename).toLowerCase();
+    const imageContentTypes: Record<string, string> = {
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.png': 'image/png',
+      '.gif': 'image/gif',
+      '.webp': 'image/webp',
+      '.bmp': 'image/bmp',
+    };
+    const contentType = imageContentTypes[ext] ?? 'application/octet-stream';
+
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', `inline; filename="${safeFilename}"`);
+    fs.createReadStream(physicalPath).pipe(res);
+  } catch (error: any) {
+    console.error('[getSDAOPublicationImage] Error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+export async function getEventPublicationImage(req: Request, res: Response): Promise<void> {
+  try {
+    const { event_id, image_name, organization_id } = req.query;
+
+    if (!event_id || !image_name) {
+      res.status(400).json({ error: 'event_id and image_name are required' });
+      return;
+    }
+
+    const safeFilename = path.basename(String(image_name));
+    let physicalPath = '';
+
+    if (!organization_id || organization_id === 'null' || organization_id === '') {
+      physicalPath = path.join(
+        getEventsStorageDir(),
+        'SDAO',
+        String(event_id),
+        'publication_images',
+        safeFilename
+      );
+    } else {
+      physicalPath = path.join(
+        getEventsStorageDir(),
+        String(organization_id),
+        'events',
+        String(event_id),
+        'publication_images',
+        safeFilename
+      );
+    }
+
+    if (!fs.existsSync(physicalPath)) {
+      res.status(404).json({ error: 'Image not found' });
+      return;
+    }
+
+    const ext = path.extname(safeFilename).toLowerCase();
+    const imageContentTypes: Record<string, string> = {
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.png': 'image/png',
+      '.gif': 'image/gif',
+      '.webp': 'image/webp',
+      '.bmp': 'image/bmp',
+    };
+    const contentType = imageContentTypes[ext] ?? 'application/octet-stream';
+
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', `inline; filename="${safeFilename}"`);
+    fs.createReadStream(physicalPath).pipe(res);
+  } catch (error: any) {
+    console.error('[getEventPublicationImage] Error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
 export async function createSDAOEvent(req: Request, res: Response): Promise<void> {
   try {
     const userId = req.user?.user_id;

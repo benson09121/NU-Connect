@@ -213,6 +213,7 @@ export async function getExecutiveRanks(): Promise<RankItem[]> {
       rank_id: true,
       rank_level: true,
       default_title: true,
+      description: true,
     },
   });
 
@@ -220,6 +221,7 @@ export async function getExecutiveRanks(): Promise<RankItem[]> {
     rank_id: r.rank_id,
     rank_name: r.default_title,
     rank_number: r.rank_level,
+    description: r.description,
   }));
 }
 
