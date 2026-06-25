@@ -377,7 +377,7 @@ export interface EventAttendee {
   email: string;
   attendance_status: string;
   transaction_status: string | null;
-  registered_at: Date | null;
+  registration_date: Date | null;
 }
 
 export interface EventStats {
@@ -387,6 +387,7 @@ export interface EventStats {
   attendanceRate: number;
   evaluationRate: number;
   averageRating: number;
+  avgFeedbackTime?: string;
   totalPaidRevenue: number;
 }
 
@@ -502,6 +503,8 @@ export async function getEventById(eventId: number): Promise<EventDetail | null>
           user_id: true,
           status: true,
           created_at: true,
+          time_in: true,
+          time_out: true,
           tbl_user: { select: { f_name: true, l_name: true, email: true } },
           tbl_transaction: {
             select: { status: true },
@@ -511,6 +514,7 @@ export async function getEventById(eventId: number): Promise<EventDetail | null>
       // Evaluations for stats
       tbl_evaluation: {
         select: {
+          duration_seconds: true,
           tbl_evaluation_response: {
             select: { response_value: true },
           },
@@ -547,7 +551,7 @@ export async function getEventById(eventId: number): Promise<EventDetail | null>
     email: a.tbl_user?.email ?? '',
     attendance_status: a.status,
     transaction_status: a.tbl_transaction?.status ?? null,
-    registered_at: a.created_at,
+    registration_date: a.created_at,
   }));
 
   // Build stats
@@ -575,6 +579,15 @@ export async function getEventById(eventId: number): Promise<EventDetail | null>
     allResponseValues.length > 0
       ? Math.round((allResponseValues.reduce((s, v) => s + v, 0) / allResponseValues.length) * 100) / 100
       : 0;
+
+  // Average feedback time
+  const allDurations = event.tbl_evaluation.map((e) => e.duration_seconds).filter((d) => d !== null);
+  const avgDurationSeconds = allDurations.length > 0 
+    ? allDurations.reduce((s, v) => s + (v ?? 0), 0) / allDurations.length 
+    : 0;
+  const avgFeedbackTime = avgDurationSeconds > 0 
+    ? `${Math.floor(avgDurationSeconds / 60)}m ${Math.round(avgDurationSeconds % 60)}s` 
+    : "N/A";
 
   // Total paid revenue — sum Approved transactions for this event
   const paidRevenue = await prisma.tbl_transaction.aggregate({
@@ -641,6 +654,7 @@ export async function getEventById(eventId: number): Promise<EventDetail | null>
       attendanceRate,
       evaluationRate,
       averageRating,
+      avgFeedbackTime,
       totalPaidRevenue,
     },
   };
@@ -1994,4 +2008,17 @@ export async function deleteCertificateTemplateByEventId(eventId: number) {
 
   await prisma.tbl_certificate_template.delete({ where: { event_id: eventId } });
   return existing.template_path;
+}
+export async function archiveSDAOEvent(eventId: number, userEmail: string | null, reason: string | null): Promise<void> {
+  await prisma.tbl_event.update({
+    where: { event_id: eventId },
+    data: { status: 'Archived' as any },
+  });
+}
+
+export async function unarchiveSDAOEvent(eventId: number, userEmail: string | null, reason: string | null): Promise<void> {
+  await prisma.tbl_event.update({
+    where: { event_id: eventId },
+    data: { status: 'Approved' as any }, // SDAO events revert to Approved typically
+  });
 }

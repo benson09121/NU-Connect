@@ -159,7 +159,8 @@ function printInboxDeliveryTips() {
 }
 
 async function sendInvitationEmail(recipient, redemptionUrl, isResend = false) {
-  if (!transporter) {
+  const tp = getTransporter();
+  if (!tp) {
     console.warn('📧 Email service not configured. Skipping email send.');
     return { success: false, message: 'Email service not configured' };
   }
@@ -177,7 +178,7 @@ async function sendInvitationEmail(recipient, redemptionUrl, isResend = false) {
   };
 
   try {
-    const info = await transporter.sendMail(mailOptions);
+    const info = await tp.sendMail(mailOptions);
     const action = isResend ? 'Resent invitation' : 'Sent invitation';
     console.log(`✅ ${action} email to ${recipient} (ID: ${info.messageId})`);
     return { 
@@ -201,7 +202,8 @@ async function sendInvitationEmail(recipient, redemptionUrl, isResend = false) {
 }
 
 async function sendRejectionEmail(recipient, rejectionReason, canReapply = true) {
-  if (!transporter) {
+  const tp = getTransporter();
+  if (!tp) {
     console.warn('📧 Email service not configured. Skipping email send.');
     return { success: false, message: 'Email service not configured' };
   }
@@ -215,7 +217,7 @@ async function sendRejectionEmail(recipient, rejectionReason, canReapply = true)
   };
 
   try {
-    const info = await transporter.sendMail(mailOptions);
+    const info = await tp.sendMail(mailOptions);
     console.log(`✅ Rejection email sent to ${recipient} (ID: ${info.messageId})`);
     return { success: true, messageId: info.messageId };
   } catch (error) {
@@ -226,7 +228,8 @@ async function sendRejectionEmail(recipient, rejectionReason, canReapply = true)
 
 // Enhanced delivery diagnostic function
 async function diagnoseEmailDelivery(recipient) {
-  if (!transporter) {
+  const tp = getTransporter();
+  if (!tp) {
     return { success: false, message: 'Email service not configured' };
   }
 
@@ -241,7 +244,7 @@ async function diagnoseEmailDelivery(recipient) {
   // Check 2: SMTP Connection
   console.log('\n2. SMTP Connection Test:');
   try {
-    await transporter.verify();
+    await tp.verify();
     console.log('   ✅ SMTP connection successful');
   } catch (error) {
     console.log('   ❌ SMTP connection failed:', error.message);
@@ -1390,7 +1393,8 @@ function generateRejectionTemplate(rejectionReason, canReapply) {
 }
 
 async function resendInvitationEmail(email) {
-  if (!transporter) {
+  const tp = getTransporter();
+  if (!tp) {
     console.warn('📧 Email service not configured. Skipping email resend.');
     return { success: false, message: 'Email service not configured' };
   }
@@ -1471,7 +1475,8 @@ async function resendInvitationEmail(email) {
 
 
 async function sendStudentInvitationEmail(recipient, redemptionUrl, programName = 'your program', isResend = false) {
-  if (!transporter) {
+  const tp = getTransporter();
+  if (!tp) {
     console.warn('📧 Email transporter not configured. Skipping student invitation email.');
     return { success: false, error: 'Email service not configured' };
   }
@@ -1596,7 +1601,7 @@ async function sendStudentInvitationEmail(recipient, redemptionUrl, programName 
 
   try {
     console.log(`📱 Sending student ${isResend ? 'resend' : 'invitation'} email to: ${recipient}`);
-    const info = await transporter.sendMail(mailOptions);
+    const info = await tp.sendMail(mailOptions);
     const actionText = isResend ? 'Resent student invitation' : 'Sent student invitation';
     console.log(`✅ ${actionText} email successfully to ${recipient} (ID: ${info.messageId})`);
     
@@ -1644,7 +1649,8 @@ async function sendStudentInvitationEmail(recipient, redemptionUrl, programName 
  * @param {string} reminderType - 'week_before', 'day_before', or 'day_of'
  */
 async function sendEventReminderEmail(recipient, eventDetails, reminderType) {
-  if (!transporter) {
+  const tp = getTransporter();
+  if (!tp) {
     console.warn('📧 Email service not configured. Skipping event reminder email.');
     return { success: false, message: 'Email service not configured' };
   }
@@ -1687,7 +1693,7 @@ async function sendEventReminderEmail(recipient, eventDetails, reminderType) {
   };
 
   try {
-    const info = await transporter.sendMail(mailOptions);
+    const info = await tp.sendMail(mailOptions);
     console.log(`✅ Event reminder (${reminderType}) sent to ${recipient} for event "${eventDetails.title}" (ID: ${info.messageId})`);
     return { 
       success: true, 
@@ -2159,7 +2165,8 @@ function generateEventReminderTemplate(eventDetails, reminderType) {
  * @param {string} organizationDetails.adviser_email - Optional adviser email to include
  */
 async function sendOrganizationApprovalEmail(recipient, organizationDetails) {
-  if (!transporter) {
+  const tp = getTransporter();
+  if (!tp) {
     console.warn('📧 Email service not configured. Skipping organization approval email.');
     return { success: false, message: 'Email service not configured' };
   }
@@ -2203,7 +2210,7 @@ async function sendOrganizationApprovalEmail(recipient, organizationDetails) {
   };
 
   try {
-    const info = await transporter.sendMail(mailOptions);
+    const info = await tp.sendMail(mailOptions);
     console.log(`✅ Organization approval email sent to ${recipientList} for "${name}" (ID: ${info.messageId})`);
     return { 
       success: true, 
@@ -2227,7 +2234,8 @@ async function sendOrganizationApprovalEmail(recipient, organizationDetails) {
  * @param {string} rejectionDetails.adviser_email - Optional adviser email to include
  */
 async function sendOrganizationRejectionEmail(recipient, rejectionDetails) {
-  if (!transporter) {
+  const tp = getTransporter();
+  if (!tp) {
     console.warn('📧 Email service not configured. Skipping organization rejection email.');
     return { success: false, message: 'Email service not configured' };
   }
@@ -2271,7 +2279,7 @@ async function sendOrganizationRejectionEmail(recipient, rejectionDetails) {
   };
 
   try {
-    const info = await transporter.sendMail(mailOptions);
+    const info = await tp.sendMail(mailOptions);
     console.log(`✅ Organization rejection email sent to ${recipientList} for "${name}" (ID: ${info.messageId})`);
     return { 
       success: true, 
@@ -2295,7 +2303,8 @@ async function sendOrganizationRejectionEmail(recipient, rejectionDetails) {
  * @param {string} eventDetails.adviser_email - Optional adviser email to include
  */
 async function sendEventApprovalEmail(recipient, eventDetails) {
-  if (!transporter) {
+  const tp = getTransporter();
+  if (!tp) {
     console.warn('📧 Email service not configured. Skipping event approval email.');
     return { success: false, message: 'Email service not configured' };
   }
@@ -2339,7 +2348,7 @@ async function sendEventApprovalEmail(recipient, eventDetails) {
   };
 
   try {
-    const info = await transporter.sendMail(mailOptions);
+    const info = await tp.sendMail(mailOptions);
     console.log(`✅ Event approval email sent to ${recipientList} for "${title}" (ID: ${info.messageId})`);
     return { 
       success: true, 
@@ -2363,7 +2372,8 @@ async function sendEventApprovalEmail(recipient, eventDetails) {
  * @param {string} rejectionDetails.adviser_email - Optional adviser email to include
  */
 async function sendEventRejectionEmail(recipient, rejectionDetails) {
-  if (!transporter) {
+  const tp = getTransporter();
+  if (!tp) {
     console.warn('📧 Email service not configured. Skipping event rejection email.');
     return { success: false, message: 'Email service not configured' };
   }
@@ -2407,7 +2417,7 @@ async function sendEventRejectionEmail(recipient, rejectionDetails) {
   };
 
   try {
-    const info = await transporter.sendMail(mailOptions);
+    const info = await tp.sendMail(mailOptions);
     console.log(`✅ Event rejection email sent to ${recipientList} for "${title}" (ID: ${info.messageId})`);
     return { 
       success: true, 
