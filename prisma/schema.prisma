@@ -1,6 +1,6 @@
 generator client {
   provider = "prisma-client"
-  output = "../lib/generated/prisma"
+  output   = "../lib/generated/prisma"
 }
 
 datasource db {
@@ -93,13 +93,13 @@ model tbl_application {
   tbl_program                                          tbl_program?                              @relation(fields: [base_program_id], references: [program_id], onUpdate: NoAction)
   tbl_organization_version                             tbl_organization_version?                 @relation(fields: [org_version_id], references: [org_version_id], onUpdate: NoAction)
   tbl_renewal_cycle                                    tbl_renewal_cycle?                        @relation(fields: [organization_id, cycle_number], references: [organization_id, cycle_number], onUpdate: NoAction)
-  tbl_application_period                                tbl_application_period                    @relation(fields: [period_id], references: [period_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_application_period                               tbl_application_period                    @relation(fields: [period_id], references: [period_id], onDelete: NoAction, onUpdate: NoAction)
   tbl_user_tbl_application_student_idTotbl_user        tbl_user?                                 @relation("tbl_application_student_idTotbl_user", fields: [student_id], references: [user_id], onUpdate: NoAction)
   tbl_application_approval                             tbl_application_approval[]
   tbl_application_executives                           tbl_application_executives[]
   tbl_approval_process                                 tbl_approval_process[]
-  tbl_organization_requirement_submission              tbl_organization_requirement_submission[]
   tbl_application_approval_chain                       tbl_application_approval_chain[]
+  tbl_organization_requirement_submission              tbl_organization_requirement_submission[]
 
   @@index([document_generation_status], map: "idx_document_status")
 }
@@ -135,9 +135,9 @@ model tbl_application_requirement {
   created_by                              String?                                   @db.VarChar(200)
   created_at                              DateTime?                                 @default(now()) @db.Timestamp(6)
   updated_at                              DateTime?                                 @default(now()) @db.Timestamp(6)
+  tbl_application_period_requirement      tbl_application_period_requirement[]
   tbl_user                                tbl_user?                                 @relation(fields: [created_by], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
   tbl_organization_requirement_submission tbl_organization_requirement_submission[]
-  tbl_application_period_requirement      tbl_application_period_requirement[]
 }
 
 model tbl_approval_process {
@@ -155,7 +155,7 @@ model tbl_approval_process {
   tbl_application          tbl_application                   @relation(fields: [application_id], references: [application_id], onDelete: Cascade, onUpdate: NoAction)
   tbl_role                 tbl_role                          @relation(fields: [approval_role_id], references: [role_id], onDelete: Cascade, onUpdate: NoAction)
   tbl_user                 tbl_user                          @relation(fields: [approver_id], references: [user_id], onDelete: NoAction)
-  tbl_application_period    tbl_application_period?           @relation(fields: [period_id], references: [period_id], onDelete: Cascade, onUpdate: NoAction)
+  tbl_application_period   tbl_application_period?           @relation(fields: [period_id], references: [period_id], onDelete: Cascade, onUpdate: NoAction)
 }
 
 model tbl_archived_committees {
@@ -220,17 +220,17 @@ model tbl_certificate_template {
 }
 
 model tbl_college {
-  college_id      Int                    @id @default(autoincrement())
-  name            String                 @unique @db.VarChar(100)
-  abbreviation    String                 @unique @db.VarChar(20)
-  status          status_active_archived @default(Active)
-  created_at      DateTime?              @default(now()) @db.Timestamp(6)
-  archived_at     DateTime?              @db.Timestamp(6)
-  archived_by     String?                @db.VarChar(200)
-  archived_reason String?                @db.VarChar(255)
-  tbl_user        tbl_user?              @relation(fields: [archived_by], references: [user_id], onDelete: NoAction, map: "fk_college_archived_by")
+  college_id       Int                    @id @default(autoincrement())
+  name             String                 @unique @db.VarChar(100)
+  abbreviation     String                 @unique @db.VarChar(20)
+  status           status_active_archived @default(Active)
+  created_at       DateTime?              @default(now()) @db.Timestamp(6)
+  archived_at      DateTime?              @db.Timestamp(6)
+  archived_by      String?                @db.VarChar(200)
+  archived_reason  String?                @db.VarChar(255)
+  tbl_user         tbl_user?              @relation(fields: [archived_by], references: [user_id], onDelete: NoAction, map: "fk_college_archived_by")
   tbl_college_dean tbl_college_dean[]
-  tbl_program     tbl_program[]
+  tbl_program      tbl_program[]
 }
 
 model tbl_committee {
@@ -497,12 +497,12 @@ model tbl_event_requirement_submissions {
   file_path                                                         String                            @db.VarChar(255)
   submitted_by                                                      String                            @db.VarChar(200)
   submitted_at                                                      DateTime?                         @default(now()) @db.Timestamp(6)
-  updated_at                                                        DateTime?                         @default(now()) @db.Timestamp(6)
-  reviewed_by_email                                                 String?                           @db.VarChar(255)
-  reviewed_at                                                       DateTime?                         @db.Timestamp(6)
-  remarks                                                           String?
   viewed_by                                                         String?                           @db.VarChar(200)
   viewed_at                                                         DateTime?                         @db.Timestamp(6)
+  remarks                                                           String?
+  reviewed_at                                                       DateTime?                         @db.Timestamp(6)
+  reviewed_by_email                                                 String?                           @db.VarChar(255)
+  updated_at                                                        DateTime?                         @default(now()) @db.Timestamp(6)
   tbl_renewal_cycle                                                 tbl_renewal_cycle                 @relation(fields: [organization_id, cycle_number], references: [organization_id, cycle_number], onDelete: Cascade, onUpdate: NoAction, map: "tbl_event_requirement_submiss_organization_id_cycle_number_fkey")
   tbl_event_application                                             tbl_event_application?            @relation(fields: [event_application_id], references: [event_application_id], onDelete: NoAction, onUpdate: NoAction)
   tbl_event                                                         tbl_event?                        @relation(fields: [event_id], references: [event_id], onDelete: NoAction, onUpdate: NoAction)
@@ -558,21 +558,20 @@ model tbl_financial_category {
 }
 
 model tbl_logs {
-  log_id          Int       @id @default(autoincrement())
-  user_id         String    @db.VarChar(200)
-  user_email      String    @db.VarChar(255)
-  full_name       String    @db.VarChar(255)
-  action          String
-  action_type     String    @db.VarChar(50)
-  entity_type     String?   @db.VarChar(50)
-  entity_id       Int?
-  organization_id Int?
-  redirect_url    String?   @db.VarChar(500)
-  meta_data       Json?
-  created_at      DateTime? @default(now()) @db.Timestamp(6)
-
+  log_id           Int               @id @default(autoincrement())
+  user_id          String            @db.VarChar(200)
+  user_email       String            @db.VarChar(255)
+  full_name        String            @db.VarChar(255)
+  action           String
+  action_type      String            @db.VarChar(50)
+  entity_type      String?           @db.VarChar(50)
+  entity_id        Int?
+  organization_id  Int?
+  redirect_url     String?           @db.VarChar(500)
+  meta_data        Json?
+  created_at       DateTime?         @default(now()) @db.Timestamp(6)
+  tbl_organization tbl_organization? @relation(fields: [organization_id], references: [organization_id], onUpdate: NoAction)
   tbl_user         tbl_user          @relation(fields: [user_id], references: [user_id], onDelete: NoAction)
-  tbl_organization tbl_organization? @relation(fields: [organization_id], references: [organization_id], onDelete: SetNull, onUpdate: NoAction)
 
   @@index([user_id])
   @@index([action_type])
@@ -645,18 +644,17 @@ model tbl_membership_response {
 }
 
 model tbl_notification {
-  notification_id            Int                          @id @default(autoincrement())
-  sender_id                  String?                      @db.VarChar(200)
-  sender_name                String?                      @db.VarChar(255)
-  type                       String                       @default("general") @db.VarChar(50)
-  entity_type                notification_entity_type
-  entity_id                  Int?
-  title                      String                       @db.VarChar(255)
-  message                    String
-  redirect_url               String?                      @db.VarChar(500)
-  created_at                 DateTime?                    @default(now()) @db.Timestamp(6)
-
-  tbl_user_notification_sender tbl_user?                    @relation("tbl_notification_sender_idTotbl_user", fields: [sender_id], references: [user_id], onDelete: SetNull, onUpdate: NoAction)
+  notification_id              Int                          @id @default(autoincrement())
+  sender_id                    String?                      @db.VarChar(200)
+  sender_name                  String?                      @db.VarChar(255)
+  type                         String                       @default("general") @db.VarChar(50)
+  entity_type                  notification_entity_type
+  entity_id                    Int?
+  title                        String                       @db.VarChar(255)
+  message                      String
+  redirect_url                 String?                      @db.VarChar(500)
+  created_at                   DateTime?                    @default(now()) @db.Timestamp(6)
+  tbl_user_notification_sender tbl_user?                    @relation("tbl_notification_sender_idTotbl_user", fields: [sender_id], references: [user_id], onUpdate: NoAction)
   tbl_notification_recipient   tbl_notification_recipient[]
 
   @@index([created_at(sort: Desc)])
@@ -669,9 +667,8 @@ model tbl_notification_recipient {
   is_read                   Boolean          @default(false)
   read_at                   DateTime?        @db.Timestamp(6)
   created_at                DateTime?        @default(now()) @db.Timestamp(6)
-
-  tbl_notification tbl_notification @relation(fields: [notification_id], references: [notification_id], onDelete: Cascade, onUpdate: NoAction)
-  tbl_user         tbl_user         @relation(fields: [recipient_id], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_notification          tbl_notification @relation(fields: [notification_id], references: [notification_id], onDelete: Cascade, onUpdate: NoAction)
+  tbl_user                  tbl_user         @relation(fields: [recipient_id], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
 
   @@index([recipient_id, is_read])
   @@index([recipient_id])
@@ -693,6 +690,7 @@ model tbl_organization {
   archived_reason                                                                            String?                                            @db.VarChar(255)
   tbl_event                                                                                  tbl_event[]
   tbl_event_collaborator                                                                     tbl_event_collaborator[]
+  tbl_logs                                                                                   tbl_logs[]
   tbl_organization_version_tbl_organization_current_org_version_idTotbl_organization_version tbl_organization_version                           @relation("tbl_organization_current_org_version_idTotbl_organization_version", fields: [current_org_version_id], references: [org_version_id], onDelete: NoAction, map: "fk_org_current_version")
   tbl_user_tbl_organization_adviser_idTotbl_user                                             tbl_user                                           @relation("tbl_organization_adviser_idTotbl_user", fields: [adviser_id], references: [user_id], onDelete: NoAction)
   tbl_user_tbl_organization_archived_byTotbl_user                                            tbl_user?                                          @relation("tbl_organization_archived_byTotbl_user", fields: [archived_by], references: [user_id], onDelete: NoAction)
@@ -701,7 +699,6 @@ model tbl_organization {
   tbl_project_heads                                                                          tbl_project_heads[]
   tbl_renewal_cycle                                                                          tbl_renewal_cycle[]
   tbl_term_payments                                                                          tbl_term_payments[]
-  tbl_logs                                                                                   tbl_logs[]
 }
 
 model tbl_organization_course {
@@ -808,28 +805,28 @@ model tbl_payment_type {
 }
 
 model tbl_application_period {
-  period_id            Int                    @id @default(autoincrement())
-  start_date           DateTime               @db.Date
-  end_date             DateTime               @db.Date
-  start_time           DateTime               @db.Time(6)
-  end_time             DateTime               @db.Time(6)
-  is_active            Boolean?               @default(true)
-  created_by           String                 @db.VarChar(200)
-  created_at           DateTime?              @default(now()) @db.Timestamp(6)
-  updated_at           DateTime?              @default(now()) @db.Timestamp(6)
-  tbl_application                  tbl_application[]
-  tbl_approval_process             tbl_approval_process[]
+  period_id                          Int                                  @id @default(autoincrement())
+  start_date                         DateTime                             @db.Date
+  end_date                           DateTime                             @db.Date
+  start_time                         DateTime                             @db.Time(6)
+  end_time                           DateTime                             @db.Time(6)
+  is_active                          Boolean?                             @default(true)
+  created_by                         String                               @db.VarChar(200)
+  created_at                         DateTime?                            @default(now()) @db.Timestamp(6)
+  updated_at                         DateTime?                            @default(now()) @db.Timestamp(6)
+  tbl_application                    tbl_application[]
+  tbl_user                           tbl_user                             @relation(fields: [created_by], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
   tbl_application_period_requirement tbl_application_period_requirement[]
-  tbl_application_approval_chain   tbl_application_approval_chain[]
-  tbl_user                         tbl_user               @relation(fields: [created_by], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_approval_process               tbl_approval_process[]
+  tbl_application_approval_chain     tbl_application_approval_chain[]
 }
 
 model tbl_application_period_requirement {
-  period_id      Int
-  requirement_id Int
-  assigned_at    DateTime? @default(now()) @db.Timestamp(6)
+  period_id                   Int
+  requirement_id              Int
+  assigned_at                 DateTime?                   @default(now()) @db.Timestamp(6)
   tbl_application_period      tbl_application_period      @relation(fields: [period_id], references: [period_id], onDelete: Cascade)
-  tbl_application_requirement tbl_application_requirement @relation(fields: [requirement_id], references: [requirement_id], onDelete: Restrict)
+  tbl_application_requirement tbl_application_requirement @relation(fields: [requirement_id], references: [requirement_id])
 
   @@id([period_id, requirement_id])
 }
@@ -925,17 +922,17 @@ model tbl_renewal_cycle {
 }
 
 model tbl_role {
-  role_id                    Int                          @id @default(autoincrement())
-  role_name                  String                       @unique @db.VarChar(100)
-  is_approver                Boolean?                     @default(false)
-  hierarchy_order            Int?                         @unique
-  created_at                 DateTime?                    @default(now()) @db.Timestamp(6)
-  tbl_approval_process       tbl_approval_process[]
-  tbl_event_approval_process tbl_event_approval_process[]
-  tbl_application_approval_chain  tbl_application_approval_chain[]
-  tbl_role_permission        tbl_role_permission[]
-  tbl_user                   tbl_user[]
-  tbl_user_application       tbl_user_application[]
+  role_id                        Int                              @id @default(autoincrement())
+  role_name                      String                           @unique @db.VarChar(100)
+  is_approver                    Boolean?                         @default(false)
+  hierarchy_order                Int?                             @unique
+  created_at                     DateTime?                        @default(now()) @db.Timestamp(6)
+  tbl_approval_process           tbl_approval_process[]
+  tbl_event_approval_process     tbl_event_approval_process[]
+  tbl_application_approval_chain tbl_application_approval_chain[]
+  tbl_role_permission            tbl_role_permission[]
+  tbl_user                       tbl_user[]
+  tbl_user_application           tbl_user_application[]
 }
 
 model tbl_role_permission {
@@ -1109,32 +1106,28 @@ model tbl_transaction_verification {
   @@index([verification_count], map: "idx_verification_count")
 }
 
-// ---------------------------------------------------------------------------
-// Venue management — physical event locations
-// ---------------------------------------------------------------------------
-
 model tbl_venue {
-  venue_id         Int                @id @default(autoincrement())
-  name             String             @unique @db.VarChar(200)
-  description      String?
-  capacity         Int?
-  status           status_active_archived @default(Active)
-  created_by       String?            @db.VarChar(200)
-  created_at       DateTime?          @default(now()) @db.Timestamp(6)
-  archived_at      DateTime?          @db.Timestamp(6)
-  archived_by      String?            @db.VarChar(200)
-  archived_reason  String?            @db.VarChar(255)
+  venue_id                 Int                        @id @default(autoincrement())
+  name                     String                     @unique @db.VarChar(200)
+  description              String?
+  capacity                 Int?
+  status                   status_active_archived     @default(Active)
+  created_by               String?                    @db.VarChar(200)
+  created_at               DateTime?                  @default(now()) @db.Timestamp(6)
+  archived_at              DateTime?                  @db.Timestamp(6)
+  archived_by              String?                    @db.VarChar(200)
+  archived_reason          String?                    @db.VarChar(255)
   tbl_event_schedule_venue tbl_event_schedule_venue[]
   tbl_event_venue          tbl_event_venue[]
-  tbl_user_created         tbl_user?                  @relation("tbl_venue_created_byTotbl_user", fields: [created_by], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
   tbl_user_archived        tbl_user?                  @relation("tbl_venue_archived_byTotbl_user", fields: [archived_by], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_user_created         tbl_user?                  @relation("tbl_venue_created_byTotbl_user", fields: [created_by], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
 }
 
 model tbl_event_venue {
-  event_id   Int
-  venue_id   Int
-  tbl_event  tbl_event  @relation(fields: [event_id], references: [event_id], onDelete: Cascade, onUpdate: NoAction)
-  tbl_venue  tbl_venue  @relation(fields: [venue_id], references: [venue_id], onDelete: Cascade, onUpdate: NoAction)
+  event_id  Int
+  venue_id  Int
+  tbl_event tbl_event @relation(fields: [event_id], references: [event_id], onDelete: Cascade, onUpdate: NoAction)
+  tbl_venue tbl_venue @relation(fields: [venue_id], references: [venue_id], onDelete: Cascade, onUpdate: NoAction)
 
   @@id([event_id, venue_id])
 }
@@ -1164,8 +1157,9 @@ model tbl_event_schedule_venue {
   @@id([schedule_id, venue_id])
 }
 
+/// This model contains an expression index which requires additional setup for migrations. Visit https://pris.ly/d/expression-indexes for more info.
 model tbl_user {
-  user_id                                                                                    String                                    @id @default(dbgenerated("gen_random_uuid()::text")) @db.VarChar(200)
+  user_id                                                                                    String                                    @id @default(dbgenerated("(gen_random_uuid())::text")) @db.VarChar(200)
   f_name                                                                                     String?                                   @db.VarChar(50)
   l_name                                                                                     String?                                   @db.VarChar(50)
   email                                                                                      String                                    @unique @db.VarChar(100)
@@ -1184,6 +1178,7 @@ model tbl_user {
   tbl_ai_message                                                                             tbl_ai_message[]
   tbl_application_tbl_application_applicant_user_idTotbl_user                                tbl_application[]                         @relation("tbl_application_applicant_user_idTotbl_user")
   tbl_application_tbl_application_student_idTotbl_user                                       tbl_application[]                         @relation("tbl_application_student_idTotbl_user")
+  tbl_application_period                                                                     tbl_application_period[]
   tbl_application_requirement                                                                tbl_application_requirement[]
   tbl_approval_process                                                                       tbl_approval_process[]
   tbl_archived_committees                                                                    tbl_archived_committees[]
@@ -1193,6 +1188,7 @@ model tbl_user {
   tbl_blocked_period_tbl_blocked_period_unarchived_byTotbl_user                              tbl_blocked_period[]                      @relation("tbl_blocked_period_unarchived_byTotbl_user")
   tbl_certificate_template                                                                   tbl_certificate_template[]
   tbl_college                                                                                tbl_college[]
+  tbl_college_dean                                                                           tbl_college_dean[]
   tbl_committee_members                                                                      tbl_committee_members[]
   tbl_evaluation                                                                             tbl_evaluation[]
   tbl_event                                                                                  tbl_event[]
@@ -1204,20 +1200,20 @@ model tbl_user {
   tbl_event_reminder_log                                                                     tbl_event_reminder_log[]
   tbl_event_requirement_submissions_tbl_event_requirement_submissions_submitted_byTotbl_user tbl_event_requirement_submissions[]       @relation("tbl_event_requirement_submissions_submitted_byTotbl_user")
   tbl_event_requirement_submissions_tbl_event_requirement_submissions_viewed_byTotbl_user    tbl_event_requirement_submissions[]       @relation("tbl_event_requirement_submissions_viewed_byTotbl_user")
-  tbl_venue_created                                                                          tbl_venue[]                               @relation("tbl_venue_created_byTotbl_user")
-  tbl_venue_archived                                                                         tbl_venue[]                               @relation("tbl_venue_archived_byTotbl_user")
   tbl_logs                                                                                   tbl_logs[]
   tbl_membership_application_tbl_membership_application_reviewed_byTotbl_user                tbl_membership_application[]              @relation("tbl_membership_application_reviewed_byTotbl_user")
   tbl_membership_application_tbl_membership_application_user_idTotbl_user                    tbl_membership_application[]              @relation("tbl_membership_application_user_idTotbl_user")
   tbl_membership_leave_application_tbl_membership_leave_application_reviewed_byTotbl_user    tbl_membership_leave_application[]        @relation("tbl_membership_leave_application_reviewed_byTotbl_user")
   tbl_membership_leave_application_tbl_membership_leave_application_user_idTotbl_user        tbl_membership_leave_application[]        @relation("tbl_membership_leave_application_user_idTotbl_user")
+  tbl_notification_tbl_notification_sender_idTotbl_user                                      tbl_notification[]                        @relation("tbl_notification_sender_idTotbl_user")
+  tbl_notification_recipient                                                                 tbl_notification_recipient[]
   tbl_organization_tbl_organization_adviser_idTotbl_user                                     tbl_organization[]                        @relation("tbl_organization_adviser_idTotbl_user")
   tbl_organization_tbl_organization_archived_byTotbl_user                                    tbl_organization[]                        @relation("tbl_organization_archived_byTotbl_user")
+  tbl_application_approval_chain                                                             tbl_application_approval_chain[]
   tbl_organization_members                                                                   tbl_organization_members[]
   tbl_organization_requirement_submission                                                    tbl_organization_requirement_submission[]
   tbl_organization_version_tbl_organization_version_archived_byTotbl_user                    tbl_organization_version[]                @relation("tbl_organization_version_archived_byTotbl_user")
   tbl_organization_version_tbl_organization_version_created_byTotbl_user                     tbl_organization_version[]                @relation("tbl_organization_version_created_byTotbl_user")
-  tbl_application_period                                                                     tbl_application_period[]
   tbl_program_tbl_program_archived_byTotbl_user                                              tbl_program[]                             @relation("tbl_program_archived_byTotbl_user")
   tbl_project_heads                                                                          tbl_project_heads[]
   tbl_renewal_cycle                                                                          tbl_renewal_cycle[]
@@ -1229,11 +1225,6 @@ model tbl_user {
   tbl_transaction_audit_trail                                                                tbl_transaction_audit_trail[]
   tbl_transaction_verification_tbl_transaction_verification_generated_byTotbl_user           tbl_transaction_verification[]            @relation("tbl_transaction_verification_generated_byTotbl_user")
   tbl_transaction_verification_tbl_transaction_verification_revoked_byTotbl_user             tbl_transaction_verification[]            @relation("tbl_transaction_verification_revoked_byTotbl_user")
-  tbl_application_approval_chain                                                             tbl_application_approval_chain[]
-  tbl_user_esignature                                                                        tbl_user_esignature?
-  tbl_college_dean                                                                           tbl_college_dean[]
-  tbl_notification_tbl_notification_sender_idTotbl_user                                      tbl_notification[]                        @relation("tbl_notification_sender_idTotbl_user")
-  tbl_notification_recipient                                                                 tbl_notification_recipient[]
   tbl_user                                                                                   tbl_user?                                 @relation("tbl_userTotbl_user", fields: [archived_by], references: [user_id], onDelete: NoAction)
   other_tbl_user                                                                             tbl_user[]                                @relation("tbl_userTotbl_user")
   tbl_program_tbl_user_program_idTotbl_program                                               tbl_program?                              @relation("tbl_user_program_idTotbl_program", fields: [program_id], references: [program_id], onDelete: NoAction, onUpdate: NoAction)
@@ -1241,6 +1232,9 @@ model tbl_user {
   tbl_section                                                                                tbl_section?                              @relation(fields: [section_id], references: [section_id])
   tbl_user_application_tbl_user_application_archived_byTotbl_user                            tbl_user_application[]                    @relation("tbl_user_application_archived_byTotbl_user")
   tbl_user_application_tbl_user_application_rejected_byTotbl_user                            tbl_user_application[]                    @relation("tbl_user_application_rejected_byTotbl_user")
+  tbl_user_esignature                                                                        tbl_user_esignature?
+  tbl_venue_archived                                                                         tbl_venue[]                               @relation("tbl_venue_archived_byTotbl_user")
+  tbl_venue_created                                                                          tbl_venue[]                               @relation("tbl_venue_created_byTotbl_user")
 
   @@index([section_id], map: "idx_user_section")
 }
@@ -1256,10 +1250,10 @@ model tbl_user_application {
   rejected_reason                                     String?
   rejected_at                                         DateTime?                         @db.Timestamp(6)
   rejected_by                                         String?                           @db.VarChar(200)
-  college                                             String?                           @db.VarChar(255)
   archived_at                                         DateTime?                         @db.Timestamp(6)
   archived_by                                         String?                           @db.VarChar(200)
   transferred_at                                      DateTime?                         @db.Timestamp(6)
+  college                                             String?                           @db.VarChar(255)
   tbl_user_tbl_user_application_archived_byTotbl_user tbl_user?                         @relation("tbl_user_application_archived_byTotbl_user", fields: [archived_by], references: [user_id], onDelete: NoAction)
   tbl_program                                         tbl_program?                      @relation(fields: [program_id], references: [program_id], onDelete: NoAction, onUpdate: NoAction)
   tbl_user_tbl_user_application_rejected_byTotbl_user tbl_user?                         @relation("tbl_user_application_rejected_byTotbl_user", fields: [rejected_by], references: [user_id], onDelete: NoAction)
@@ -1286,6 +1280,54 @@ model tbl_term_payments {
   tbl_transaction                                  tbl_transaction          @relation(fields: [transaction_id], references: [transaction_id], onDelete: Cascade, onUpdate: NoAction)
   tbl_user_tbl_term_payments_user_idTotbl_user     tbl_user                 @relation("tbl_term_payments_user_idTotbl_user", fields: [user_id], references: [user_id], onDelete: NoAction)
   tbl_user_tbl_term_payments_verified_byTotbl_user tbl_user?                @relation("tbl_term_payments_verified_byTotbl_user", fields: [verified_by], references: [user_id], onDelete: NoAction)
+}
+
+model tbl_application_approval_chain {
+  chain_id               Int                     @id @default(autoincrement())
+  application_id         Int
+  period_id              Int?
+  approver_user_id       String                  @db.VarChar(200)
+  approver_role_id       Int
+  approval_order         Int
+  is_final_approval      Boolean                 @default(false)
+  uses_endorsed          Boolean                 @default(false)
+  status                 approval_chain_status   @default(Pending)
+  signature_path         String?                 @db.VarChar(255)
+  remarks                String?
+  endorsed_at            DateTime?               @db.Timestamp(6)
+  received_at            DateTime?               @db.Timestamp(6)
+  signed_at              DateTime?               @db.Timestamp(6)
+  approved_at            DateTime?               @db.Timestamp(6)
+  created_at             DateTime?               @default(now()) @db.Timestamp(6)
+  tbl_application        tbl_application         @relation(fields: [application_id], references: [application_id], onDelete: Cascade, onUpdate: NoAction)
+  tbl_role               tbl_role                @relation(fields: [approver_role_id], references: [role_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_user               tbl_user                @relation(fields: [approver_user_id], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_application_period tbl_application_period? @relation(fields: [period_id], references: [period_id], onUpdate: NoAction)
+
+  @@index([application_id, approval_order])
+  @@index([approver_user_id, status])
+  @@map("tbl_organization_approval_chain")
+}
+
+model tbl_user_esignature {
+  user_id        String    @id @db.VarChar(200)
+  signature_path String    @db.VarChar(255)
+  created_at     DateTime? @default(now()) @db.Timestamp(6)
+  updated_at     DateTime? @default(now()) @db.Timestamp(6)
+  tbl_user       tbl_user  @relation(fields: [user_id], references: [user_id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model tbl_college_dean {
+  id           Int         @id @default(autoincrement())
+  college_id   Int
+  dean_user_id String      @db.VarChar(200)
+  is_active    Boolean     @default(true)
+  created_at   DateTime?   @default(now()) @db.Timestamp(6)
+  updated_at   DateTime?   @default(now()) @db.Timestamp(6)
+  tbl_college  tbl_college @relation(fields: [college_id], references: [college_id], onDelete: NoAction, onUpdate: NoAction)
+  tbl_user     tbl_user    @relation(fields: [dean_user_id], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([college_id, is_active])
 }
 
 enum ai_entity_type {
@@ -1541,56 +1583,4 @@ enum approval_chain_status {
   Signed
   Approved
   Rejected
-}
-
-model tbl_application_approval_chain {
-  chain_id         Int                    @id @default(autoincrement())
-  application_id   Int
-  period_id        Int?
-  approver_user_id String                 @db.VarChar(200)
-  approver_role_id Int
-  approval_order   Int
-  is_final_approval Boolean              @default(false)
-  uses_endorsed    Boolean                @default(false)
-  status           approval_chain_status  @default(Pending)
-  signature_path   String?                @db.VarChar(255)
-  remarks          String?
-  endorsed_at      DateTime?              @db.Timestamp(6)
-  received_at      DateTime?              @db.Timestamp(6)
-  signed_at        DateTime?              @db.Timestamp(6)
-  approved_at      DateTime?              @db.Timestamp(6)
-  created_at       DateTime?              @default(now()) @db.Timestamp(6)
-
-  tbl_application       tbl_application       @relation(fields: [application_id], references: [application_id], onDelete: Cascade, onUpdate: NoAction)
-  tbl_application_period tbl_application_period? @relation(fields: [period_id], references: [period_id], onDelete: SetNull, onUpdate: NoAction)
-  tbl_user              tbl_user              @relation(fields: [approver_user_id], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
-  tbl_role              tbl_role              @relation(fields: [approver_role_id], references: [role_id], onDelete: NoAction, onUpdate: NoAction)
-
-  @@index([application_id, approval_order])
-  @@index([approver_user_id, status])
-
-  @@map("tbl_organization_approval_chain")
-}
-
-model tbl_user_esignature {
-  user_id        String    @id @db.VarChar(200)
-  signature_path String    @db.VarChar(255)
-  created_at     DateTime? @default(now()) @db.Timestamp(6)
-  updated_at     DateTime? @default(now()) @db.Timestamp(6)
-
-  tbl_user tbl_user @relation(fields: [user_id], references: [user_id], onDelete: Cascade, onUpdate: NoAction)
-}
-
-model tbl_college_dean {
-  id            Int       @id @default(autoincrement())
-  college_id    Int
-  dean_user_id  String    @db.VarChar(200)
-  is_active     Boolean   @default(true)
-  created_at    DateTime? @default(now()) @db.Timestamp(6)
-  updated_at    DateTime? @default(now()) @db.Timestamp(6)
-
-  tbl_college tbl_college @relation(fields: [college_id], references: [college_id], onDelete: NoAction, onUpdate: NoAction)
-  tbl_user    tbl_user    @relation(fields: [dean_user_id], references: [user_id], onDelete: NoAction, onUpdate: NoAction)
-
-  @@index([college_id, is_active])
 }

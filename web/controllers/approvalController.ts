@@ -405,6 +405,8 @@ export async function approveApprovalStep(req: Request, res: Response): Promise<
       broadcastToUser(ctx.applicant_email, 'approval:updated', {
         application_id: applicationId,
         type: result.organization_created ? 'application_approved' : 'approval_approved',
+        organization_created: result.organization_created ?? false,
+        organization_id: result.organization_id ?? null,
         message: result.organization_created
           ? `Congratulations! Your application for "${orgName}" has been fully approved by ${approverName}. Your organization has been created.`
           : `${approverName} has approved their step for your application for "${orgName}".`,
@@ -466,6 +468,17 @@ export async function approveApprovalStep(req: Request, res: Response): Promise<
         broadcastToOrgDetail(result.organization_id, 'org:renewal-status:updated', { org_id: result.organization_id });
         broadcastToOrgDetail(result.organization_id, 'org:dashboard:updated', { org_id: result.organization_id });
         broadcastToOrgDetail(result.organization_id, 'org:applications:updated', { org_id: result.organization_id });
+      }
+
+      // Invalidate permission cache for all affected users (President, Adviser, Executives)
+      if (result.affectedUserIds) {
+        const { invalidatePermissionCache } = await import('../../services/permissionService');
+        await Promise.all(result.affectedUserIds.map((email: string) => invalidatePermissionCache(email)));
+        
+        // Notify the users over websocket to refresh permissions
+        result.affectedUserIds.forEach((email: string) => {
+          broadcastToUser(email, 'permissions:updated', {});
+        });
       }
 
       // Non-blocking: generate DOCX + PDF after response is sent

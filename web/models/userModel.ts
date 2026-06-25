@@ -66,7 +66,7 @@ export async function getUserByEmail(email: string) {
  */
 export async function handleLogin(user: UserLoginInput) {
   try {
-    const existing = await prisma.tbl_user.findFirst({
+    let existing = await prisma.tbl_user.findFirst({
       where: { email: user.email },
       select: {
         user_id: true,
@@ -80,10 +80,70 @@ export async function handleLogin(user: UserLoginInput) {
     });
 
     if (!existing) {
-      console.warn(`[userModel] handleLogin: no DB record for ${user.email}`);
+      // Check if there is an approved application without an archive_at
+      const app = await prisma.tbl_user_application.findFirst({
+        where: { email: user.email, status: 'Approved', archived_at: null },
+      });
+
+      if (app) {
+        // Create user in tbl_user as Active since they are logging in right now
+        await prisma.tbl_user.create({
+          data: {
+            email: user.email!,
+            f_name: user.f_name || null,
+            l_name: user.l_name || null,
+            role_id: app.role_id,
+            program_id: app.program_id,
+            status: 'Active',
+          }
+        });
+
+        // Archive the application
+        await prisma.tbl_user_application.update({
+          where: { application_id: app.application_id },
+          data: { archived_at: new Date() },
+        });
+
+        // Refetch the created user
+        existing = await prisma.tbl_user.findFirst({
+          where: { email: user.email },
+          select: {
+            user_id: true,
+            email: true,
+            f_name: true,
+            l_name: true,
+            status: true,
+            role_id: true,
+            tbl_role: { select: { role_id: true, role_name: true } },
+          },
+        });
+      } else {
+        console.warn(`[userModel] handleLogin: no DB record for ${user.email}`);
+      }
+    } else {
+      // Make sure if they are pending, we update them to active
+      if (existing.status === 'Pending') {
+        await prisma.tbl_user.update({
+          where: { email: user.email },
+          data: { status: 'Active' }
+        });
+        existing.status = 'Active';
+      }
     }
 
-    return existing;
+    // Fetch permissions for the role
+    const permissionsRecords = await prisma.tbl_role_permission.findMany({
+      where: { role_id: existing.role_id },
+      include: { tbl_permission: true },
+    });
+    const permissions = permissionsRecords.map(rp => rp.tbl_permission.permission_name);
+
+    return [{
+      user_info: {
+        ...existing,
+        permissions
+      }
+    }];
   } catch (error) {
     console.error('Error handling login:', error);
     throw error;

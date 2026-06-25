@@ -328,6 +328,7 @@ export async function approveApprovalStep(
   organization_name?: string | null;
   organization_logo?: string | null;
   application_id?: number;
+  affectedUserIds?: string[];
 }> {
   const chain = await prisma.tbl_application_approval_chain.findUnique({
     where: { chain_id: chainId },
@@ -382,6 +383,7 @@ export async function approveApprovalStep(
         organization_name: promotionResult.organization_name,
         organization_logo: promotionResult.organization_logo,
         application_id: applicationId,
+        affectedUserIds: promotionResult.affectedUserIds,
       };
     } else {
       return {
@@ -436,11 +438,16 @@ async function promoteApplication(applicationId: number, remarks: string | null)
           },
         },
       },
+      tbl_user_tbl_application_applicant_user_idTotbl_user: {
+        select: { email: true }
+      }
     },
   });
 
   const ov = app.tbl_organization_version;
   if (!ov) throw new Error('Organization version snapshot not found');
+
+  const applicantEmail = app.tbl_user_tbl_application_applicant_user_idTotbl_user?.email;
 
   // Mark application approved
   await prisma.tbl_application.update({
@@ -478,14 +485,17 @@ async function promoteApplication(applicationId: number, remarks: string | null)
         f_name: parts[0] ?? '',
         l_name: parts.slice(1).join(' ') ?? '',
         role_id: roleId,
-        status: 'Pending',
+        status: staging ? 'Active' : 'Pending',
       },
     });
 
     if (staging) {
       await prisma.tbl_user_application.update({
         where: { application_id: staging.application_id },
-        data: { transferred_at: new Date() },
+        data: { 
+          transferred_at: new Date(),
+          archived_at: new Date(),
+        },
       });
     }
 
@@ -660,6 +670,7 @@ async function promoteApplication(applicationId: number, remarks: string | null)
     org_version_id: ov.org_version_id,
     organization_name: ov.name,
     organization_logo: ov.logo_path,
+    affectedUserIds: Array.from(new Set([applicantEmail, ...executives.map(e => e.proposed_email ? e.proposed_email : '').filter(Boolean)])),
   };
 }
 

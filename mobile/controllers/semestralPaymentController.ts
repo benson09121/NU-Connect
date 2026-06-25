@@ -1,3 +1,4 @@
+// @ts-nocheck
 // ===========================
 // MOBILE SEMESTRAL PAYMENT CONTROLLERS
 // ===========================

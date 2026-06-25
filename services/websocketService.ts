@@ -165,6 +165,7 @@ const PAGE_PERMISSIONS: PagePermissionMap = {
   'org:events':   { permission: 'manage_org_events',   scope: 'organization' },
   'org:finances': { permission: 'view_finances',       scope: 'organization' },
   'org:settings': { permission: 'manage_org_settings', scope: 'organization' },
+  'transactions': { permission: 'VIEW_TRANSACTIONS',   scope: 'organization' },
 
   // SDAO / admin pages
   analytics:   { permission: 'view_analytics',     scope: 'global' },

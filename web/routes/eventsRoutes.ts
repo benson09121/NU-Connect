@@ -144,6 +144,12 @@ router.post('/event-applications', validateAzureJWT, hasPermission('CREATE_EVENT
 // GET /api/web/requirements/template?template_name=...  (alias for requirement-event-template)
 router.get('/requirements/template', validateAzureJWT, ctrl.getRequirementTemplate);
 
+// GET /api/web/events/:eventId/sdao-publication-image
+router.get('/events/:eventId/sdao-publication-image', validateAzureJWT, ctrl.getSDAOPublicationImage);
+
+// GET /api/web/events/getEventPublicationImage
+router.get('/events/getEventPublicationImage', validateAzureJWT, ctrl.getEventPublicationImage);
+
 // ---------------------------------------------------------------------------
 // Event Feedback / Certificate — TypeScript endpoints
 // ---------------------------------------------------------------------------

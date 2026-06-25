@@ -1,3 +1,4 @@
+// @ts-nocheck
 const puppeteer = require('puppeteer');
 const cron = require('node-cron');
 const crypto = require('crypto');

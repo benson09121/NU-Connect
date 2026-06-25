@@ -14,6 +14,7 @@ const { get } = require('http');
 const certificateQueue = require('../../jobs/certificateQueue');
 const { subscribeToChannel, publishToChannel } = require('../../web/controllers/sseController');
 const { broadcastToPage, broadcastToOrgDetail, broadcastToUser } = require('../../services/websocketService');
+const jwt = require('jsonwebtoken');
 
 const MAX_PAYMENT_PROOF_BYTES = 10 * 1024 * 1024;
 const ALLOWED_PAYMENT_PROOF_MIME = new Set([
@@ -174,10 +175,17 @@ async function registerEvent(req, res) {
                 });
             }
 
-            if (!ALLOWED_PAYMENT_PROOF_MIME.has(String(uploadedFile.mimetype || '').toLowerCase())) {
+            const mimeType = String(uploadedFile.mimetype || '').toLowerCase();
+            const fileExt = String(uploadedFile.name || '').toLowerCase().split('.').pop();
+            const allowedExtensions = ['jpg', 'jpeg', 'png', 'webp', 'pdf'];
+            
+            const mimeTypeValid = ALLOWED_PAYMENT_PROOF_MIME.has(mimeType);
+            const extensionValid = allowedExtensions.includes(fileExt || '');
+
+            if (!mimeTypeValid && !extensionValid) {
                 return res.status(400).json({
                     error: 'INVALID_FILE_TYPE',
-                    message: 'payment_proof must be one of: image/jpeg, image/png, image/webp, application/pdf',
+                    message: `payment_proof must be one of: image/jpeg, image/png, image/webp, application/pdf. Received MIME type: ${mimeType}, Extension: ${fileExt}`,
                 });
             }
 
@@ -237,15 +245,17 @@ async function registerEvent(req, res) {
                 return res.status(500).json({ message: 'Failed to create transaction id' });
             }
             
-            publishToChannel('transactions', { 
-                type: 'created', 
-                data: transactionResult 
+            // Global broadcast (for SDAO admins)
+            broadcastToPage('transactions', 'transactions:updated', {
+                type: 'created',
+                data: transactionResult
             });
 
-            publishToChannel(`transactions:organization:${eventDetails.organization_id}`, { 
-                type: 'created', 
-                data: transactionResult 
-            });
+            // Org-specific broadcast
+            broadcastToPage('transactions', 'transactions:updated', {
+                type: 'created',
+                data: transactionResult
+            }, eventDetails.organization_id);
             
             status = 'Pending';
 
@@ -387,6 +397,31 @@ async function getSpecificEvent(req, res) {
             });
         }
 
+        // Calculate is_eligible
+        const perms = await userModel.getPermissions(userEmail);
+        const userOrgs = perms?.user_info?.organizations || [];
+        
+        const isGlobal = event.is_open_to === 'Global' || event.is_open_to === 'Public' || event.is_open_to === 'All';
+        const isOrgMember = userOrgs.some((org: any) => 
+            org.organization_id === event.organization_id && 
+            org.permissions && org.permissions.length > 0 // Any permission implies membership, or we can check if it exists
+        );
+        
+        // Let's refine the member check: perms payload resolves permissions. If they have permissions in the org, they are active/member.
+        // Wait, if the user is just a Member, they might not have permissions. Let's check organizationModel's getOrganizations just to be sure!
+        // Actually, let's just make an easy query directly to tbl_organization_members if needed.
+        // To be perfectly safe, let's just query tbl_organization_members:
+        const { prisma } = require('../../config/db');
+        const memberStatus = await prisma.tbl_organization_members.findFirst({
+            where: {
+                organization_id: event.organization_id,
+                user_id: user.user_id,
+                status: 'Active'
+            }
+        });
+        
+        const isEligible = (isGlobal || !!memberStatus) ? 1 : 0;
+        event.is_eligible = isEligible;
 
         const response = {
             event: event,
@@ -609,24 +644,58 @@ async function getEventCertificate(req, res) {
 
 async function scanTicket(req, res) {
     try {
-        const { email, event_id } = req.body;  // Changed from event_title to event_id
+        let email = req.body.email;
+        let event_id = req.body.event_id;
+        const qr_token = req.body.qr_token;
+
+        console.log('[DEBUG scanTicket] INITIAL VALUES:', { email, event_id, qr_token });
+
+        if (qr_token) {
+            try {
+                console.log('[DEBUG scanTicket] VERIFYING QR TOKEN:', qr_token);
+                const decoded = jwt.verify(qr_token, process.env.JWT_SECRET_KEY || 'default_secret');
+                if (decoded.typ !== 'evt_tix') throw new Error('Invalid token type');
+                event_id = decoded.eid;
+                
+                // Fetch the user's email based on the decoded uid
+                const { prisma } = require('../../config/db');
+                const targetUser = await prisma.tbl_user.findUnique({ where: { user_id: decoded.uid } });
+                if (!targetUser) throw new Error('Ticket owner not found');
+                email = targetUser.email;
+                console.log('[DEBUG scanTicket] TOKEN VERIFIED. Email:', email, 'EventID:', event_id);
+            } catch (err) {
+                console.error('[DEBUG scanTicket] TOKEN VERIFY ERROR:', err.message);
+                return res.status(403).json({ message: 'Invalid or forged QR ticket' });
+            }
+        }
+
+        console.log('[DEBUG scanTicket] FINAL VALUES BEFORE VALIDATION:', { email, event_id });
+
+        if (!email || !event_id) {
+            console.log('[DEBUG scanTicket] VALIDATION FAILED! Returning 400.');
+            return res.status(400).json({ message: 'Missing email or event_id' });
+        }
+
         const user = await userModel.getUser(req.user.email);
         console.log('scanTicket: email:', email, 'event_id:', event_id);
 
         const scannedTicket = await eventModel.scanTicket(email, event_id, user.user_id);
         if (!scannedTicket) {
-            return res.status(404).json({ message: 'Ticket not found' });
+            return res.status(404).json({ message: 'Ticket not found or already scanned' });
         }
-        await webEventModel.getAttendeesByEventId(event_id);
+        // Remove broken legacy stored procedure calls
+        // await webEventModel.getAttendeesByEventId(event_id);
+        // const attendees = await webEventModel.getOneEventAttendeesWithDetails(event_id, email);
         
-        const attendees = await webEventModel.getOneEventAttendeesWithDetails(event_id, email);
+        // Use the scannedTicket data directly for broadcasting
         const ch = `attendees_${event_id}`;
-    publishToChannel(ch, {
-      channel: ch,
-      operation: 'UPDATE',
-      data: attendees
-    });
-                emitMobileEventUpdate('events:attendees:changed', {
+        publishToChannel(ch, {
+            channel: ch,
+            operation: 'UPDATE',
+            data: [scannedTicket] // Wrap in array to match old SP format
+        });
+        
+        emitMobileEventUpdate('events:attendees:changed', {
                         operation: 'UPDATE',
                         event_id,
                         source: 'scan-ticket',
@@ -684,30 +753,25 @@ async function getEventPublicationImage(req, res) {
   // Only encode for nginx X-Accel-Redirect path, NOT for physical filesystem path
   const image_name_encoded = encodeURIComponent(finalImageName);
 
-  let xAccelPath;
-  let physicalPath;
+  const baseStoragePath = process.env.STORAGE_BASE_PATH ?? path.resolve(__dirname, '..', '..', 'nuconnect-files');
+  const eventsStoragePath = path.join(baseStoragePath, 'events');
+
+  let physicalPath: string;
 
   if (isSDAO) {
-    // SDAO event: serve from /app/events/SDAO/{event_id}/publication_images/{image_name}
-    xAccelPath = `/protected-events/SDAO/${event_id}/publication_images/${image_name_encoded}`;
-    physicalPath = path.join('/app/events/SDAO', String(event_id), 'publication_images', finalImageName);
+    // SDAO event: serve from [base]/events/SDAO/{event_id}/publication_images/{image_name}
+    physicalPath = path.join(eventsStoragePath, 'SDAO', String(event_id), 'publication_images', finalImageName);
   } else {
-    // Organization event: use the complex path
-    if (!organization_version_id) {
-      return res.status(400).json({
-        error: "Missing required parameter: organization_version_id for organization event"
-      });
-    }
+    // Organization event: use the correct path structure matching web controllers
+    // Structure: [base]/events/[organization_id]/events/[event_id]/publication_images/[image_name]
     physicalPath = path.join(
-      '/app/organizations',
+      eventsStoragePath,
       String(organization_id),
-      String(organization_version_id),
       'events',
       String(event_id),
       'publication_images',
       finalImageName
     );
-    xAccelPath = `/protected-organization-requirements/${organization_id}/${organization_version_id}/events/${event_id}/publication_images/${image_name_encoded}`;
   }
 
   // Log for debugging
@@ -716,7 +780,6 @@ async function getEventPublicationImage(req, res) {
     finalImageName,
     organization_id,
     isSDAO,
-    xAccelPath,
     physicalPath,
     exists: physicalPath ? fs.existsSync(physicalPath) : false
   });
@@ -769,8 +832,9 @@ async function getEventPublicationImage(req, res) {
     res.setHeader('Cache-Control', 'public, max-age=3600, must-revalidate'); // Cache but validate
     res.setHeader('ETag', etag); // Add ETag for cache validation
     res.setHeader('Last-Modified', lastModified); // Add Last-Modified header
-    res.setHeader('X-Accel-Redirect', xAccelPath);
-    res.end();
+    
+    // Serve directly via stream instead of X-Accel-Redirect to support both Nginx and direct node connections
+    fs.createReadStream(physicalPath).pipe(res);
   } catch (error) {
     console.error('getEventPublicationImage error:', error);
     res.status(500).json({

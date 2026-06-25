@@ -7,6 +7,7 @@
 
 import { Request, Response } from 'express';
 import * as publicModel from '../models/publicModel';
+import { broadcastToPage } from '../../services/websocketService';
 
 // ---------------------------------------------------------------------------
 
@@ -73,6 +74,7 @@ export async function handleAddUserApplication(req: Request, res: Response) {
 
   try {
     await publicModel.addUserApplication(email, role, resolvedProgramId, reason, resolvedCollege);
+    broadcastToPage('accounts', 'user-application:created', { email });
     res.status(201).json({ success: true, message: 'Application submitted successfully.' });
   } catch (err: any) {
     if ((err as any).code === 'DUPLICATE') {
