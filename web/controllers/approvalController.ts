@@ -27,6 +27,7 @@ import * as approvalModel from '../models/approvalModel';
 import { broadcastToPage, broadcastToUser, broadcastToOrgDetail } from '../../services/websocketService';
 import { notify, logActivity } from '../../services/notificationAndLogService';
 import { generateApplicationDocuments } from '../../lib/documentGenerator';
+import * as emailService from '../../services/emailService';
 
 const copyFileAsync = promisify(fs.copyFile);
 
@@ -454,6 +455,16 @@ export async function approveApprovalStep(req: Request, res: Response): Promise<
         redirectUrl,
         metaData: { chain_id: chainId, remarks: remarks || null, is_final: chainInfo.is_final_approval },
       }).catch((err) => console.error('[approval] log error:', err));
+
+      // Send approval email if fully approved
+      if (result.organization_created) {
+        emailService.sendOrganizationApprovalEmail(ctx.applicant_email, {
+          name: orgName,
+          application_id: applicationId,
+          approved_date: new Date().toLocaleDateString(),
+          adviser_email: null // Add if you have adviser email
+        }).catch((err: any) => console.error('[email error]', err));
+      }
     }
 
     // After final approval — broadcast applications list update + trigger document generation
@@ -616,6 +627,15 @@ export async function rejectApprovalStep(req: Request, res: Response): Promise<v
         redirectUrl,
         metaData: { chain_id: chainId, reason: reason.trim() },
       }).catch((err) => console.error('[approval] log error:', err));
+
+      // Send rejection email
+      emailService.sendOrganizationRejectionEmail(ctx.applicant_email, {
+        name: orgName,
+        application_id: ctx.application_id,
+        reason: reason.trim(),
+        rejector_name: rejecterName,
+        adviser_email: null
+      }).catch((err: any) => console.error('[email error]', err));
     }
 
     res.status(200).json({

@@ -105,14 +105,17 @@ export async function addAccount(req: Request, res: Response): Promise<void> {
 
   // Azure invite + email (fire-and-forget)
   setImmediate(async () => {
-    const redemptionUrl = await inviteAzureUser(email);
-    if (redemptionUrl) {
-      try {
-        await emailService.sendInvitationEmail(email, redemptionUrl);
-        console.log(`[addAccount] Invitation email sent to ${email}`);
-      } catch (emailErr) {
-        console.error('[addAccount] Email send failed:', (emailErr as Error).message);
-      }
+    let redemptionUrl = await inviteAzureUser(email);
+    // If Azure fails (e.g. user already exists in tenant), provide the base app URL instead
+    if (!redemptionUrl) {
+      redemptionUrl = process.env.VITE_FRONTEND_URL || 'http://localhost:5173/welcome';
+    }
+    
+    try {
+      await emailService.sendInvitationEmail(email, redemptionUrl);
+      console.log(`[addAccount] Invitation email sent to ${email}`);
+    } catch (emailErr) {
+      console.error('[addAccount] Email send failed:', (emailErr as Error).message);
     }
   });
 
@@ -316,14 +319,17 @@ export async function approveUserApplication(req: Request, res: Response): Promi
 
   // Azure invite + email (fire-and-forget)
   setImmediate(async () => {
-    const redemptionUrl = await inviteAzureUser(applicationEmail);
-    if (redemptionUrl) {
-      try {
-        await emailService.sendInvitationEmail(applicationEmail, redemptionUrl);
-        console.log(`[approveApplication] Invitation email sent to ${applicationEmail}`);
-      } catch (emailErr) {
-        console.error('[approveApplication] Email send failed:', (emailErr as Error).message);
-      }
+    let redemptionUrl = await inviteAzureUser(applicationEmail);
+    // If Azure fails (e.g. user already exists in tenant), provide the base app URL instead
+    if (!redemptionUrl) {
+      redemptionUrl = process.env.VITE_FRONTEND_URL || 'http://localhost:5173/welcome';
+    }
+    
+    try {
+      await emailService.sendInvitationEmail(applicationEmail, redemptionUrl);
+      console.log(`[approveApplication] Invitation email sent to ${applicationEmail}`);
+    } catch (emailErr) {
+      console.error('[approveApplication] Email send failed:', (emailErr as Error).message);
     }
   });
 

@@ -214,16 +214,23 @@ async function registerEvent(req, res) {
             let uploadedFileName = null;
             
             // Handle file upload if there's a payment proof file
-            const uploadDir = `/app/organizations/${eventDetails.organization_id}/${eventDetails.organization_version_id}/events/${event_id}/transactions`;
+            // Match the transactionsController directory structure
+            const baseStoragePath = process.env.STORAGE_BASE_PATH ?? path.resolve(__dirname, '..', '..', 'nuconnect-files');
+            const orgToken = eventDetails.organization_id ? String(eventDetails.organization_id) : 'system';
+            const versionToken = eventDetails.organization_version_id ? String(eventDetails.organization_version_id) : 'transactions';
+            const uploadDir = path.join(baseStoragePath, 'organizations', orgToken, versionToken, 'transactions');
+            
             if (!fs.existsSync(uploadDir)) {
                 fs.mkdirSync(uploadDir, { recursive: true });
             }
 
             const ext = path.extname(String(uploadedFile.name || '')).toLowerCase() || '.bin';
-            uploadedFileName = `payment-proof-${Date.now()}-${user.user_id}${ext}`;
+            uploadedFileName = `proof-${Date.now()}-${user.user_id}${ext}`;
             const uploadPath = path.join(uploadDir, uploadedFileName);
             await uploadedFile.mv(uploadPath);
             console.log('File uploaded to:', uploadPath);
+
+            const relativeProofImagePath = path.posix.join('organizations', orgToken, versionToken, 'transactions', uploadedFileName);
 
             const payer = user.f_name + ' ' + user.l_name;
             
@@ -233,7 +240,7 @@ async function registerEvent(req, res) {
                 payer,
                 paidAmount,
                 paymentMethod,
-                uploadedFileName,
+                relativeProofImagePath,
                 event_id,
                 eventDetails.organization_id,
                 eventDetails.organization_version_id

@@ -229,10 +229,22 @@ async function registerEvent(event_id, user_id, status, transaction_id) {
             user_id,
             deleted_at: null,
         },
-        select: { attendance_id: true },
+        select: { attendance_id: true, status: true },
     });
 
-    if (existing) return null;
+    if (existing) {
+        if (existing.status === 'Rejected') {
+            return prisma.tbl_event_attendance.update({
+                where: { attendance_id: existing.attendance_id },
+                data: {
+                    transaction_id: transaction_id ? Number(transaction_id) : null,
+                    status: status || 'Registered',
+                    updated_at: new Date(),
+                },
+            });
+        }
+        return null;
+    }
 
     const created = await prisma.tbl_event_attendance.create({
         data: {
@@ -274,6 +286,7 @@ async function checkEventRegistration(event_id, user_id) {
             event_id: Number(event_id),
             user_id,
             deleted_at: null,
+            status: { not: 'Rejected' },
         },
         select: {
             attendance_id: true,
@@ -532,12 +545,18 @@ async function getEvaluation(event_id) {
         orderBy: { group_id: 'asc' },
     });
 
-    return groups.map((row) => ({
+    const form = groups.map((row) => ({
         group_id: row.tbl_evaluation_question_group?.group_id,
         group_title: row.tbl_evaluation_question_group?.group_title || '',
         group_description: row.tbl_evaluation_question_group?.group_description || null,
         questions: row.tbl_evaluation_question_group?.tbl_evaluation_question || [],
     }));
+
+    return [
+        {
+            evaluation_form: form,
+        }
+    ];
 }
 
 async function submitEvaluation(response) {
@@ -554,11 +573,18 @@ async function submitEvaluation(response) {
             user_id = user?.user_id;
         }
     }
-    const responses = Array.isArray(response?.responses)
+    let responses = Array.isArray(response?.responses)
         ? response.responses
         : Array.isArray(response?.answers)
             ? response.answers
             : [];
+
+    if (Array.isArray(response?.likert_scale)) {
+        responses = responses.concat(response.likert_scale);
+    }
+    if (Array.isArray(response?.text_answers)) {
+        responses = responses.concat(response.text_answers);
+    }
 
     if (!event_id || !user_id || !responses.length) {
         throw new Error('Invalid evaluation payload');
@@ -577,7 +603,7 @@ async function submitEvaluation(response) {
         .map((entry) => {
             const question_id = Number(entry.question_id || entry.questionId);
             if (!question_id) return null;
-            const value = entry.response_value ?? entry.responseValue ?? entry.value ?? '';
+            const value = entry.response_value ?? entry.responseValue ?? entry.value ?? entry.answer ?? '';
             return {
                 evaluation_id: evaluation.evaluation_id,
                 question_id,

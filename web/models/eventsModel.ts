@@ -376,6 +376,7 @@ export interface EventAttendee {
   full_name: string;
   email: string;
   attendance_status: string;
+  transaction_id: number | null;
   transaction_status: string | null;
   registration_date: Date | null;
 }
@@ -507,7 +508,17 @@ export async function getEventById(eventId: number): Promise<EventDetail | null>
           time_out: true,
           tbl_user: { select: { f_name: true, l_name: true, email: true } },
           tbl_transaction: {
-            select: { status: true },
+            select: { 
+              transaction_id: true,
+              status: true,
+              proof_image: true,
+              amount: true,
+              tbl_transaction_type: {
+                select: { label: true }
+              },
+              created_at: true,
+              updated_at: true
+            },
           },
         },
       },

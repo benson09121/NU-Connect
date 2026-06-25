@@ -1416,34 +1416,42 @@ async function resendInvitationEmail(email) {
       where: { email, status: 'Approved', archived_at: null }
     });
 
-    if (!user && !approvedApplication) {
-      throw new Error('User not found in the system or no approved application exists');
+    const isPendingUser = user && user.status === 'Pending' && user.archived_at === null;
+    const isApprovedApplication = approvedApplication !== null;
+
+    if (!isPendingUser && !isApprovedApplication) {
+      throw new Error('User must either be Pending in accounts, or have an Approved, unarchived application.');
     }
-    
-    // Allow resending to pending users specifically or approved applications
-    if (user && user.status !== 'Pending') {
-      throw new Error('Can only resend invitations to users with Pending status');
+
+    // If they exist in tbl_user, they MUST be Pending and NOT archived.
+    if (user && (user.status !== 'Pending' || user.archived_at !== null)) {
+      throw new Error('Cannot resend invitation to a user who is already Active or Archived in the system.');
     }
 
     // Get new access token
     const token = await getAccessToken(cca);
 
-    // Create new invitation with fresh redemption URL
-    const response = await axios.post(
-      "https://graph.microsoft.com/v1.0/invitations",
-      {
-        invitedUserEmailAddress: email,
-        inviteRedirectUrl: process.env.AZURE_REDIRECT_URL,
-        sendInvitationMessage: false // We'll send our custom email
-      },
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
+    let redemptionUrl = null;
+    try {
+      // Create new invitation with fresh redemption URL
+      const response = await axios.post(
+        "https://graph.microsoft.com/v1.0/invitations",
+        {
+          invitedUserEmailAddress: email,
+          inviteRedirectUrl: process.env.AZURE_REDIRECT_URL,
+          sendInvitationMessage: false // We'll send our custom email
+        },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      redemptionUrl = response.data.inviteRedeemUrl;
+      console.log(`🔄 Generated new redemption URL for ${email}`);
 
-    const redemptionUrl = response.data.inviteRedeemUrl;
-    console.log(`🔄 Generated new redemption URL for ${email}`);
-
-    // Optional: Update user record with new redemption URL
-    await userModel.updateRedemptionUrl(email, redemptionUrl);
+      // Optional: Update user record with new redemption URL
+      await userModel.updateRedemptionUrl(email, redemptionUrl);
+    } catch (graphError) {
+      console.error(`[resendInvitationEmail] Azure invite failed for ${email}:`, graphError.message);
+      redemptionUrl = process.env.VITE_FRONTEND_URL || 'http://localhost:5173/welcome';
+    }
 
     // Send custom invitation email with isResend flag
     const emailResult = await sendInvitationEmail(email, redemptionUrl, true);

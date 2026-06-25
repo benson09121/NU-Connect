@@ -46,7 +46,13 @@ export async function register(req: Request, res: Response): Promise<void> {
 
     const redemptionUrl = response.data.inviteRedeemUrl;
     console.log(redemptionUrl);
-    await sendInvitationEmail(email, redemptionUrl);
+    const emailResult = await sendInvitationEmail(email, redemptionUrl);
+
+    if (emailResult && !emailResult.success) {
+      console.error('[register] Failed to send email:', emailResult.error || emailResult.message);
+      res.status(500).json({ error: 'Failed to send invitation email: ' + (emailResult.error || emailResult.message) });
+      return;
+    }
 
     res.status(200).json({ message: 'Custom invitation sent' });
   } catch (error: any) {

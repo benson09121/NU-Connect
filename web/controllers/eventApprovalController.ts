@@ -18,6 +18,7 @@ import fs from 'fs';
 import * as model from '../models/eventApprovalModel';
 import { broadcastToPage, broadcastGlobal } from '../../services/websocketService';
 import { notify, logActivity } from '../../services/notificationAndLogService';
+import * as emailService from '../../services/emailService';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -192,7 +193,9 @@ export async function approveEventApplicationStep(req: Request, res: Response): 
         where: { event_application_id: eventApplicationId },
         select: {
           applicant_user_id: true,
-          tbl_event: { select: { title: true, event_id: true } },
+          tbl_event: { select: { title: true, event_id: true, start_date: true } },
+          tbl_renewal_cycle: { select: { tbl_organization: { select: { name: true } } } },
+          tbl_user: { select: { email: true } }
         },
       });
 
@@ -258,6 +261,17 @@ export async function approveEventApplicationStep(req: Request, res: Response): 
           try {
             broadcastGlobal('upcoming-events:updated', { eventApplicationId });
           } catch (_) {}
+
+          // Send fully approved email
+          if (evApp?.tbl_user?.email) {
+            emailService.sendEventApprovalEmail(evApp.tbl_user.email, {
+              title: eventTitle,
+              event_id: proposedEventId,
+              start_date: evApp.tbl_event?.start_date ? new Date(evApp.tbl_event.start_date).toLocaleDateString() : 'TBD',
+              organization_name: evApp.tbl_renewal_cycle?.tbl_organization?.name ?? 'Your Organization',
+              adviser_email: null
+            }).catch(err => console.error('[email error]', err));
+          }
         } else if (nextPendingStep) {
           // Notify president — step approved, moving to next reviewer
           await notify({
@@ -345,6 +359,8 @@ export async function rejectEventApplicationStep(req: Request, res: Response): P
         select: {
           applicant_user_id: true,
           tbl_event: { select: { title: true, event_id: true } },
+          tbl_renewal_cycle: { select: { tbl_organization: { select: { name: true } } } },
+          tbl_user: { select: { email: true } }
         },
       });
 
@@ -363,6 +379,16 @@ export async function rejectEventApplicationStep(req: Request, res: Response): P
           entityId: eventApplicationId,
           redirectUrl: `/events/event-approval/${proposedEventId}/${encodeURIComponent(eventTitle)}`,
         });
+
+        if (evApp?.tbl_user?.email) {
+          emailService.sendEventRejectionEmail(evApp.tbl_user.email, {
+            title: eventTitle,
+            event_id: proposedEventId,
+            reason: comment || 'No reason provided',
+            organization_name: evApp.tbl_renewal_cycle?.tbl_organization?.name ?? 'Your Organization',
+            adviser_email: null
+          }).catch(err => console.error('[email error]', err));
+        }
       }
 
       await logActivity({

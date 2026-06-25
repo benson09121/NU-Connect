@@ -107,7 +107,7 @@ export async function getOfficers(orgVersionId: number) {
 
 export async function getMembers(orgVersionId: number) {
   const rows = await prisma.tbl_organization_members.findMany({
-    where: { org_version_id: orgVersionId, member_type: 'Member' },
+    where: { org_version_id: orgVersionId, member_type: 'Member', status: 'Active' },
     select: {
       member_id: true,
       status: true,
@@ -211,7 +211,7 @@ export async function getCommitteeMembers(orgId: number, cycleNumber: number) {
 // 5. Pending membership applications
 // ---------------------------------------------------------------------------
 
-export async function getPendingApplications(orgId: number, cycleNumber: number) {
+export async function getPendingApplications(orgId: number, cycleNumber: number, orgVersionId?: number) {
   const rows = await prisma.tbl_membership_application.findMany({
     where: {
       organization_id: orgId,
@@ -221,30 +221,91 @@ export async function getPendingApplications(orgId: number, cycleNumber: number)
     select: {
       application_id: true,
       applied_at: true,
+      status: true,
+      user_id: true,
       tbl_user_tbl_membership_application_user_idTotbl_user: {
         select: {
           f_name: true,
           l_name: true,
           email: true,
+          profile_picture: true,
           tbl_program_tbl_user_program_idTotbl_program: {
             select: { name: true },
           },
         },
       },
+      tbl_membership_response: {
+        select: {
+          response_id: true,
+          response_value: true,
+          tbl_membership_question: {
+            select: {
+              question_text: true,
+              is_required: true,
+            }
+          }
+        }
+      }
     },
     orderBy: { applied_at: 'asc' },
   });
 
+  // We need to fetch transactions for these users manually if relation is hard to query
+  // tbl_transaction has user_id and org_version_id
+  const userIds = rows.map(r => r.user_id);
+  
+  let transactions = [];
+  let orgVersion = null;
+  
+  if (orgVersionId) {
+    transactions = await prisma.tbl_transaction.findMany({
+      where: {
+        user_id: { in: userIds },
+        tbl_transaction_membership: {
+          organization_id: orgId,
+          cycle_number: cycleNumber
+        }
+      },
+      orderBy: { transaction_date: 'desc' }
+    });
+    
+    orgVersion = await prisma.tbl_organization_version.findUnique({
+      where: { org_version_id: orgVersionId },
+      select: { membership_fee_type: true, membership_fee_amount: true }
+    });
+  }
+
   return rows.map((r) => {
     const u = r.tbl_user_tbl_membership_application_user_idTotbl_user;
+    
+    // Find the most recent membership transaction for this user
+    const tx = transactions.find(t => t.user_id === r.user_id);
+    
     return {
       application_id: r.application_id,
+      name: `${u.f_name || ''} ${u.l_name || ''}`.trim(),
       f_name: u.f_name ?? null,
       l_name: u.l_name ?? null,
       email: u.email,
-      program_name:
-        u.tbl_program_tbl_user_program_idTotbl_program?.name ?? null,
-      submitted_at: r.applied_at?.toISOString() ?? null,
+      profile_picture: u.profile_picture,
+      program_name: u.tbl_program_tbl_user_program_idTotbl_program?.name ?? null,
+      applied_at: r.applied_at?.toISOString() ?? null,
+      status: r.status,
+      member_type: 'Member',
+      
+      // Payment details
+      membership_fee_type: orgVersion?.membership_fee_type ?? 'Free',
+      membership_fee_amount: orgVersion?.membership_fee_amount ?? null,
+      payment_status: tx ? tx.status : null,
+      proof_image: tx ? tx.proof_image : null,
+      
+      // Responses
+      application_responses: r.tbl_membership_response.map(resp => ({
+        response_id: resp.response_id,
+        question_text: resp.tbl_membership_question?.question_text,
+        is_required: resp.tbl_membership_question?.is_required ? 1 : 0,
+        response_value: resp.response_value
+      }))
     };
   });
 }

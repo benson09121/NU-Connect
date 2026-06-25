@@ -181,8 +181,8 @@ router.get('/organizations/:organizationId/details', validateAzureJWT, getOrgDet
 // Change adviser mid-year
 router.patch('/organizations/:orgId/adviser', validateAzureJWT, changeAdviser);
 
-// Programs (colleges + academic programs) — mounted at /programs, not /organizations
-router.get('/programs', validateAzureJWT, listPrograms);
+// Programs (colleges + academic programs) — mounted at /organizations/programs
+router.get('/organizations/programs', validateAzureJWT, listPrograms);
 
 // Org detail REST endpoints — must live before the generic logo route
 router.get('/organizations/:orgId/dashboard',          validateAzureJWT, getOrgDashboardHandler);
