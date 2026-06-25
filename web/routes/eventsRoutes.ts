@@ -138,6 +138,15 @@ router.post('/events/check-schedule-conflict', validateAzureJWT, hasAnyPermissio
 // POST /api/web/events-SDAO  — create SDAO event (multipart/form-data)
 router.post('/events-SDAO', validateAzureJWT, hasPermission('CREATE_SDAO_EVENT'), ctrl.createSDAOEvent);
 
+// PUT /api/web/events/:eventId/sdao-update
+router.put('/events/:eventId/sdao-update', validateAzureJWT, hasPermission('CREATE_SDAO_EVENT'), ctrl.updateSDAOEvent);
+
+// POST /api/web/events/sdao-archive
+router.post('/events/sdao-archive', validateAzureJWT, hasPermission('CREATE_SDAO_EVENT'), ctrl.archiveEventSDAO);
+
+// POST /api/web/events/sdao-unarchive
+router.post('/events/sdao-unarchive', validateAzureJWT, hasPermission('CREATE_SDAO_EVENT'), ctrl.unarchiveEventSDAO);
+
 // POST /api/web/event-applications  — student org event application (multipart/form-data)
 router.post('/event-applications', validateAzureJWT, hasPermission('CREATE_EVENT'), ctrl.createEventApplication);
 

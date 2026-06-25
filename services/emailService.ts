@@ -244,7 +244,7 @@ async function diagnoseEmailDelivery(recipient) {
   // Check 2: SMTP Connection
   console.log('\n2. SMTP Connection Test:');
   try {
-    await transporter.verify();
+    await tp.verify();
     console.log('   ✅ SMTP connection successful');
   } catch (error) {
     console.log('   ❌ SMTP connection failed:', error.message);

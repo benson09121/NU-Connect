@@ -378,13 +378,7 @@ export interface EventAttendee {
   attendance_status: string;
   transaction_id: number | null;
   transaction_status: string | null;
-  proof_image: string | null;
-  amount: number | null;
-  transaction_type: string | null;
-  transaction_created_at: Date | null;
   registration_date: Date | null;
-  time_in: Date | null;
-  time_out: Date | null;
 }
 
 export interface EventStats {
@@ -394,6 +388,7 @@ export interface EventStats {
   attendanceRate: number;
   evaluationRate: number;
   averageRating: number;
+  avgFeedbackTime?: string;
   totalPaidRevenue: number;
 }
 
@@ -509,7 +504,6 @@ export async function getEventById(eventId: number): Promise<EventDetail | null>
           user_id: true,
           status: true,
           created_at: true,
-          updated_at: true,
           time_in: true,
           time_out: true,
           tbl_user: { select: { f_name: true, l_name: true, email: true } },
@@ -531,6 +525,7 @@ export async function getEventById(eventId: number): Promise<EventDetail | null>
       // Evaluations for stats
       tbl_evaluation: {
         select: {
+          duration_seconds: true,
           tbl_evaluation_response: {
             select: { response_value: true },
           },
@@ -560,30 +555,15 @@ export async function getEventById(eventId: number): Promise<EventDetail | null>
       ?.tbl_organization_version_tbl_organization_current_org_version_idTotbl_organization_version;
 
   // Build attendees
-  const attendees: EventAttendee[] = event.tbl_event_attendance.map((a) => {
-    // If it's a paid event with a transaction that has been processed (not Pending),
-    // the registration date is when the transaction was updated (approved).
-    // Otherwise, we use the attendance created_at.
-    const isProcessedTransaction = a.tbl_transaction && a.tbl_transaction.status !== 'Pending';
-    const registrationDate = isProcessedTransaction ? a.tbl_transaction.updated_at : a.created_at;
-
-    return {
-      attendance_id: a.attendance_id,
-      user_id: a.user_id,
-      full_name: `${a.tbl_user?.f_name ?? ''} ${a.tbl_user?.l_name ?? ''}`.trim(),
-      email: a.tbl_user?.email ?? '',
-      attendance_status: a.status,
-      transaction_id: a.tbl_transaction?.transaction_id ?? null,
-      transaction_status: a.tbl_transaction?.status ?? null,
-      proof_image: typeof a.tbl_transaction?.proof_image === 'string' ? a.tbl_transaction.proof_image : null,
-      amount: a.tbl_transaction?.amount ? Number(a.tbl_transaction.amount) : null,
-      transaction_type: a.tbl_transaction?.tbl_transaction_type?.label ?? null,
-      transaction_created_at: a.tbl_transaction?.created_at ?? null,
-      registration_date: registrationDate || a.created_at,
-      time_in: a.time_in ?? null,
-      time_out: a.time_out ?? null,
-    };
-  });
+  const attendees: EventAttendee[] = event.tbl_event_attendance.map((a) => ({
+    attendance_id: a.attendance_id,
+    user_id: a.user_id,
+    full_name: `${a.tbl_user?.f_name ?? ''} ${a.tbl_user?.l_name ?? ''}`.trim(),
+    email: a.tbl_user?.email ?? '',
+    attendance_status: a.status,
+    transaction_status: a.tbl_transaction?.status ?? null,
+    registration_date: a.created_at,
+  }));
 
   // Build stats
   const totalRegistered = event.tbl_event_attendance.filter((a) =>
@@ -610,6 +590,15 @@ export async function getEventById(eventId: number): Promise<EventDetail | null>
     allResponseValues.length > 0
       ? Math.round((allResponseValues.reduce((s, v) => s + v, 0) / allResponseValues.length) * 100) / 100
       : 0;
+
+  // Average feedback time
+  const allDurations = event.tbl_evaluation.map((e) => e.duration_seconds).filter((d) => d !== null);
+  const avgDurationSeconds = allDurations.length > 0 
+    ? allDurations.reduce((s, v) => s + (v ?? 0), 0) / allDurations.length 
+    : 0;
+  const avgFeedbackTime = avgDurationSeconds > 0 
+    ? `${Math.floor(avgDurationSeconds / 60)}m ${Math.round(avgDurationSeconds % 60)}s` 
+    : "N/A";
 
   // Total paid revenue — sum Approved transactions for this event
   const paidRevenue = await prisma.tbl_transaction.aggregate({
@@ -676,6 +665,7 @@ export async function getEventById(eventId: number): Promise<EventDetail | null>
       attendanceRate,
       evaluationRate,
       averageRating,
+      avgFeedbackTime,
       totalPaidRevenue,
     },
   };
@@ -2029,4 +2019,17 @@ export async function deleteCertificateTemplateByEventId(eventId: number) {
 
   await prisma.tbl_certificate_template.delete({ where: { event_id: eventId } });
   return existing.template_path;
+}
+export async function archiveSDAOEvent(eventId: number, userEmail: string | null, reason: string | null): Promise<void> {
+  await prisma.tbl_event.update({
+    where: { event_id: eventId },
+    data: { status: 'Archived' as any },
+  });
+}
+
+export async function unarchiveSDAOEvent(eventId: number, userEmail: string | null, reason: string | null): Promise<void> {
+  await prisma.tbl_event.update({
+    where: { event_id: eventId },
+    data: { status: 'Approved' as any }, // SDAO events revert to Approved typically
+  });
 }
